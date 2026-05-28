@@ -1,0 +1,40 @@
+{
+  "_comment": "Copy to settings.json (gitignored) and fill in. Never commit real credentials.",
+  "_mail_server_note": "Host confirmed from materials-costing config: mail.lindoservico.pt (provider mail.pt). SMTP runs on 587/STARTTLS; IMAP is normally 993/SSL on the same host. Verify the IMAP port with the provider before first run.",
+  "imap": {
+    "host": "mail.lindoservico.pt",
+    "port": 993,
+    "use_ssl": true,
+    "read_only": true,
+    "mailbox": "INBOX",
+    "accounts": [
+      {
+        "id": "geral",
+        "username": "geral@lindoservico.pt",
+        "password_env": "EMAIL2DATA_GERAL_PASSWORD"
+      },
+      {
+        "id": "cost-manager",
+        "username": "cost-manager@lindoservico.pt",
+        "password_env": "EMAIL2DATA_COSTMANAGER_PASSWORD"
+      }
+    ]
+  },
+  "fetch": {
+    "since_days": 30,
+    "max_messages": 200
+  },
+  "claude": {
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 1024,
+    "max_retries": 5,
+    "ignore_confidence_floor": 0.85
+  },
+  "paths": {
+    "corpus_dir": "corpus",
+    "out_dir": "out",
+    "playbook": "config/triage_playbook.md",
+    "audit_log": "out/audit.jsonl"
+  }
+}

@@ -1,0 +1,28 @@
+[project]
+name = "email2data"
+version = "0.1.0"
+description = "Read-only email triage: scan Lindo inboxes, classify type + urgency with Claude, surface a prioritized decision queue."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+email2data = "email2data.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

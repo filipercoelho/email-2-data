@@ -10,9 +10,17 @@
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
 
 # Node
 node_modules/
 
 # Logs
 *.log
+
+# Secrets & local data — never commit
+config/settings.json
+labels/labels.csv
+corpus/*.eml
+out/*.jsonl
+out/audit.jsonl
