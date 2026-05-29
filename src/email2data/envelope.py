@@ -23,9 +23,13 @@ def _decode_header(value: str | None) -> str:
     if not value:
         return ""
     parts = []
-    for chunk, enc in decode_header(value):
+    for chunk, enc in decode_header(str(value)):
         if isinstance(chunk, bytes):
-            parts.append(chunk.decode(enc or "utf-8", errors="replace"))
+            try:
+                parts.append(chunk.decode(enc or "utf-8", errors="replace"))
+            except (LookupError, ValueError):
+                # bogus/unknown charset label (e.g. "unknown-8bit") — fall back, never raise
+                parts.append(chunk.decode("utf-8", errors="replace"))
         else:
             parts.append(chunk)
     return "".join(parts).strip()
@@ -75,7 +79,7 @@ def _extract_body(msg: Message) -> tuple[str, bool]:
         if part.is_multipart():
             continue
         ctype = part.get_content_type()
-        disp = (part.get("Content-Disposition") or "").lower()
+        disp = str(part.get("Content-Disposition") or "").lower()
         if "attachment" in disp:
             continue
         if ctype == "text/plain":
@@ -96,7 +100,7 @@ def _extract_body(msg: Message) -> tuple[str, bool]:
 def _attachments(msg: Message) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for part in msg.walk():
-        disp = (part.get("Content-Disposition") or "").lower()
+        disp = str(part.get("Content-Disposition") or "").lower()
         filename = part.get_filename()
         if "attachment" not in disp and not filename:
             continue
@@ -134,12 +138,12 @@ def parse_eml(raw: bytes) -> dict[str, Any]:
     return {
         "message_id": canonical_id(msg.get("Message-ID"), raw),
         "subject": _decode_header(msg.get("Subject")),
-        "from": _addr(msg.get("From")),
-        "to": _addr_list(msg.get("To")),
-        "cc": _addr_list(msg.get("Cc")),
+        "from": _addr(str(msg.get("From") or "")),
+        "to": _addr_list(str(msg.get("To") or "")),
+        "cc": _addr_list(str(msg.get("Cc") or "")),
         "date": _date_iso(msg),
-        "in_reply_to": (msg.get("In-Reply-To") or "").strip() or None,
-        "references": _references(msg.get("References")),
+        "in_reply_to": str(msg.get("In-Reply-To") or "").strip() or None,
+        "references": _references(str(msg.get("References") or "")),
         "body_text": body_text,
         "has_html": has_html,
         "attachments": _attachments(msg),

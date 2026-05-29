@@ -35,3 +35,16 @@ def test_html_only_is_stripped_to_text():
 def test_body_is_truncated():
     big = b"Subject: x\r\nMessage-ID: <big@b>\r\n\r\n" + b"a" * (MAX_BODY_CHARS + 5000)
     assert len(parse_eml(big)["body_text"]) <= MAX_BODY_CHARS
+
+
+def test_bogus_charset_does_not_raise():
+    # Real mail in the wild declares unknown charsets (e.g. "unknown-8bit"). Must not crash.
+    raw = (
+        b"Subject: =?unknown-8bit?Q?Encomenda?=\r\n"
+        b"From: Fornecedor <f@x.pt>\r\nMessage-ID: <u@x>\r\n"
+        b"Content-Type: text/plain; charset=unknown-8bit\r\n\r\n"
+        b"Ol\xe1, segue a encomenda.\r\n"
+    )
+    env = parse_eml(raw)
+    assert env["subject"] == "Encomenda"
+    assert "encomenda" in env["body_text"].lower()
