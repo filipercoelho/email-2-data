@@ -21,6 +21,7 @@ node_modules/
 # Secrets & local data — never commit
 config/settings.json
 labels/labels.csv
+labels/worksheet.csv
 corpus/*.eml
 out/*.jsonl
 out/audit.jsonl

@@ -49,7 +49,12 @@ Status: ✅ done · 🔄 in progress · ⬜ planned (scaffolded = contracts exis
 - Verdict cache (content hash) for repeat / templated mail.
 - Exemplar retrieval (embeddings) for few-shot on hard cases.
 - Human-correction loop updates reputation + exemplars.
-**Exit:** measurable accuracy lift + token drop from reuse; corrections persist across runs.
+- **Dynamic, thread-aware priority:** priority is not static. An outbound request we're awaiting a
+  reply on **starts LOW and escalates with days-without-response**; thread/relationship state (who
+  owes the next reply, how long it's been) is a first-class input. Uses `thread_state` + timers
+  (the draft's SLA/staleness). "The relationship between emails is critical."
+**Exit:** measurable accuracy lift + token drop from reuse; corrections persist; priority reflects
+elapsed time on awaited threads.
 
 ## Phase 5 — Token minimization ⬜
 

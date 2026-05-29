@@ -35,13 +35,18 @@ TYPES = [
 # Types for which IGNORE priority is coherent. The classifier forces any other type away from
 # IGNORE (see classifier coherence check) — a client request can never be "ignore".
 IGNORABLE_TYPES = {"PUBLICITY", "OTHER"}
-PRIORITIES = ["HIGH", "MEDIUM", "IGNORE", "NEEDS_REVIEW"]
+PRIORITIES = ["HIGH", "MEDIUM", "LOW", "IGNORE", "NEEDS_REVIEW"]
 
 # --- Phase 2+ axes (cascade). counterparty + purpose come from the BODY; direction from HEADERS. ---
-COUNTERPARTY = ["CLIENT", "SUPPLIER", "INTERNAL", "BULK", "OTHER"]
+# Counterparty is ALWAYS from Lindo's point of view:
+#   CLIENT   = buys from us (revenue).   LEAD = prospective client, not yet buying.
+#   SUPPLIER = we buy from them (cost) — incl. service/tool vendors (e.g. the invoicing platform).
+#   "we are the client of X"  =>  X is a SUPPLIER to us.
+COUNTERPARTY = ["CLIENT", "LEAD", "SUPPLIER", "INTERNAL", "BULK", "OTHER"]
 PURPOSE = [
     "PO_FROM_CLIENT",
     "ESTIMATE_REQUEST_FROM_CLIENT",
+    "OUTBOUND_INVOICE",  # invoice WE issue to a client (counterparty stays CLIENT)
     "OUR_ORDER_TO_SUPPLIER",
     "SUPPLIER_REPLY_OR_CONFIRMATION",
     "INVOICE_OR_ACCOUNTING",
@@ -51,6 +56,9 @@ PURPOSE = [
     "OTHER",
 ]
 DIRECTION = ["inbound", "internal", "outbound"]  # who SENT this message (header fact)
+# Priority is partly DYNAMIC: an outbound request we're awaiting a reply on starts LOW and escalates
+# with days-without-response (needs thread_state + timers — see ROADMAP Phase 4).
+PRIORITIES_DYNAMIC_NOTE = "LOW escalates over time for awaited outbound requests"
 
 
 @dataclass
