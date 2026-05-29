@@ -11,10 +11,17 @@ doc before changing anything.
 
 ## Docs
 
-- **Approach (read this first):** [design/approach.md](design/approach.md) — what we build now, the
-  non-negotiables, and what's deliberately postponed.
+- **Vision (the north star):** [VISION.md](VISION.md) — what this is and the governing principle.
+- **Roadmap (where we are / next):** [ROADMAP.md](ROADMAP.md) — phased plan and status.
+- **Approach (engineering detail):** [design/approach.md](design/approach.md) — what we build now,
+  the non-negotiables, and what's deliberately postponed.
 - Long-term architecture: [design/draft-architectural-report.md](design/draft-architectural-report.md)
 - The classifier brain (editable): [config/triage_playbook.md](config/triage_playbook.md)
+
+## Architecture modules (Phase 2/3 scaffolded — contracts, not yet implemented)
+
+`signals.py` (Tier-0 direction/bulk) · `forwarding.py` (mine forwarded originals) ·
+`store.py` (SQLite knowledge store) · `cascade.py` (Tier 0→1→2 cost-tiered router). See ROADMAP.
 
 ## Quick start (once implemented)
 

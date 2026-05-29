@@ -37,6 +37,21 @@ TYPES = [
 IGNORABLE_TYPES = {"PUBLICITY", "OTHER"}
 PRIORITIES = ["HIGH", "MEDIUM", "IGNORE", "NEEDS_REVIEW"]
 
+# --- Phase 2+ axes (cascade). counterparty + purpose come from the BODY; direction from HEADERS. ---
+COUNTERPARTY = ["CLIENT", "SUPPLIER", "INTERNAL", "BULK", "OTHER"]
+PURPOSE = [
+    "PO_FROM_CLIENT",
+    "ESTIMATE_REQUEST_FROM_CLIENT",
+    "OUR_ORDER_TO_SUPPLIER",
+    "SUPPLIER_REPLY_OR_CONFIRMATION",
+    "INVOICE_OR_ACCOUNTING",
+    "FOLLOW_UP",
+    "PUBLICITY",
+    "INTERNAL_OPS",
+    "OTHER",
+]
+DIRECTION = ["inbound", "internal", "outbound"]  # who SENT this message (header fact)
+
 
 @dataclass
 class Entities:
@@ -61,6 +76,12 @@ class TriageResult:
     # provenance (filled by caller, not the model)
     subject: str = ""
     from_addr: str = ""
+    # Phase 2+ axes (default empty so Phase-0/1 verdicts remain valid). counterparty/purpose from the
+    # body; direction from headers; decided_by records which cascade tier/engine produced this.
+    counterparty: str = ""
+    purpose: str = ""
+    direction: str = ""
+    decided_by: str = ""  # e.g. "tier0:rule", "tier1:gemini-2.5-flash", "tier2:gemini-2.5-pro"
 
     def to_dict(self) -> dict:
         return asdict(self)
