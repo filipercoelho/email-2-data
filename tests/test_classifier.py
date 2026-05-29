@@ -1,67 +1,69 @@
-"""Classifier tests with a fake Anthropic client — no network, no API key."""
+"""Classifier: coercion/guardrail (provider-agnostic) + Gemini path incl. retry-on-empty."""
 
+import json
 from types import SimpleNamespace
 
-from email2data.classifier import classify
+from email2data.classifier import _coerce, classify
+from email2data.signals import Signals
 
-PLAYBOOK = "test playbook"
-SETTINGS = {"llm": {"provider": "anthropic", "model": "x", "max_tokens": 256, "ignore_confidence_floor": 0.85}}
-ENV = {"message_id": "mid:x@y", "subject": "s", "from": {"email": "a@b.pt"}, "attachments": []}
-
-
-class FakeClient:
-    """Returns a canned tool_use block, capturing the create() kwargs for assertions."""
-
-    def __init__(self, tool_input):
-        self._input = tool_input
-        self.kwargs = None
-        self.messages = SimpleNamespace(create=self._create)
-
-    def _create(self, **kwargs):
-        self.kwargs = kwargs
-        block = SimpleNamespace(type="tool_use", name="record_triage", input=self._input)
-        return SimpleNamespace(content=[block])
+ENV = {"message_id": "mid:x@y", "subject": "s", "from": {"email": "a@b.pt"},
+       "date": "2026-05-27", "attachments": [], "body_text": "corpo"}
+SIG = Signals(sender_domain="b.pt", direction="inbound", is_bulk=False, is_automated=False, is_forward=False)
+SETTINGS = {"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash",
+                    "max_tokens": 256, "max_retries": 3, "ignore_confidence_floor": 0.85}}
 
 
-def _verdict(**over):
-    base = {"type": "CLIENT_JOB_REQUEST", "priority": "HIGH", "urgency": 80,
-            "confidence": 0.9, "reason": "r", "entities": {}}
+def _raw(**over):
+    base = {"counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT",
+            "urgency": 80, "confidence": 0.9, "reason": "r", "entities": {}}
     base.update(over)
     return base
 
 
-def test_happy_path_maps_fields():
-    r = classify(ENV, PLAYBOOK, FakeClient(_verdict()), SETTINGS)
-    assert r.type == "CLIENT_JOB_REQUEST" and r.priority == "HIGH" and r.urgency == 80
-    assert r.message_id == "mid:x@y" and r.subject == "s" and r.from_addr == "a@b.pt"
+def test_coerce_happy_path_derives_priority_and_direction():
+    r = _coerce(_raw(), ENV, SIG, 0.85)
+    assert r.counterparty == "CLIENT" and r.purpose == "ESTIMATE_REQUEST_FROM_CLIENT"
+    assert r.priority == "HIGH"            # client -> HIGH (derived)
+    assert r.direction == "inbound"        # set from signals, not the model
+    assert r.message_id == "mid:x@y" and r.from_addr == "a@b.pt"
 
 
-def test_incoherent_ignore_on_client_is_downgraded():
-    # The costly bug: a real client marked IGNORE, even with high confidence -> must become review.
-    r = classify(ENV, PLAYBOOK, FakeClient(_verdict(priority="IGNORE", confidence=0.99)), SETTINGS)
-    assert r.priority == "NEEDS_REVIEW"
-    assert "guardrail" in r.reason
+def test_coerce_low_confidence_bulk_is_downgraded_to_review():
+    r = _coerce(_raw(counterparty="BULK", purpose="PUBLICITY", urgency=5, confidence=0.5), ENV, SIG, 0.85)
+    assert r.priority == "NEEDS_REVIEW" and "guardrail" in r.reason
 
 
-def test_low_confidence_ignore_on_publicity_is_downgraded():
-    r = classify(ENV, PLAYBOOK, FakeClient(_verdict(type="PUBLICITY", priority="IGNORE", confidence=0.5)), SETTINGS)
-    assert r.priority == "NEEDS_REVIEW"
-
-
-def test_confident_publicity_ignore_is_kept():
-    r = classify(ENV, PLAYBOOK, FakeClient(_verdict(type="PUBLICITY", priority="IGNORE", urgency=5, confidence=0.95)), SETTINGS)
+def test_coerce_confident_bulk_is_ignored():
+    r = _coerce(_raw(counterparty="BULK", purpose="PUBLICITY", urgency=5, confidence=0.95), ENV, SIG, 0.85)
     assert r.priority == "IGNORE"
 
 
-def test_out_of_range_values_clamped_and_enums_validated():
-    r = classify(ENV, PLAYBOOK, FakeClient(_verdict(type="BOGUS", priority="??", urgency=999, confidence=5)), SETTINGS)
-    assert r.type == "OTHER" and r.priority == "NEEDS_REVIEW"
+def test_coerce_validates_enums_and_clamps():
+    r = _coerce(_raw(counterparty="BOGUS", purpose="??", urgency=999, confidence=5), ENV, SIG, 0.85)
+    assert r.counterparty == "OTHER" and r.purpose == "OTHER"
     assert r.urgency == 100 and r.confidence == 1.0
 
 
-def test_forced_tool_choice_and_playbook_cached():
-    fc = FakeClient(_verdict())
-    classify(ENV, PLAYBOOK, fc, SETTINGS)
-    assert fc.kwargs["tool_choice"] == {"type": "tool", "name": "record_triage"}
-    assert fc.kwargs["temperature"] == 0
-    assert fc.kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+class _FakeGemini:
+    """Returns resp.text from a sequence (to simulate transient empty responses)."""
+
+    def __init__(self, texts):
+        self._texts, self.calls = list(texts), 0
+        self.models = SimpleNamespace(generate_content=self._gen)
+
+    def _gen(self, **kw):
+        t = self._texts[min(self.calls, len(self._texts) - 1)]
+        self.calls += 1
+        return SimpleNamespace(text=t)
+
+
+def test_classify_gemini_happy_path():
+    c = _FakeGemini([json.dumps(_raw())])
+    r = classify(ENV, SIG, None, "playbook", c, SETTINGS)
+    assert r.counterparty == "CLIENT" and r.priority == "HIGH" and c.calls == 1
+
+
+def test_classify_gemini_retries_on_empty_then_succeeds():
+    c = _FakeGemini(["", "", json.dumps(_raw(counterparty="SUPPLIER", purpose="INVOICE_OR_ACCOUNTING"))])
+    r = classify(ENV, SIG, None, "playbook", c, SETTINGS)
+    assert r.counterparty == "SUPPLIER" and c.calls == 3   # retried past the empties

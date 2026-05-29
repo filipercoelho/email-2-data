@@ -1,99 +1,82 @@
-"""Knowledge store (SQLite) — Phase 2/4 (SCAFFOLD: schema defined, methods stubbed).
+"""Knowledge store (SQLite) — Phase 2 lean: the hand-curated gazetteer.
 
-Persists what we learn so each run is cheaper and better than the last (VISION tenet 5):
-- sender_reputation: domain -> counterparty PRIOR. Human-confirmed is authoritative; LLM-derived is
-  provisional and strengthens with repeated agreement. ALWAYS overridable by the body.
-- verdict_cache: content_hash -> prior verdict, for repeat/templated mail (zero-token reuse).
-- exemplars: past (email -> correct verdict) for few-shot retrieval on hard cases.
-- thread_state: a thread already known to be a client PO stays a client.
-
-Local-first, single file under out/. No PII leaves the machine.
+Per the red-teamed plan, the ONE thing worth maintaining at this scale is an exact-match
+``domain -> counterparty`` map that encodes irreplaceable business facts (corticoenetos = CLIENT,
+Spandex = SUPPLIER). It is a **hint/prior attached to the LLM call — never a short-circuit** (the body
+always overrides; a sender can flip roles). The learning loop (reputation decay, verdict cache,
+exemplars, thread state) is Phase 4 and intentionally not built yet.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import csv
+import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS sender_reputation (
+CREATE TABLE IF NOT EXISTS gazetteer (
     domain        TEXT PRIMARY KEY,
-    counterparty  TEXT NOT NULL,          -- schema.COUNTERPARTY
-    confidence    REAL NOT NULL,
-    n_obs         INTEGER NOT NULL DEFAULT 1,
-    source        TEXT NOT NULL,          -- 'human' (authoritative) | 'llm' (provisional)
-    last_seen     TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS verdict_cache (
-    content_hash      TEXT PRIMARY KEY,
-    verdict_json      TEXT NOT NULL,
-    extractor_version TEXT NOT NULL,
-    created_at        TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS exemplars (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    embedding    BLOB,                    -- float32 vector of subject+body
-    subject      TEXT,
-    body_excerpt TEXT,
-    verdict_json TEXT NOT NULL,
-    source       TEXT NOT NULL,           -- 'human' | 'llm'
-    created_at   TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS thread_state (
-    thread_id     TEXT PRIMARY KEY,
-    counterparty  TEXT,
-    last_verdict  TEXT,
-    updated_at    TEXT NOT NULL
+    counterparty  TEXT NOT NULL,   -- schema.COUNTERPARTY
+    note          TEXT
 );
 """
 
 
-@dataclass
-class Reputation:
-    counterparty: str
-    confidence: float
-    source: str  # 'human' | 'llm'
-
-
 class KnowledgeStore:
-    """SQLite-backed. CONTRACT below; all methods stubbed for Phase 2/4."""
-
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
+        self._conn: Optional[sqlite3.Connection] = None
 
     def connect(self) -> "KnowledgeStore":
-        """CONTRACT: open the db, run SCHEMA (idempotent), return self."""
-        raise NotImplementedError("Phase 2")
+        self._conn = sqlite3.connect(self.db_path)
+        self._conn.executescript(SCHEMA)
+        self._conn.commit()
+        return self
 
-    # --- sender reputation (PRIOR, never a hard rule; body overrides) ---
-    def get_reputation(self, domain: str) -> Optional[Reputation]:
-        raise NotImplementedError("Phase 2")
+    def close(self) -> None:
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
-    def observe_reputation(self, domain: str, counterparty: str, *, source: str) -> None:
-        """CONTRACT: upsert. 'human' source is authoritative (pins counterparty, confidence high).
-        'llm' source increments n_obs and nudges confidence toward the observed value only while it
-        agrees; conflicting observations decay confidence rather than flip silently."""
-        raise NotImplementedError("Phase 4")
+    def seed_gazetteer(self, csv_path: str | Path) -> int:
+        """(Re)load the curated gazetteer from a CSV `domain,counterparty,note`. Idempotent upsert.
+        `#`-comment and blank lines are skipped. Returns rows loaded."""
+        assert self._conn is not None, "call connect() first"
+        n = 0
+        with open(csv_path, encoding="utf-8") as fh:
+            reader = csv.DictReader(r for r in fh if r.strip() and not r.lstrip().startswith("#"))
+            for row in reader:
+                dom = (row.get("domain") or "").strip().lower()
+                cp = (row.get("counterparty") or "").strip()
+                if not dom or not cp:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO gazetteer(domain, counterparty, note) VALUES (?,?,?) "
+                    "ON CONFLICT(domain) DO UPDATE SET counterparty=excluded.counterparty, note=excluded.note",
+                    (dom, cp, (row.get("note") or "").strip()),
+                )
+                n += 1
+        self._conn.commit()
+        return n
 
-    # --- verdict cache (zero-token reuse for repeat/templated mail) ---
-    def get_cached_verdict(self, content_hash: str, extractor_version: str) -> Optional[dict[str, Any]]:
-        """CONTRACT: return the cached verdict only if extractor_version matches (else miss, so a
-        playbook bump invalidates stale cache)."""
-        raise NotImplementedError("Phase 4")
-
-    def put_verdict(self, content_hash: str, verdict: dict[str, Any], extractor_version: str) -> None:
-        raise NotImplementedError("Phase 4")
-
-    # --- exemplar retrieval (few-shot on hard cases) ---
-    def find_exemplars(self, embedding: bytes, k: int = 3) -> list[dict[str, Any]]:
-        raise NotImplementedError("Phase 4")
-
-    def add_exemplar(self, *, embedding: bytes, subject: str, body_excerpt: str,
-                     verdict: dict[str, Any], source: str) -> None:
-        raise NotImplementedError("Phase 4")
-
-    # --- feedback loop: a human correction updates reputation + exemplars ---
-    def record_correction(self, *, domain: str, corrected_verdict: dict[str, Any],
-                          subject: str, body_excerpt: str, embedding: bytes | None = None) -> None:
-        raise NotImplementedError("Phase 4")
+    def lookup(self, domain: str) -> Optional[str]:
+        """Exact-match domain -> counterparty hint (or its parent domain). None if unknown."""
+        if not domain or self._conn is None:
+            return None
+        dom = domain.strip().lower()
+        row = self._conn.execute(
+            "SELECT counterparty FROM gazetteer WHERE domain = ?", (dom,)
+        ).fetchone()
+        if row:
+            return row[0]
+        # also try the registrable parent (mail.x.com -> x.com), one level
+        parts = dom.split(".")
+        if len(parts) > 2:
+            parent = ".".join(parts[-2:])
+            row = self._conn.execute(
+                "SELECT counterparty FROM gazetteer WHERE domain = ?", (parent,)
+            ).fetchone()
+            if row:
+                return row[0]
+        return None

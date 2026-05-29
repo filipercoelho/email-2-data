@@ -43,32 +43,43 @@ From hand-labeling and the 265-email runs, and how they reshape the plan:
 **Known debt (near-term, small):** retry-on-empty in the classifier; always run the free parse/signals
 stage *before* spending an LLM call.
 
-## Phase 1 — Baseline + taxonomy migration 🔄
+## Phase 1 — Baseline + taxonomy migration ✅
 
 **Goal:** a regressable number AND the shipped model = the validated model.
 
-- ✅ **Baseline** on a stratified 43-email sample: counterparty 95%, priority 95%, CLIENT recall 100%,
-  real-clients-binned 0. Tooling: `design/labelsheet.py` (build/score), labels in `labels/worksheet.csv`.
-- ⬜ **Migrate classifier + structured-output schemas + `eval` from single-axis `type` →
-  counterparty / purpose / direction** (the validated axes; `schema.py` enums already updated). *The big one.*
-- ⬜ **Playbook v2:** real anonymized exemplars (error-driven) + the framing rules (Lindo-POV
-  CLIENT/SUPPLIER, `LEAD`, `OUTBOUND_INVOICE`, dynamic priority, "decide by body not domain").
-- ⬜ **retry-on-empty** fix (hardening debt above).
+- ✅ **Baseline** on a stratified 43-email sample: counterparty 95%, CLIENT recall 100%, binned 0.
+  Tooling: `design/labelsheet.py`; labels in `labels/worksheet.csv`.
+- ✅ **Migrated** classifier + structured-output schemas (Gemini + Anthropic) + `eval` from single-axis
+  `type` → **counterparty / purpose / direction**. Priority is now derived (`schema.derive_priority`),
+  direction set deterministically from signals, the model emits only counterparty/purpose/urgency/etc.
+- ✅ **Playbook v2** — framing rules (Lindo-POV CLIENT/SUPPLIER, `LEAD`, `OUTBOUND_INVOICE`,
+  forwarded-original, "decide by body not domain") + worked examples. *(Examples are illustrative;
+  swapping in real anonymized error-driven exemplars is a follow-up.)*
+- ✅ **retry-on-empty** in the classifier (covers the transient empty-response the SDK retry misses).
 
-**Exit:** the shipped pipeline emits counterparty/purpose/direction and scores ≥ baseline; playbook grounded
-in real mail.
+**Functional result (43-label set, migrated cascade):** counterparty **86%**, priority **81%**,
+CLIENT/LEAD recall **89%**, **real-clients-binned 0**. (The earlier "95%" was self-agreement — labels
+were pre-filled from the model's own proposals — so 86% vs corrected labels is the real, harder
+number. The residual misses are Tier-1 playbook nuance: internal-sender invoices to clients, system
+notices → addressed by real error-driven exemplars, a Phase-1 follow-up.)
 
-## Phase 2 — Tier-0 signals & knowledge store ⬜ (scaffolded)
+## Phase 2 — Tier-0 signals & gazetteer (lean) ✅
 
 **Goal:** decide the easy/known mail offline, for free; hand the LLM *facts*, not guesses.
 
-- `signals.py` — direction (internal/inbound) + bulk (`List-Unsubscribe`, the anchor IGNORE lever).
-- `forwarding.py` — mine the **original external sender/subject** from forwarded/quoted bodies, so an
-  internal forward of a client order is attributed to the client, not "internal".
-- `store.py` — SQLite knowledge store: `sender_reputation`, `verdict_cache`, `exemplars`, `thread_state`.
-- **Structural rule:** Tier 0 runs **before any LLM call** (makes the wasted-calls lesson permanent).
+- ✅ `signals.py` — direction (internal/inbound), bulk (`List-*`/`Feedback-ID`/`Precedence`),
+  automated (Auto-Submitted/no-reply, a *feature* not a bin), looks-forwarded (flag only).
+- ✅ `store.py` (lean) — hand-curated `domain → counterparty` **gazetteer** in SQLite, seeded from
+  `config/gazetteer.csv`; a **hint passed to the LLM, never a short-circuit** (body overrides).
+- ✅ `cascade.py` — Tier-0 bulk-IGNORE offline → Tier-1 Gemini with facts + hint; a known CLIENT/LEAD
+  domain **vetoes** an offline bin. Each verdict tags `decided_by`.
+- **Measured precision fix:** offline IGNORE fires **only on true marketing-list signals**; letting
+  `automated` bin offline over-binned supplier invoices as BULK (caught by the functional re-score).
+- *Deferred per the red-teamed plan:* `forwarding.py` banner parsing (we only flag + escalate),
+  verdict cache, reputation learning, NER/Snorkel/calibration/drift — see `design/offline-extraction-plan.md`.
 
-**Exit:** % of corpus resolved with **zero LLM calls**; forwarded-order cases correctly attributed.
+**Exit (met):** ~30% of the 265-email corpus resolved with **zero LLM calls** (Tier-0); **no client
+binned** (the gazetteer veto + the automated≠bulk fix protect transactional supplier mail too).
 
 ## Phase 3 — Cost-tiered cascade ⬜ (scaffolded)
 

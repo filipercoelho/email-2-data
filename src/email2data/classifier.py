@@ -1,25 +1,29 @@
-"""M1 — classify one EmailEnvelope into a TriageResult using Claude + the triage playbook."""
+"""Tier-1 LLM classification — counterparty/purpose/direction model (Phase 1 migration).
+
+The model emits counterparty/purpose/urgency/confidence/reason/entities; this module sets direction
+from the Tier-0 signals, derives priority deterministically, and enforces the anti-IGNORE guardrail.
+Includes retry-on-empty (the transient empty-response failure the SDK's max_retries doesn't cover).
+"""
 
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any
 
-from . import audit
-from .config import claude_api_key, paths
-from .identity import canonical_id  # noqa: F401  (kept for callers/tests)
+from .config import claude_api_key
 from .schema import (
     EXTRACTOR_VERSION,
     GEMINI_TRIAGE_SCHEMA,
-    IGNORABLE_TYPES,
-    PRIORITIES,
+    IGNORABLE_COUNTERPARTIES,
+    COUNTERPARTY,
+    PURPOSE,
     TRIAGE_TOOL,
-    TYPES,
     Entities,
     TriageResult,
+    derive_priority,
 )
+from .signals import Signals, facts_block
 
 
 class ClassifyError(Exception):
@@ -30,23 +34,19 @@ def load_playbook(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def build_user_message(env: dict[str, Any]) -> str:
-    """Compact, signal-dense rendering of the email for the model.
-
-    The received date is included so the model can resolve relative PT dates ("até sexta").
-    Attachment filenames/types are strong signal for job requests, so they are listed.
-    """
+def build_user_message(env: dict[str, Any], signals: Signals, gazetteer_hint: str | None) -> str:
+    """Signal-dense rendering: deterministic header FACTS first, then the email."""
     atts = env.get("attachments") or []
     att_lines = "\n".join(
         f"  - {a.get('filename') or '(sem nome)'} [{a.get('content_type')}]" for a in atts
     )
     return (
+        f"[FACTS] {facts_block(signals, gazetteer_hint)}\n"
         f"Received: {env.get('date') or '(desconhecido)'}\n"
         f"From: {env.get('from', {}).get('name')} <{env.get('from', {}).get('email')}>\n"
         f"Subject: {env.get('subject', '')}\n"
         f"Attachments ({len(atts)}):\n{att_lines or '  (nenhum)'}\n"
-        f"---\n"
-        f"{env.get('body_text', '')}"
+        f"---\n{env.get('body_text', '')}"
     )
 
 
@@ -57,29 +57,74 @@ def _tool_input(response: Any) -> dict[str, Any]:
     raise ClassifyError("model did not return a record_triage tool call")
 
 
-def _coerce(raw: dict[str, Any], env: dict[str, Any], floor: float) -> TriageResult:
+def _attempts(cfg: dict[str, Any]) -> int:
+    return max(1, int(cfg.get("max_retries", 5)))
+
+
+def _call_gemini(env, signals, hint, playbook, client, cfg) -> dict[str, Any]:
+    from google.genai import types
+
+    last = None
+    for _ in range(_attempts(cfg)):  # retry-on-empty: a 200 with empty text is transient
+        try:
+            resp = client.models.generate_content(
+                model=cfg["model"],
+                contents=build_user_message(env, signals, hint),
+                config=types.GenerateContentConfig(
+                    system_instruction=playbook,
+                    temperature=0,
+                    max_output_tokens=int(cfg.get("max_tokens", 1024)),
+                    response_mime_type="application/json",
+                    response_schema=GEMINI_TRIAGE_SCHEMA,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            if resp.text:
+                return json.loads(resp.text)
+            last = "empty text"
+        except Exception as exc:  # noqa: BLE001 — retry transient, surface after attempts
+            last = f"{type(exc).__name__}: {exc}"
+    raise ClassifyError(f"gemini failed after retries ({last})")
+
+
+def _call_anthropic(env, signals, hint, playbook, client, cfg) -> dict[str, Any]:
+    last = None
+    for _ in range(_attempts(cfg)):
+        try:
+            resp = client.messages.create(
+                model=cfg["model"],
+                max_tokens=int(cfg.get("max_tokens", 1024)),
+                temperature=0,
+                system=[{"type": "text", "text": playbook, "cache_control": {"type": "ephemeral"}}],
+                tools=[TRIAGE_TOOL],
+                tool_choice={"type": "tool", "name": TRIAGE_TOOL["name"]},
+                messages=[{"role": "user", "content": build_user_message(env, signals, hint)}],
+            )
+            return _tool_input(resp)
+        except Exception as exc:  # noqa: BLE001
+            last = f"{type(exc).__name__}: {exc}"
+    raise ClassifyError(f"anthropic failed after retries ({last})")
+
+
+def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: float) -> TriageResult:
     ent = raw.get("entities") or {}
-    type_ = raw.get("type") if raw.get("type") in TYPES else "OTHER"
-    priority = raw.get("priority") if raw.get("priority") in PRIORITIES else "NEEDS_REVIEW"
+    counterparty = raw.get("counterparty") if raw.get("counterparty") in COUNTERPARTY else "OTHER"
+    purpose = raw.get("purpose") if raw.get("purpose") in PURPOSE else "OTHER"
     urgency = max(0, min(100, int(raw.get("urgency", 0))))
     confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0))))
     reason = str(raw.get("reason", "")).strip()
 
-    # --- Anti-IGNORE backstop, enforced in code, not just the prompt (red-team S6) ---
-    # 1. Coherence: only PUBLICITY/OTHER may carry IGNORE. A client/supplier marked IGNORE is a bug
-    #    in the verdict, regardless of how confident the model is.
-    # 2. Confidence floor: even a coherent IGNORE needs high confidence; otherwise route to review.
-    if priority == "IGNORE":
-        if type_ not in IGNORABLE_TYPES:
-            priority = "NEEDS_REVIEW"
-            reason = f"[guardrail: IGNORE on {type_} downgraded] {reason}"
-        elif confidence < floor:
-            priority = "NEEDS_REVIEW"
-            reason = f"[guardrail: low-confidence IGNORE ({confidence:.2f}<{floor}) downgraded] {reason}"
+    priority = derive_priority(counterparty, purpose, urgency, signals.is_bulk)
+    # Anti-IGNORE guardrail: never bin on a low-confidence "it's just bulk" call.
+    if priority == "IGNORE" and (counterparty not in IGNORABLE_COUNTERPARTIES or confidence < floor):
+        priority = "NEEDS_REVIEW"
+        reason = f"[guardrail: uncertain IGNORE -> review] {reason}"
 
     return TriageResult(
         message_id=env["message_id"],
-        type=type_,
+        counterparty=counterparty,
+        purpose=purpose,
+        direction=signals.direction,
         priority=priority,
         urgency=urgency,
         confidence=confidence,
@@ -98,102 +143,23 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], floor: float) -> TriageRes
     )
 
 
-def _call_anthropic(env: dict[str, Any], playbook: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
-    response = client.messages.create(
-        model=cfg["model"],
-        max_tokens=int(cfg.get("max_tokens", 1024)),
-        temperature=0,
-        # The playbook is identical on every call -> cache it (prompt caching) to cut cost/latency.
-        system=[{"type": "text", "text": playbook, "cache_control": {"type": "ephemeral"}}],
-        tools=[TRIAGE_TOOL],
-        tool_choice={"type": "tool", "name": TRIAGE_TOOL["name"]},
-        messages=[{"role": "user", "content": build_user_message(env)}],
-    )
-    return _tool_input(response)
-
-
-def _call_gemini(env: dict[str, Any], playbook: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
-    from google.genai import types
-
-    resp = client.models.generate_content(
-        model=cfg["model"],
-        contents=build_user_message(env),
-        config=types.GenerateContentConfig(
-            system_instruction=playbook,
-            temperature=0,
-            max_output_tokens=int(cfg.get("max_tokens", 1024)),
-            response_mime_type="application/json",
-            response_schema=GEMINI_TRIAGE_SCHEMA,  # controlled generation -> valid enums/shape
-            thinking_config=types.ThinkingConfig(thinking_budget=0),  # don't starve JSON output
-        ),
-    )
-    text = resp.text
-    if not text:
-        raise ClassifyError("gemini returned empty text (blocked or token-starved)")
-    return json.loads(text)
-
-
-def classify(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any]) -> TriageResult:
-    """Classify one envelope. ``client`` is injected (real SDK client or a fake) for testability.
-
-    Provider-agnostic: ``llm.provider`` selects the backend. Both paths return the same dict shape,
-    so the guardrail/coercion in ``_coerce`` is shared.
-    """
+def classify(env, signals, gazetteer_hint, playbook, client, settings) -> TriageResult:
+    """Tier-1 LLM classification of one envelope, given Tier-0 signals + a gazetteer hint."""
     cfg = settings["llm"]
     floor = float(cfg.get("ignore_confidence_floor", 0.85))
     provider = cfg.get("provider", "anthropic")
-    raw = _call_gemini(env, playbook, client, cfg) if provider == "vertex_gemini" else _call_anthropic(env, playbook, client, cfg)
-    return _coerce(raw, env, floor)
+    call = _call_gemini if provider == "vertex_gemini" else _call_anthropic
+    raw = call(env, signals, gazetteer_hint, playbook, client, cfg)
+    return _coerce(raw, env, signals, floor)
 
 
-def _make_client(settings: dict[str, Any]) -> Any:
+def make_client(settings: dict[str, Any]) -> Any:
     cfg = settings["llm"]
-    provider = cfg.get("provider", "anthropic")
-    if provider == "vertex_gemini":
-        from google import genai  # lazy import so the anthropic path / tests don't need it
+    if cfg.get("provider", "anthropic") == "vertex_gemini":
+        from google import genai
 
-        return genai.Client(
-            vertexai=True,
-            project=cfg["vertex_project"],
-            location=cfg.get("vertex_location", "global"),
-        )
-    from anthropic import Anthropic  # imported lazily so tests/fetch don't need the SDK
+        return genai.Client(vertexai=True, project=cfg["vertex_project"],
+                            location=cfg.get("vertex_location", "global"))
+    from anthropic import Anthropic
 
-    return Anthropic(
-        api_key=claude_api_key(settings),
-        max_retries=int(cfg.get("max_retries", 5)),  # 429/5xx backoff (red-team S2)
-    )
-
-
-def classify_corpus(settings: dict[str, Any], client: Any | None = None) -> dict[str, int]:
-    """Classify every .eml in the corpus -> out/results.jsonl.
-
-    Returns counts {corpus, classified, failed} so a partial run can't masquerade as a clean one
-    (red-team S2). A single email failing is logged and skipped, never aborts the batch.
-    """
-    from .envelope import parse_eml
-
-    p = paths(settings, settings["__settings_path__"])
-    corpus_dir, out_dir, audit_log = p["corpus_dir"], p["out_dir"], p["audit_log"]
-    playbook = load_playbook(p["playbook"])
-    client = client or _make_client(settings)
-
-    eml_files = sorted(corpus_dir.glob("*.eml"))
-    results_path = out_dir / "results.jsonl"
-    classified = failed = 0
-    audit.log(audit_log, "classify_started", "corpus", {"corpus": len(eml_files)})
-
-    with results_path.open("w", encoding="utf-8") as out:
-        for eml in eml_files:
-            try:
-                env = parse_eml(eml.read_bytes())
-                result = classify(env, playbook, client, settings)
-                out.write(json.dumps(result.to_dict(), ensure_ascii=False) + "\n")
-                classified += 1
-            except Exception as exc:  # noqa: BLE001 — isolate per-email failures
-                failed += 1
-                audit.log(audit_log, "classify_failed", eml.name, {"error": type(exc).__name__})
-
-    counts = {"corpus": len(eml_files), "classified": classified, "failed": failed}
-    audit.log(audit_log, "classify_done", "corpus", counts)
-    return counts
+    return Anthropic(api_key=claude_api_key(settings), max_retries=int(cfg.get("max_retries", 5)))

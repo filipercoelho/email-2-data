@@ -1,15 +1,16 @@
-"""Canonical contracts for v1.
+"""Canonical contracts.
 
-Two things live here:
+The verdict model (migrated Phase 1) has three axes, learned from real mail:
+  * counterparty — WHO, from Lindo's point of view (CLIENT buys from us; "we are the client of X" => X
+    is a SUPPLIER). Decided by the BODY, never the domain.
+  * purpose      — WHAT the message is doing.
+  * direction    — who SENT it (a header fact, set deterministically by signals.py, not the model).
+Priority is DERIVED from those + urgency + bulk (see ``derive_priority``); it is partly dynamic
+(awaited outbound starts LOW — full escalation-over-time is Phase 4).
 
-* ``TriageResult`` / ``Entities`` — the typed verdict the classifier produces. A trimmed,
-  single-tenant version of ``BusinessEvent`` from the architectural draft.
-* ``TRIAGE_TOOL`` — the Anthropic tool schema we force the model to call, so the model returns
-  validated structured data instead of prose we have to parse.
-
-Keep this file and ``config/triage_playbook.md`` in sync: the playbook is the human-readable rubric,
-this schema is the machine-readable shape. The ``enum`` lists below are the single source of truth
-for valid values.
+``TRIAGE_TOOL`` / ``GEMINI_TRIAGE_SCHEMA`` are the structured-output contracts the model must satisfy.
+The model emits counterparty/purpose/urgency/confidence/reason/entities; direction + priority are set
+in code. The ``enum`` lists below are the single source of truth.
 """
 
 from __future__ import annotations
@@ -17,31 +18,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
-# Bump whenever the playbook OR this schema changes in a way that affects verdicts, so re-runs over
-# the same corpus are comparable. Stamped onto every TriageResult.
-EXTRACTOR_VERSION = "playbook.2026-05-29"
+# Bump whenever the playbook OR this schema changes verdicts, so re-runs are comparable and the
+# verdict cache (Phase 4) invalidates correctly.
+EXTRACTOR_VERSION = "counterparty.2026-05-29.v2"
 
-TYPES = [
-    "CLIENT_JOB_REQUEST",
-    "QUOTE_FOLLOWUP",
-    "REMINDER_EVENT",
-    "SUPPLIER_INVOICE",
-    "CLIENT_COMPLAINT",  # defect/rework/reclamação — high urgency, must not sink into SUPPORT
-    "SUPPORT_INTERNAL",
-    "PUBLICITY",
-    "OTHER",
-]
-
-# Types for which IGNORE priority is coherent. The classifier forces any other type away from
-# IGNORE (see classifier coherence check) — a client request can never be "ignore".
-IGNORABLE_TYPES = {"PUBLICITY", "OTHER"}
-PRIORITIES = ["HIGH", "MEDIUM", "LOW", "IGNORE", "NEEDS_REVIEW"]
-
-# --- Phase 2+ axes (cascade). counterparty + purpose come from the BODY; direction from HEADERS. ---
-# Counterparty is ALWAYS from Lindo's point of view:
-#   CLIENT   = buys from us (revenue).   LEAD = prospective client, not yet buying.
-#   SUPPLIER = we buy from them (cost) — incl. service/tool vendors (e.g. the invoicing platform).
-#   "we are the client of X"  =>  X is a SUPPLIER to us.
+# Counterparty is ALWAYS from Lindo's point of view.
+#   CLIENT = buys from us (revenue).  LEAD = prospective client, not yet buying.
+#   SUPPLIER = we buy from them (incl. service/tool vendors; "we are the client of X" => X is SUPPLIER).
+#   INTERNAL = colleague @lindoservico.pt.  BULK = newsletter/marketing.  OTHER = none of these.
 COUNTERPARTY = ["CLIENT", "LEAD", "SUPPLIER", "INTERNAL", "BULK", "OTHER"]
 PURPOSE = [
     "PO_FROM_CLIENT",
@@ -55,10 +39,31 @@ PURPOSE = [
     "INTERNAL_OPS",
     "OTHER",
 ]
-DIRECTION = ["inbound", "internal", "outbound"]  # who SENT this message (header fact)
-# Priority is partly DYNAMIC: an outbound request we're awaiting a reply on starts LOW and escalates
-# with days-without-response (needs thread_state + timers — see ROADMAP Phase 4).
-PRIORITIES_DYNAMIC_NOTE = "LOW escalates over time for awaited outbound requests"
+DIRECTION = ["inbound", "internal"]  # who SENT this message (header fact, set by signals.py)
+PRIORITIES = ["HIGH", "MEDIUM", "LOW", "IGNORE", "NEEDS_REVIEW"]
+
+# Only these counterparties may carry IGNORE. Anything else marked IGNORE is incoherent -> NEEDS_REVIEW.
+IGNORABLE_COUNTERPARTIES = {"BULK", "OTHER"}
+# A possible client/lead is the high-value, never-bin case.
+HIGH_VALUE_COUNTERPARTIES = {"CLIENT", "LEAD"}
+HIGH_VALUE_PURPOSES = {"PO_FROM_CLIENT", "ESTIMATE_REQUEST_FROM_CLIENT"}
+# Awaited-outbound purposes start LOW and escalate with days-without-reply (dynamic part = Phase 4).
+AWAITED_OUTBOUND_PURPOSES = {"FOLLOW_UP", "OUR_ORDER_TO_SUPPLIER"}
+
+
+def derive_priority(counterparty: str, purpose: str, urgency: int, is_bulk: bool) -> str:
+    """Priority is a deterministic function of the axes (not a model output).
+
+    Bulk → IGNORE. A client/lead or a client PO/estimate → HIGH. Awaited-outbound → LOW (initial; the
+    Phase-4 timer raises it over time). Otherwise HIGH if time-pressured, else MEDIUM.
+    """
+    if is_bulk or counterparty == "BULK":
+        return "IGNORE"
+    if counterparty in HIGH_VALUE_COUNTERPARTIES or purpose in HIGH_VALUE_PURPOSES:
+        return "HIGH"
+    if purpose in AWAITED_OUTBOUND_PURPOSES:
+        return "LOW"
+    return "HIGH" if urgency >= 70 else "MEDIUM"
 
 
 @dataclass
@@ -73,85 +78,67 @@ class Entities:
 
 @dataclass
 class TriageResult:
-    message_id: str          # rfc822 Message-ID (or content hash fallback)
-    type: str                # one of TYPES
-    priority: str            # one of PRIORITIES
-    urgency: int             # 0-100
-    confidence: float        # 0.0-1.0
+    message_id: str
+    counterparty: str          # one of COUNTERPARTY
+    purpose: str               # one of PURPOSE
+    direction: str             # one of DIRECTION (set from signals, not the model)
+    priority: str              # one of PRIORITIES (derived)
+    urgency: int               # 0-100
+    confidence: float          # 0.0-1.0
     reason: str
     entities: Entities = field(default_factory=Entities)
     extractor_version: str = EXTRACTOR_VERSION
-    # provenance (filled by caller, not the model)
+    # provenance
     subject: str = ""
     from_addr: str = ""
-    # Phase 2+ axes (default empty so Phase-0/1 verdicts remain valid). counterparty/purpose from the
-    # body; direction from headers; decided_by records which cascade tier/engine produced this.
-    counterparty: str = ""
-    purpose: str = ""
-    direction: str = ""
-    decided_by: str = ""  # e.g. "tier0:rule", "tier1:gemini-2.5-flash", "tier2:gemini-2.5-pro"
+    decided_by: str = ""       # "tier0:bulk", "tier1:gemini-2.5-flash", ...
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-# Anthropic tool definition. We set tool_choice to force this call, so the model cannot reply with
-# free text — it must emit an object matching this schema.
+# --- Structured-output contracts (model emits these fields; code adds direction/priority) ---
+
+_ENTITY_PROPS_NULLABLE = {
+    "client_name": {"type": ["string", "null"]},
+    "client_email": {"type": ["string", "null"]},
+    "deadline": {"type": ["string", "null"]},
+    "money": {"type": ["string", "null"]},
+    "product_or_service": {"type": ["string", "null"]},
+    "action_requested": {"type": ["string", "null"]},
+}
+
+# Anthropic tool (forced) — kept for provider parity.
 TRIAGE_TOOL = {
     "name": "record_triage",
     "description": "Record the triage verdict for one email, following the playbook.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": TYPES},
-            "priority": {"type": "string", "enum": PRIORITIES},
+            "counterparty": {"type": "string", "enum": COUNTERPARTY},
+            "purpose": {"type": "string", "enum": PURPOSE},
             "urgency": {"type": "integer", "minimum": 0, "maximum": 100},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},
-            "entities": {
-                "type": "object",
-                "properties": {
-                    "client_name": {"type": ["string", "null"]},
-                    "client_email": {"type": ["string", "null"]},
-                    "deadline": {"type": ["string", "null"]},
-                    "money": {"type": ["string", "null"]},
-                    "product_or_service": {"type": ["string", "null"]},
-                    "action_requested": {"type": ["string", "null"]},
-                },
-                "required": [],
-            },
+            "entities": {"type": "object", "properties": _ENTITY_PROPS_NULLABLE, "required": []},
         },
-        "required": ["type", "priority", "urgency", "confidence", "reason"],
+        "required": ["counterparty", "purpose", "urgency", "confidence", "reason"],
     },
 }
 
-
-def _nullable_str() -> dict:
-    return {"type": "string", "nullable": True}
-
-
-# Gemini (Vertex) controlled-generation schema. Same shape as TRIAGE_TOOL's input_schema, but in the
-# OpenAPI subset Gemini accepts: nullable via "nullable", no min/max keywords (the classifier clamps
-# defensively anyway), enums enforced by the model.
+# Gemini (Vertex) controlled generation — OpenAPI subset (nullable via "nullable", no min/max).
 GEMINI_TRIAGE_SCHEMA = {
     "type": "object",
     "properties": {
-        "type": {"type": "string", "enum": TYPES},
-        "priority": {"type": "string", "enum": PRIORITIES},
+        "counterparty": {"type": "string", "enum": COUNTERPARTY},
+        "purpose": {"type": "string", "enum": PURPOSE},
         "urgency": {"type": "integer"},
         "confidence": {"type": "number"},
         "reason": {"type": "string"},
         "entities": {
             "type": "object",
-            "properties": {
-                "client_name": _nullable_str(),
-                "client_email": _nullable_str(),
-                "deadline": _nullable_str(),
-                "money": _nullable_str(),
-                "product_or_service": _nullable_str(),
-                "action_requested": _nullable_str(),
-            },
+            "properties": {k: {"type": "string", "nullable": True} for k in _ENTITY_PROPS_NULLABLE},
         },
     },
-    "required": ["type", "priority", "urgency", "confidence", "reason"],
+    "required": ["counterparty", "purpose", "urgency", "confidence", "reason"],
 }

@@ -1,39 +1,108 @@
-"""Tier-0 deterministic signals — Phase 2 (SCAFFOLD: types defined, bodies stubbed).
+"""Tier-0 deterministic signals — Phase 2 (lean v1).
 
-Header-cheap facts that need no LLM and feed the cascade. Two were validated on 154 real emails:
-direction (sender domain vs ours) and bulk (List-Unsubscribe) — the latter is the most reliable
-deprioritization lever we have. ``is_forward``/``original_*`` come from forwarding.py and exist so an
-internal forward of a client order is attributed to the CLIENT, not to "internal" (VISION tenet 4).
+Header-cheap facts that need no LLM. Two roles:
+  * `is_bulk`/`is_automated` — the ONLY thing allowed to bin offline (header-only IGNORE).
+  * `direction`, `is_forward`, `sender_domain` — FEATURES attached to the LLM call, never verdicts.
+
+Per the red-teamed plan we do NOT parse forwarded banners here (deferred); we only FLAG a likely
+forward so the cascade escalates it to the body-reading LLM.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from email.message import Message
+from email.utils import parseaddr
 
 OUR_DOMAIN = "lindoservico.pt"
+
+# Header signals for bulk (mass mail) vs automated (auto-replies/notifications). RFC 2369 / 3834.
+_NO_REPLY_RE = re.compile(r"\b(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster)\b", re.I)
+# Forward/quote banners across clients + PT (detection only — we do not parse the block).
+_FORWARD_MARKERS = (
+    "---------- forwarded message",
+    "begin forwarded message",
+    "-----original message-----",
+    "-----mensagem original-----",
+    "mensagem reencaminhada",
+    "mensagem encaminhada",
+)
 
 
 @dataclass
 class Signals:
     sender_domain: str
-    direction: str           # one of schema.DIRECTION: inbound | internal | outbound
-    is_bulk: bool            # List-Unsubscribe / List-Id / Precedence: bulk|list
-    is_forward: bool         # body/subject wraps a forwarded or quoted external original
-    original_from: str | None = None     # external sender mined from the forwarded original
-    original_subject: str | None = None
+    direction: str            # "internal" if sender domain is ours, else "inbound"
+    is_bulk: bool             # mass/marketing mail (List-*, Feedback-ID, Precedence bulk/list)
+    is_automated: bool        # auto-reply/notification (Auto-Submitted, X-Auto-Response-Suppress, no-reply)
+    is_forward: bool          # body/subject looks like a forward/quote of another message
+    bulk_evidence: str = ""   # which header tripped it (for the evidence trail)
+
+    @property
+    def ignorable_offline(self) -> bool:
+        """Only true mass/marketing bulk (List-*/Feedback-ID/Precedence) may be binned offline.
+        Automated/transactional mail (Auto-Submitted, no-reply invoices, system notices) is NOT
+        binned here — it's a feature for the LLM. Over-binning automated supplier invoices as BULK
+        was a measured Tier-0 precision bug; this is the fix."""
+        return self.is_bulk
+
+
+def _h(msg: Message, name: str) -> str:
+    """Header value coerced to str (real headers can be email.header.Header)."""
+    return str(msg.get(name) or "").strip()
 
 
 def header_signals(msg: Message) -> Signals:
-    """CONTRACT: derive sender_domain, direction (internal if sender domain == OUR_DOMAIN else
-    inbound), and is_bulk (any of List-Unsubscribe / List-Id / Precedence in {bulk,list}). Coerce all
-    header reads to str (real headers can be email.header.Header). Forward fields are filled by
-    ``enrich_with_forward``."""
-    raise NotImplementedError("Phase 2")
+    _, frm = parseaddr(_h(msg, "From"))
+    domain = (frm.rsplit("@", 1)[-1] if "@" in frm else "").lower()
+    direction = "internal" if domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN) else "inbound"
+
+    bulk_hit = ""
+    if _h(msg, "List-Unsubscribe") or _h(msg, "List-Id"):
+        bulk_hit = "List-*"
+    elif _h(msg, "Feedback-ID"):
+        bulk_hit = "Feedback-ID"
+    elif _h(msg, "Precedence").lower() in ("bulk", "list", "junk"):
+        bulk_hit = "Precedence"
+    is_bulk = bool(bulk_hit)
+
+    auto = (
+        (_h(msg, "Auto-Submitted") and _h(msg, "Auto-Submitted").lower() != "no")
+        or bool(_h(msg, "X-Auto-Response-Suppress"))
+        or bool(_h(msg, "X-Autoreply"))
+        or _h(msg, "Return-Path") == "<>"
+        or bool(_NO_REPLY_RE.search(frm))
+    )
+    return Signals(
+        sender_domain=domain,
+        direction=direction,
+        is_bulk=is_bulk,
+        is_automated=bool(auto),
+        is_forward=False,
+        bulk_evidence=bulk_hit or ("automated" if auto else ""),
+    )
 
 
-def enrich_with_forward(signals: Signals, body_text: str) -> Signals:
-    """CONTRACT: if the body is an internal forward/reply wrapping an external original (see
-    forwarding.extract_original), set is_forward and original_from/original_subject so the cascade can
-    classify by the ORIGINAL counterparty. Returns a new/updated Signals."""
-    raise NotImplementedError("Phase 2")
+def detect_forward(subject: str, body_text: str) -> bool:
+    """True if the message looks like a forward/quote of another message (detection only)."""
+    hay = f"{subject}\n{body_text[:4000]}".lower()
+    return any(m in hay for m in _FORWARD_MARKERS)
+
+
+def enrich(signals: Signals, subject: str, body_text: str) -> Signals:
+    signals.is_forward = detect_forward(subject, body_text)
+    return signals
+
+
+def facts_block(signals: Signals, gazetteer_hint: str | None) -> str:
+    """Compact, human-readable facts to attach to the LLM prompt (never a verdict)."""
+    lines = [
+        f"sender_domain={signals.sender_domain or '(unknown)'}",
+        f"direction={signals.direction}",
+        f"automated={'yes' if signals.is_automated else 'no'}",
+        f"looks_forwarded={'yes' if signals.is_forward else 'no'}",
+    ]
+    if gazetteer_hint:
+        lines.append(f"known_counterparty_hint={gazetteer_hint} (PRIOR only — the body overrides)")
+    return "; ".join(lines)

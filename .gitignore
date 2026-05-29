@@ -25,6 +25,8 @@ labels/worksheet.csv
 corpus/*.eml
 out/*.jsonl
 out/audit.jsonl
+out/*.db
+out/*.log
 
 # Python build artifacts
 *.egg-info/

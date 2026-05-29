@@ -1,0 +1,12 @@
+domain,counterparty,note
+# Hand-curated domain -> counterparty (Lindo's POV). A HINT passed to the LLM, never a hard verdict;
+# the body always overrides. Seeded from confirmed Phase-1 labels. Keep small; the shop owns this.
+corticoenetos.com,CLIENT,supplies cork rolls AND pays us to cut to measure
+amadeus.com,CLIENT,Vision Box (client) — despite the travel-tech domain
+violainedharcourt.com,CLIENT,VDH
+vhilstudio.com,CLIENT,Vhils studio
+spandex.com,SUPPLIER,Oraguard/laminate supplier
+toconline.pt,SUPPLIER,invoicing platform we use (we are their customer)
+amazon.es,SUPPLIER,marketplace we buy from
+dhl.com,SUPPLIER,courier
+thyssenkrupp-materials.com,SUPPLIER,metal materials
