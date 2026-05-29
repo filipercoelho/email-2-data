@@ -47,7 +47,7 @@ def account_password(account: dict[str, Any]) -> str:
 
 
 def claude_api_key(settings: dict[str, Any]) -> str:
-    return resolve_secret(settings["claude"]["api_key_env"])
+    return resolve_secret(settings["llm"]["api_key_env"])
 
 
 def _base_dir(settings_path: str | Path) -> Path:

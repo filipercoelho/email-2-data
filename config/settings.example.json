@@ -24,9 +24,13 @@
     "since_days": 30,
     "max_messages": 200
   },
-  "claude": {
+  "llm": {
+    "provider": "vertex_gemini",
+    "_provider_options": "vertex_gemini (Google Gemini on Vertex, uses gcloud ADC) | anthropic (needs api_key_env)",
+    "vertex_project": "materials-492723",
+    "vertex_location": "global",
+    "model": "gemini-2.5-flash",
     "api_key_env": "ANTHROPIC_API_KEY",
-    "model": "claude-sonnet-4-6",
     "max_tokens": 1024,
     "max_retries": 5,
     "ignore_confidence_floor": 0.85

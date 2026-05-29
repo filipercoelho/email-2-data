@@ -95,3 +95,34 @@ TRIAGE_TOOL = {
         "required": ["type", "priority", "urgency", "confidence", "reason"],
     },
 }
+
+
+def _nullable_str() -> dict:
+    return {"type": "string", "nullable": True}
+
+
+# Gemini (Vertex) controlled-generation schema. Same shape as TRIAGE_TOOL's input_schema, but in the
+# OpenAPI subset Gemini accepts: nullable via "nullable", no min/max keywords (the classifier clamps
+# defensively anyway), enums enforced by the model.
+GEMINI_TRIAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": TYPES},
+        "priority": {"type": "string", "enum": PRIORITIES},
+        "urgency": {"type": "integer"},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+        "entities": {
+            "type": "object",
+            "properties": {
+                "client_name": _nullable_str(),
+                "client_email": _nullable_str(),
+                "deadline": _nullable_str(),
+                "money": _nullable_str(),
+                "product_or_service": _nullable_str(),
+                "action_requested": _nullable_str(),
+            },
+        },
+    },
+    "required": ["type", "priority", "urgency", "confidence", "reason"],
+}

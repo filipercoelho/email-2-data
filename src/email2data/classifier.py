@@ -12,6 +12,7 @@ from .config import claude_api_key, paths
 from .identity import canonical_id  # noqa: F401  (kept for callers/tests)
 from .schema import (
     EXTRACTOR_VERSION,
+    GEMINI_TRIAGE_SCHEMA,
     IGNORABLE_TYPES,
     PRIORITIES,
     TRIAGE_TOOL,
@@ -97,10 +98,7 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], floor: float) -> TriageRes
     )
 
 
-def classify(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any]) -> TriageResult:
-    """Classify one envelope. ``client`` is injected (Anthropic instance or a fake) for testability."""
-    cfg = settings["claude"]
-    floor = float(cfg.get("ignore_confidence_floor", 0.85))
+def _call_anthropic(env: dict[str, Any], playbook: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     response = client.messages.create(
         model=cfg["model"],
         max_tokens=int(cfg.get("max_tokens", 1024)),
@@ -111,15 +109,59 @@ def classify(env: dict[str, Any], playbook: str, client: Any, settings: dict[str
         tool_choice={"type": "tool", "name": TRIAGE_TOOL["name"]},
         messages=[{"role": "user", "content": build_user_message(env)}],
     )
-    return _coerce(_tool_input(response), env, floor)
+    return _tool_input(response)
+
+
+def _call_gemini(env: dict[str, Any], playbook: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
+    from google.genai import types
+
+    resp = client.models.generate_content(
+        model=cfg["model"],
+        contents=build_user_message(env),
+        config=types.GenerateContentConfig(
+            system_instruction=playbook,
+            temperature=0,
+            max_output_tokens=int(cfg.get("max_tokens", 1024)),
+            response_mime_type="application/json",
+            response_schema=GEMINI_TRIAGE_SCHEMA,  # controlled generation -> valid enums/shape
+            thinking_config=types.ThinkingConfig(thinking_budget=0),  # don't starve JSON output
+        ),
+    )
+    text = resp.text
+    if not text:
+        raise ClassifyError("gemini returned empty text (blocked or token-starved)")
+    return json.loads(text)
+
+
+def classify(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any]) -> TriageResult:
+    """Classify one envelope. ``client`` is injected (real SDK client or a fake) for testability.
+
+    Provider-agnostic: ``llm.provider`` selects the backend. Both paths return the same dict shape,
+    so the guardrail/coercion in ``_coerce`` is shared.
+    """
+    cfg = settings["llm"]
+    floor = float(cfg.get("ignore_confidence_floor", 0.85))
+    provider = cfg.get("provider", "anthropic")
+    raw = _call_gemini(env, playbook, client, cfg) if provider == "vertex_gemini" else _call_anthropic(env, playbook, client, cfg)
+    return _coerce(raw, env, floor)
 
 
 def _make_client(settings: dict[str, Any]) -> Any:
+    cfg = settings["llm"]
+    provider = cfg.get("provider", "anthropic")
+    if provider == "vertex_gemini":
+        from google import genai  # lazy import so the anthropic path / tests don't need it
+
+        return genai.Client(
+            vertexai=True,
+            project=cfg["vertex_project"],
+            location=cfg.get("vertex_location", "global"),
+        )
     from anthropic import Anthropic  # imported lazily so tests/fetch don't need the SDK
 
     return Anthropic(
         api_key=claude_api_key(settings),
-        max_retries=int(settings["claude"].get("max_retries", 5)),  # 429/5xx backoff (red-team S2)
+        max_retries=int(cfg.get("max_retries", 5)),  # 429/5xx backoff (red-team S2)
     )
 
 

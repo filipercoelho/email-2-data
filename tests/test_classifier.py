@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from email2data.classifier import classify
 
 PLAYBOOK = "test playbook"
-SETTINGS = {"claude": {"model": "x", "max_tokens": 256, "ignore_confidence_floor": 0.85}}
+SETTINGS = {"llm": {"provider": "anthropic", "model": "x", "max_tokens": 256, "ignore_confidence_floor": 0.85}}
 ENV = {"message_id": "mid:x@y", "subject": "s", "from": {"email": "a@b.pt"}, "attachments": []}
 
 
