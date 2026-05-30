@@ -27,6 +27,8 @@ out/*.jsonl
 out/audit.jsonl
 out/*.db
 out/*.log
+out/*.json
+out/*.html
 
 # Python build artifacts
 *.egg-info/

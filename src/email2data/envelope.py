@@ -139,6 +139,7 @@ def parse_eml(raw: bytes) -> dict[str, Any]:
         "message_id": canonical_id(msg.get("Message-ID"), raw),
         "subject": _decode_header(msg.get("Subject")),
         "from": _addr(str(msg.get("From") or "")),
+        "reply_to": _addr(str(msg.get("Reply-To") or "")),
         "to": _addr_list(str(msg.get("To") or "")),
         "cc": _addr_list(str(msg.get("Cc") or "")),
         "date": _date_iso(msg),
