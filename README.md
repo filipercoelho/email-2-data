@@ -27,10 +27,12 @@ cheap LLM with those signals + a gazetteer hint attached. See [ROADMAP.md](ROADM
 fetch.py    read-only IMAP → corpus/*.eml        (M0)
 envelope.py raw .eml → normalized fields          (robust MIME/charset)
 signals.py  Tier-0 header facts: direction, bulk/automated, looks-forwarded
-store.py    gazetteer: domain → counterparty hint (SQLite, hand-curated, a PRIOR not a verdict)
-cascade.py  Tier-0 bulk-IGNORE offline  →  Tier-1 classifier.py (Gemini) with facts+hint attached
+extract.py  Tier-0 deterministic values: nif/iban (authoritative) + amount/date/doc candidates
+store.py    gazetteer: email-or-domain → counterparty hint (SQLite, hand-curated, a PRIOR not a verdict)
+cascade.py  Tier-0 bulk-IGNORE offline  →  Tier-1 classifier.py (Gemini) with facts+values+hint attached
+crm.py      CRM PoC: interactions (event log) + contacts (person rollup) from headers+verdicts (no LLM)
 schema.py   TriageResult + structured-output contracts + priority derivation
-cli.py      fetch | triage | eval
+cli.py      fetch | triage | eval | crm
 ```
 
 ## Quick start

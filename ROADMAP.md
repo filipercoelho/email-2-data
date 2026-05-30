@@ -69,10 +69,24 @@ notices → addressed by real error-driven exemplars, a Phase-1 follow-up.)
 
 - ✅ `signals.py` — direction (internal/inbound), bulk (`List-*`/`Feedback-ID`/`Precedence`),
   automated (Auto-Submitted/no-reply, a *feature* not a bin), looks-forwarded (flag only).
-- ✅ `store.py` (lean) — hand-curated `domain → counterparty` **gazetteer** in SQLite, seeded from
-  `config/gazetteer.csv`; a **hint passed to the LLM, never a short-circuit** (body overrides).
-- ✅ `cascade.py` — Tier-0 bulk-IGNORE offline → Tier-1 Gemini with facts + hint; a known CLIENT/LEAD
-  domain **vetoes** an offline bin. Each verdict tags `decided_by`.
+- ✅ `extract.py` — **deterministic structured values, as priors not verdicts** (Idea 2, kept). `nif`
+  (mod-11 checksum) + `iban` are *authoritative* (code fills the entity); `amounts`/`dates`/`docs` are
+  *candidates* attached to the prompt — the model picks which amount is the price / date is the deadline.
+  Cannot bin (headers only). *Deferred:* phone, IBAN mod-97. (`EXTRACTOR_VERSION` → v3; playbook → v3.)
+- ❌ `lexicon.py` (Idea 1: PT-PT keyword priors + `is_reply` thread flag) — **built, live-A/B-tested,
+  then dropped.** A full 265-email run with the lexicon in-prompt showed **no measurable classification
+  lift** (counterparty 79%→81%, within run-to-run noise; priority 81%→74%) and a *materialized harm* —
+  the `lead`/`product` false-friends demoted a real client's orçamento to LEAD. The only clear flips
+  (BULK→SUPPLIER) were attributable to the **gazetteer**, not the lexicon. Decision: keep Idea 2, drop
+  Idea 1. Confirms the red-team: at this scale lexical priors don't move classification; relational
+  (gazetteer) + structured-value signals do.
+- ✅ `store.py` (lean) — hand-curated **gazetteer** in SQLite (`config/gazetteer.csv` = source of truth);
+  a **hint passed to the LLM, never a short-circuit** (body overrides). Hardened: **email-or-domain keys**
+  (free-mail senders like `joao@gmail.com` — the gap behind a measured CLIENT miss), **table replaced on
+  seed** (no stale rows when a key is removed), **counterparty enum-validated** on load, **multi-label
+  TLDs** (`.com.pt`/`.co.uk`) and `www.`/case/trailing-dot normalized in lookup.
+- ✅ `cascade.py` — Tier-0 bulk-IGNORE offline → Tier-1 Gemini with facts + extracted values + hint; a
+  known CLIENT/LEAD key **vetoes** an offline bin. Each verdict tags `decided_by`.
 - **Measured precision fix:** offline IGNORE fires **only on true marketing-list signals**; letting
   `automated` bin offline over-binned supplier invoices as BULK (caught by the functional re-score).
 - *Deferred per the red-teamed plan:* `forwarding.py` banner parsing (we only flag + escalate),
@@ -98,6 +112,13 @@ escalation rate reported.
 
 **Goal:** get smarter (and cheaper) with every message.
 
+- 🔄 **CRM substrate (PoC landed):** `crm.py` + `email2data crm` build an `interactions` event log + a
+  `contacts` person-rollup from headers + verdicts — deterministic, no LLM, into a local `out/crm.db`.
+  Per contact: names, role split (from/to/cc), first/last-seen, **last time they emailed us**, and
+  counterparty/purpose tallies ("relationship type" + "email types"). This is the substrate for
+  thread/relationship state and the Gmail-style social-feature prior below. *Deferred (pondered
+  separately):* identity resolution (the corpus already shows one sender under two addresses), the
+  person↔person graph, org tables, an `is_automated` contact flag, and wiring it into the live triage loop.
 - Domain reputation as a **prior** (human-confirmed authoritative; the body always overrides).
 - Verdict cache (content hash) for repeat / templated mail.
 - Exemplar retrieval (embeddings) for few-shot on hard cases.
