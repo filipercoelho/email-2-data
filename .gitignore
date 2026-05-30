@@ -20,15 +20,11 @@ node_modules/
 
 # Secrets & local data — never commit
 config/settings.json
-labels/labels.csv
-labels/worksheet.csv
+labels/*.csv
 corpus/*.eml
-out/*.jsonl
-out/audit.jsonl
-out/*.db
-out/*.log
-out/*.json
-out/*.html
+# out/ holds personal data (subjects, addresses, bodies, contact DB) — ignore all but the keep file
+out/*
+!out/.gitkeep
 
 # Python build artifacts
 *.egg-info/
