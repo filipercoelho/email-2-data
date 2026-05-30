@@ -145,3 +145,26 @@ GEMINI_TRIAGE_SCHEMA = {
     },
     "required": ["counterparty", "purpose", "urgency", "confidence", "reason"],
 }
+
+
+# --- Phase B: job-spec draft (second pass, tiered to LEAD/PO) -----------------------------------
+# The LLM drafts only the SEMANTIC spec fields it can read in the body; everything is nullable and
+# the model is told to return null (not guess) — the spec is often in an attachment it cannot read.
+SPEC_LLM_KEYS = ["item", "material", "dimensions", "thickness", "quantity",
+                 "colour_finish", "material_supplied_by", "delivery"]
+SPEC_SUPPLIED = ["client", "us", "unclear"]  # material_supplied_by is coerced to one of these or None
+
+SPEC_TOOL = {
+    "name": "record_job_spec",
+    "description": "Extract the fabrication job spec explicitly stated in the email body. Return null "
+                   "for anything not stated — do NOT guess; the spec is often in an attachment you cannot read.",
+    "input_schema": {
+        "type": "object",
+        "properties": {k: {"type": ["string", "null"]} for k in SPEC_LLM_KEYS},
+        "required": [],
+    },
+}
+GEMINI_SPEC_SCHEMA = {
+    "type": "object",
+    "properties": {k: {"type": "string", "nullable": True} for k in SPEC_LLM_KEYS},
+}

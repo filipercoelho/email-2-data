@@ -180,6 +180,102 @@ def cmd_crm(args: argparse.Namespace) -> int:
     return 0
 
 
+_JOB_PURPOSES = {"ESTIMATE_REQUEST_FROM_CLIENT", "PO_FROM_CLIENT"}
+
+
+def _write_labelsheet(path: Path, specs: list[dict]) -> None:
+    from . import jobspec as js
+    cols = ["message_id", "subject"] + js.MUST + js.SHOULD
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for s in specs:
+            w.writerow([s["message_id"], s["subject"]] + [""] * (len(js.MUST) + len(js.SHOULD)))
+
+
+def _read_spec_labels(path: Path) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    with path.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            mid = (row.get("message_id") or "").strip()
+            if mid:
+                out[mid] = {k: (v or "") for k, v in row.items() if k not in ("message_id", "subject")}
+    return out
+
+
+def cmd_jobspec(args: argparse.Namespace) -> int:
+    """Phase A/B: build JobSpecs + Gate-1 readiness for job-relevant emails (LEAD / PO / estimate)."""
+    from . import classifier, jobspec as js, replydraft, specdraft
+    from .envelope import parse_eml
+
+    settings = _load_settings(args)
+    p = paths(settings, settings["__settings_path__"])
+    base = Path(settings["__settings_path__"]).parents[1]
+    results_path = p["out_dir"] / "results.jsonl"
+    if not results_path.exists():
+        print("No out/results.jsonl — run `email2data triage` first.", file=sys.stderr)
+        return 1
+    results = [json.loads(x) for x in results_path.read_text().splitlines() if x]
+    mid2file = {}
+    for eml in p["corpus_dir"].glob("*.eml"):
+        try:
+            mid2file[parse_eml(eml.read_bytes())["message_id"]] = eml
+        except Exception:  # noqa: BLE001
+            pass
+
+    jobs = [r for r in results if r.get("purpose") in _JOB_PURPOSES or r.get("counterparty") == "LEAD"]
+    need_llm = args.draft or args.reply
+    client = classifier.make_client(settings) if need_llm else None
+    spec_pb = specdraft.load_playbook(base / "config" / "spec_playbook.md") if args.draft else None
+    reply_pb = replydraft.load_playbook(base / "config" / "reply_playbook.md") if args.reply else None
+
+    specs, drafted_n, replied_n = [], 0, 0
+    for r in jobs:
+        eml = mid2file.get(r["message_id"])
+        env = parse_eml(eml.read_bytes()) if eml else {"attachments": [], "subject": r.get("subject", ""), "body_text": ""}
+        drafted = None
+        if args.draft and eml:
+            try:
+                drafted = specdraft.draft(env, spec_pb, client, settings)
+                drafted_n += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"  draft failed {r['message_id'][:24]}: {type(exc).__name__}", file=sys.stderr)
+        spec = js.build_jobspec(r, env, drafted)
+        rd = js.readiness(spec)
+        entry = {**spec.to_dict(), "readiness": rd}
+        if args.reply:
+            try:
+                entry["draft_reply"] = replydraft.draft_reply(entry, rd, reply_pb, client, settings)
+                replied_n += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"  reply failed {r['message_id'][:24]}: {type(exc).__name__}", file=sys.stderr)
+        specs.append(entry)
+
+    (p["out_dir"] / "jobspecs.jsonl").write_text(
+        "\n".join(json.dumps(s, ensure_ascii=False) for s in specs), encoding="utf-8")
+    _write_labelsheet(p["out_dir"] / "spec_labelsheet.csv", specs)
+
+    tags = (f" · drafted {drafted_n}" if args.draft else "") + (f" · replies {replied_n}" if args.reply else "")
+    print(f"\n{len(jobs)} job-relevant emails (LEAD/PO/estimate){tags}")
+    print(f"  {'EST':<3} {'COV':>4} {'ATT':>3}  {'MISSING must-haves':<38} SUBJECT")
+    print("  " + "-" * 92)
+    for s in sorted(specs, key=lambda x: -x["readiness"]["coverage"]):
+        rd = s["readiness"]
+        print(f"  {'YES' if rd['estimable'] else '–':<3} {int(rd['coverage']*100):>3}% "
+              f"{'att' if s['has_attachment'] else '–':>3}  {','.join(rd['missing'])[:37]:<38} {(s['subject'] or '')[:30]}")
+    nattach = sum(1 for s in specs if s["readiness"]["attachment_to_review"])
+    print(f"\n  {nattach}/{len(specs)} need the attachment reviewed to complete the spec.")
+    print("  -> out/jobspecs.jsonl · gold-set scaffold -> out/spec_labelsheet.csv")
+
+    if args.score:
+        lp = base / "labels" / "spec_labels.csv"
+        if lp.exists():
+            print("\n  draft-vs-label agreement:", json.dumps(js.score_drafts(specs, _read_spec_labels(lp))))
+        else:
+            print("\n  (no labels/spec_labels.csv — fill out/spec_labelsheet.csv, move to labels/, re-run --score)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="email2data", description="Read-only email triage for Lindo inboxes.")
     parser.add_argument("--settings", default="config/settings.json", help="path to settings.json")
@@ -188,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("triage", help="Tier-0 signals -> Tier-1 Flash -> out/results.jsonl").set_defaults(fn=cmd_triage)
     sub.add_parser("eval", help="score results.jsonl vs labels").set_defaults(fn=cmd_eval)
     sub.add_parser("crm", help="build CRM contacts/interactions from corpus + verdicts (no LLM)").set_defaults(fn=cmd_crm)
+    jp = sub.add_parser("jobspec", help="build JobSpecs + Gate-1 readiness for LEAD/PO/estimate emails")
+    jp.add_argument("--draft", action="store_true", help="run the tiered LLM spec draft (Phase B; costs tokens)")
+    jp.add_argument("--reply", action="store_true", help="also draft a clarifying reply per job (Phase C; costs tokens)")
+    jp.add_argument("--score", action="store_true", help="score drafts vs labels/spec_labels.csv if present")
+    jp.set_defaults(fn=cmd_jobspec)
     args = parser.parse_args(argv)
     try:
         return args.fn(args)
