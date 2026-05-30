@@ -131,6 +131,33 @@ escalation rate reported.
 **Exit:** measurable accuracy lift + token drop from reuse; corrections persist; priority reflects elapsed
 time on awaited threads.
 
+## Phase 7 — Estimation funnel (job-spec → readiness gate) 🔄
+
+**Goal:** turn a LEAD/PO email into a structured, *estimable* job — knowing exactly what's missing.
+
+**Empirical base (full 265-run):** only **12%** of mail is job-relevant (32 emails); **88%** carry an
+attachment and **53%** put the spec *in* the attachment, not the body; clients state price 6% of the time.
+So the email is a **trigger + partial draft**, not the spec — the system is a *readiness scaffold the
+human completes*, not an auto-extractor. (Offline regex suite for dims/qty was **deferred** — body recall
+6–34% at n=32 doesn't justify it.)
+
+- ✅ **A — JobSpec + Gate-1 (deterministic):** `jobspec.py` — 14 variables, each `{value, source,
+  confirmed}` from a one-place registry; `build_jobspec` reshapes existing signals (entities + attachment +
+  counterparty); `readiness()` reports missing/unconfirmed must-haves, **estimable** (= all must-haves
+  *confirmed*), **attachment-to-review**, and PT clarifying questions. Demo: 28/32 flag attachment-to-review.
+- ✅ **B — tiered LLM spec draft:** `specdraft.py` + editable `config/spec_playbook.md` — drafts the
+  semantic fields (item/material/dims/thickness/qty/finish/supplied-by/delivery) on LEAD/PO **only** (~3¢
+  per 32). Raised coverage 11–33% → 11–67%; `item` filled on 28/32; returns null (no guessing) for the rest.
+  `score_drafts` + `out/spec_labelsheet.csv` are the gold-set scaffold (label is the domain expert's).
+- 🔄 **C — clarifying replies (static slice landed):** `replydraft.py` + editable `config/reply_playbook.md`
+  draft an acknowledge-and-ask reply grounded in confirmed-vs-missing fields (never invents price/spec;
+  **never sends** — copy/paste), shown per job in the report. The full **confirmation UI + persisted decisions
+  + per-account style** is the FastAPI workspace (see `design/`); confirmation friction stays the #1 adoption
+  risk. ⬜ **D — estimate (Gate 2: margin + deadline feasibility)** — needs internal cost/capacity data, *not*
+  email; consider stopping at "human-ready spec" rather than auto-pricing.
+
+**Exit:** a measured spec-draft agreement vs a labeled gold-set; jobs route to estimate-or-clarify.
+
 ## Phase 5 — Token minimization ⬜
 
 **Goal:** lowest tokens/email at constant accuracy.

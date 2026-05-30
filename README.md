@@ -31,8 +31,12 @@ extract.py  Tier-0 deterministic values: nif/iban (authoritative) + amount/date/
 store.py    gazetteer: email-or-domain → counterparty hint (SQLite, hand-curated, a PRIOR not a verdict)
 cascade.py  Tier-0 bulk-IGNORE offline  →  Tier-1 classifier.py (Gemini) with facts+values+hint attached
 crm.py      CRM PoC: interactions (event log) + contacts (person rollup) from headers+verdicts (no LLM)
+jobspec.py  Phase A: JobSpec (14 vars + provenance + confirmed) + Gate-1 readiness (deterministic)
+specdraft.py Phase B: tiered LLM spec draft for LEAD/PO/estimate only (editable config/spec_playbook.md)
+replydraft.py Phase C: draft a clarifying reply grounded in confirmed-vs-missing fields (never sends; copy/paste)
+llm.py      shared LLM plumbing: provider dispatch (Gemini/Anthropic) + retry-on-empty, used by all LLM stages
 schema.py   TriageResult + structured-output contracts + priority derivation
-cli.py      fetch | triage | eval | crm
+cli.py      fetch | triage | eval | crm | jobspec [--draft] [--reply] [--score]
 ```
 
 ## Quick start
