@@ -28,6 +28,13 @@ contacts = ([json.loads(l) for l in (out / "contacts.jsonl").read_text().splitli
 cost = json.loads((out / "cost.json").read_text()) if (out / "cost.json").exists() else {}
 per_cost = cost.get("per_email", {})
 
+jobspecs = {}
+if (out / "jobspecs.jsonl").exists():
+    for line in (out / "jobspecs.jsonl").read_text().splitlines():
+        if line.strip():
+            j = json.loads(line)
+            jobspecs[j["message_id"]] = j
+
 PRI = {"HIGH": 0, "NEEDS_REVIEW": 1, "MEDIUM": 2, "LOW": 3, "IGNORE": 4}
 emails.sort(key=lambda r: (PRI.get(r.get("priority"), 9), -r.get("urgency", 0)))
 contacts.sort(key=lambda c: -c.get("msg_count", 0))
@@ -50,7 +57,8 @@ def _internal(em: str) -> bool:
 for r in emails:
     pc = per_cost.get(r["message_id"], {})
     r.update(_date=None, _body="", _body_trunc=False, _people=[], _attach=[], _reply=False, _thread="",
-             _tin=pc.get("in", 0), _tout=pc.get("out", 0), _cost=pc.get("cost", 0.0))
+             _tin=pc.get("in", 0), _tout=pc.get("out", 0), _cost=pc.get("cost", 0.0),
+             _jobspec=jobspecs.get(r["message_id"]))
     f = mid2file.get(r["message_id"])
     if not f:
         continue
@@ -154,6 +162,20 @@ TEMPLATE = r"""<!doctype html>
   table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
   th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--bd2)} th{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);background:var(--bg)}
   tr.crow{cursor:pointer} tr.crow:hover td{background:#f8f9fb} tr.int td{background:#f0fdfa}
+  .js{margin-top:20px;border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+  .js .jh{display:flex;align-items:center;gap:10px;padding:11px 14px;background:#f5f7ff;border-bottom:1px solid var(--bd);font-weight:650;font-size:13px}
+  .js .jb{padding:14px}
+  .covbar{height:8px;background:#e6e8ec;border-radius:6px;overflow:hidden;width:150px}
+  .covbar>span{display:block;height:100%;background:var(--int)}
+  .miss{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
+  .miss .m{background:#fff3f3;border:1px solid #f3c9c9;color:#b4424a;border-radius:7px;padding:3px 9px;font-size:11.5px}
+  .qs{margin:2px 0 4px;padding-left:18px;color:#3a4150;font-size:13px}
+  .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:680;color:var(--mut);margin-bottom:6px}
+  .reply textarea{width:100%;min-height:160px;border:1px solid var(--bd);border-radius:9px;padding:12px;font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;resize:vertical;background:#fcfcfd;color:var(--tx)}
+  .reply .bar{display:flex;align-items:center;gap:10px;margin-top:8px}
+  .btn{background:var(--ac);color:#fff;border:none;border-radius:8px;padding:8px 15px;font-weight:600;cursor:pointer;font-size:12.5px}
+  .btn:hover{filter:brightness(.95)}
+  .copied{color:var(--int);font-size:12px;font-weight:600}
   @media(max-width:900px){.layout{grid-template-columns:1fr}.list{max-height:340px}}
 </style>
 </head>
@@ -296,6 +318,30 @@ function miniRows(mids){
       <span class="md">${esc((e._date||'').slice(0,10))}</span><span class="mc">${e._cost?fCost(e._cost):'$0'}</span></div>`).join('');
 }
 
+const FLABEL={item:'item',design_ready:'ficheiro',dimensions:'dimensões',material:'material',thickness:'espessura',material_supplied_by:'fornece material',process:'processo',quantity:'quantidade',deadline:'prazo',colour_finish:'cor/acabamento',quality_acceptance:'aceitação',delivery:'entrega',budget:'budget'};
+function hashId(s){let h=0;for(let i=0;i<(s||'').length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return 'r'+Math.abs(h);}
+function copyReply(id){const t=document.getElementById(id);t.select();try{document.execCommand('copy');document.getElementById(id+'c').textContent='copiado ✓';}catch(_){document.getElementById(id+'c').textContent='selecione e copie';}}
+function jobspecPanel(e){
+  const j=e._jobspec; if(!j) return '';
+  const rd=j.readiness||{}, cov=Math.round((rd.coverage||0)*100);
+  const known=Object.entries(j.fields||{}).filter(([k,f])=>f.value).map(([k,f])=>`<div class="ent"><b>${esc(FLABEL[k]||k)} · ${esc(f.source)}</b>${esc(f.value)}</div>`).join('');
+  const miss=(rd.missing||[]).map(k=>`<span class="m">${esc(FLABEL[k]||k)}</span>`).join('');
+  const qs=(rd.questions||[]).map(q=>`<li>${esc(q)}</li>`).join('');
+  const rid=hashId(j.message_id), reply=j.draft_reply||'';
+  return `<div class="js">
+    <div class="jh">Job spec — ${rd.estimable?'✅ estimável':'– não estimável'}
+      <div class="covbar"><span style="width:${cov}%"></span></div><span class="muted" style="font-size:12px">${cov}% must-haves</span>
+      ${j.has_attachment?'<span class="pill" style="margin-left:auto">📎 rever anexo</span>':''}</div>
+    <div class="jb">
+      ${known?`<div class="ents" style="margin-bottom:12px">${known}</div>`:''}
+      ${miss?`<div class="lbl">Em falta</div><div class="miss">${miss}</div>`:''}
+      ${reply?`<div class="reply"><div class="lbl">Resposta sugerida (rascunho — rever antes de enviar)</div>
+        <textarea id="${rid}" readonly>${esc(reply)}</textarea>
+        <div class="bar"><button class="btn" onclick="copyReply('${rid}')">Copiar</button>
+        <span class="muted" style="font-size:11.5px">o sistema nunca envia — copie e reveja</span><span class="copied" id="${rid}c"></span></div></div>`
+       : (qs?`<div class="lbl">Perguntas a colocar</div><ul class="qs">${qs}</ul>`:'')}
+    </div></div>`;
+}
 function emailCard(e){
   const ni=(e._people||[]).filter(p=>p.internal).length, ne=(e._people||[]).length-ni;
   const dom=domainOf(e.from_addr||''); const tcount=threadMids[e._thread]?threadMids[e._thread].size:1;
@@ -317,6 +363,7 @@ function emailCard(e){
     ${e._attach&&e._attach.length?`<div class="sec"><h3>Attachments · ${e._attach.length}</h3><div class="atts">${e._attach.map(a=>`<div class="att">${esc(a.name)} <span class="ty">${esc((a.type||'').split('/').pop())}${a.size?' · '+Math.round(a.size/1024)+'kb':''}</span></div>`).join('')}</div></div>`:''}
     <div class="sec"><h3>Why this verdict</h3><div class="reason">${esc(e.reason||'—')}</div></div>
     <div class="sec"><h3>Extracted data</h3><div class="ents">${entChips(e.entities)}</div></div>
+    ${jobspecPanel(e)}
     <div class="sec"><h3>Original email${e._body_trunc?' · (truncated)':''}</h3><div class="body">${bodyHtml(e._body)}</div></div>`;
 }
 
