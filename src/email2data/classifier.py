@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import extract
 from .config import claude_api_key
 from .schema import (
     EXTRACTOR_VERSION,
@@ -35,18 +36,25 @@ def load_playbook(path: str | Path) -> str:
 
 
 def build_user_message(env: dict[str, Any], signals: Signals, gazetteer_hint: str | None) -> str:
-    """Signal-dense rendering: deterministic header FACTS first, then the email."""
+    """Signal-dense rendering: deterministic header FACTS, then deterministically extracted values
+    (Idea 2), then the email. The extracted values are priors/candidates only — the body is the
+    final authority (see the playbook)."""
     atts = env.get("attachments") or []
     att_lines = "\n".join(
         f"  - {a.get('filename') or '(sem nome)'} [{a.get('content_type')}]" for a in atts
     )
+    subject, body = env.get("subject", ""), env.get("body_text", "")
+    offline = extract.render_candidates(extract.extract_values(subject, body))
+    facts = f"[FACTS] {facts_block(signals, gazetteer_hint)}"
+    if offline:
+        facts += f"\n[OFFLINE SIGNALS — priors only, the body decides] {offline}"
     return (
-        f"[FACTS] {facts_block(signals, gazetteer_hint)}\n"
+        f"{facts}\n"
         f"Received: {env.get('date') or '(desconhecido)'}\n"
         f"From: {env.get('from', {}).get('name')} <{env.get('from', {}).get('email')}>\n"
-        f"Subject: {env.get('subject', '')}\n"
+        f"Subject: {subject}\n"
         f"Attachments ({len(atts)}):\n{att_lines or '  (nenhum)'}\n"
-        f"---\n{env.get('body_text', '')}"
+        f"---\n{body}"
     )
 
 
@@ -120,6 +128,10 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: f
         priority = "NEEDS_REVIEW"
         reason = f"[guardrail: uncertain IGNORE -> review] {reason}"
 
+    # Deterministic, format-locked values override the model for NIF/IBAN (the model still owns
+    # money/deadline, where relevance — not format — is the hard part).
+    vals = extract.extract_values(env.get("subject", ""), env.get("body_text", ""))
+
     return TriageResult(
         message_id=env["message_id"],
         counterparty=counterparty,
@@ -136,6 +148,8 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: f
             money=ent.get("money"),
             product_or_service=ent.get("product_or_service"),
             action_requested=ent.get("action_requested"),
+            nif=vals.get("nif"),
+            iban=vals.get("iban"),
         ),
         extractor_version=EXTRACTOR_VERSION,
         subject=env.get("subject", ""),

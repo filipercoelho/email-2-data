@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from email2data.classifier import _coerce, classify
+from email2data.classifier import _coerce, build_user_message, classify
 from email2data.signals import Signals
 
 ENV = {"message_id": "mid:x@y", "subject": "s", "from": {"email": "a@b.pt"},
@@ -42,6 +42,21 @@ def test_coerce_validates_enums_and_clamps():
     r = _coerce(_raw(counterparty="BOGUS", purpose="??", urgency=999, confidence=5), ENV, SIG, 0.85)
     assert r.counterparty == "OTHER" and r.purpose == "OTHER"
     assert r.urgency == 100 and r.confidence == 1.0
+
+
+def test_coerce_fills_deterministic_nif_iban_from_body():
+    env = {**ENV, "body_text": "Contribuinte 501442600, IBAN PT50 0002 0123 1234 5678 9015 4"}
+    r = _coerce(_raw(), env, SIG, 0.85)
+    assert r.entities.nif == "501442600"
+    assert r.entities.iban == "PT50000201231234567890154"
+
+
+def test_build_user_message_attaches_extracted_values():
+    env = {**ENV, "subject": "Fatura", "body_text": "NIF 501442600, valor 10 €"}
+    msg = build_user_message(env, SIG, None)
+    assert "OFFLINE SIGNALS" in msg
+    assert "nif=501442600" in msg
+    assert "amounts_found=" in msg
 
 
 class _FakeGemini:

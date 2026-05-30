@@ -20,7 +20,7 @@ from typing import Optional
 
 # Bump whenever the playbook OR this schema changes verdicts, so re-runs are comparable and the
 # verdict cache (Phase 4) invalidates correctly.
-EXTRACTOR_VERSION = "counterparty.2026-05-29.v2"
+EXTRACTOR_VERSION = "counterparty.2026-05-29.v3"
 
 # Counterparty is ALWAYS from Lindo's point of view.
 #   CLIENT = buys from us (revenue).  LEAD = prospective client, not yet buying.
@@ -74,6 +74,9 @@ class Entities:
     money: Optional[str] = None
     product_or_service: Optional[str] = None
     action_requested: Optional[str] = None
+    # Filled deterministically by extract.py (not the model): format-locked, checksum-validated.
+    nif: Optional[str] = None       # PT taxpayer id (9 digits, mod-11 valid)
+    iban: Optional[str] = None      # PT IBAN
 
 
 @dataclass

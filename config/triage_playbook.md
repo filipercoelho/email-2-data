@@ -1,4 +1,4 @@
-# Triage Playbook (v2)
+# Triage Playbook (v3)
 
 This file is the classifier's brain — the code passes it verbatim to the model on every email.
 **Edit this file to improve accuracy; no code changes needed.** Mail is mostly Portuguese (Lindo
@@ -10,8 +10,13 @@ For ONE email, output JSON with: `counterparty`, `purpose`, `urgency`, `confiden
 `entities`. (Direction and priority are computed in code — do NOT output them.)
 
 The message begins with a `[FACTS]` line of deterministic header facts (sender domain, direction,
-whether it looks forwarded, and possibly a `known_counterparty_hint`). **Use the facts, but the BODY
-is the final authority** — especially for counterparty.
+whether it looks forwarded, and possibly a `known_counterparty_hint`). It may be followed by an
+`[OFFLINE SIGNALS]` line with deterministically extracted `values=…` — **priors only, never verdicts**:
+`nif=` / `iban=` are already validated, use them as-is (do not re-derive); `amounts_found` /
+`dates_found` / `docs_found` are *candidates* — **you** pick which amount is the price (`money`) and
+which date is the deadline, resolving relative dates yourself.
+
+**Use the facts and values, but the BODY is the final authority** — especially for counterparty.
 
 ## counterparty — WHO, from Lindo's point of view
 
