@@ -1,0 +1,32 @@
+# Keep the build context small AND keep secrets / personal data out of the image.
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+*.egg-info
+
+# Secrets & local data — provided at runtime via env_file / volumes, never baked in
+.env
+.env.*
+!.env.example
+config/settings.json
+corpus
+out
+labels
+*.db
+*.sqlite*
+*.pem
+*.key
+*-key.json
+service-account*.json
+credentials*.json
+sa.json
+
+# Docs/dev cruft not needed at runtime
+.claude
+tools
+tests
+.DS_Store

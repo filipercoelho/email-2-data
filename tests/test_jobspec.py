@@ -1,6 +1,7 @@
-"""Phase A: deterministic JobSpec assembly + Gate-1 readiness."""
+"""Phase A: deterministic JobSpec assembly + Gate-1 readiness (multi-item)."""
 
-from email2data.jobspec import MUST, build_jobspec, confirm, readiness, score_drafts
+from email2data.jobspec import (ITEM_MUST, JOB_MUST, JobSpec, address, build_jobspec,
+                                confirm, readiness, score_drafts)
 
 RESULT = {"message_id": "m1", "subject": "Pedido de orçamento", "counterparty": "CLIENT",
           "purpose": "ESTIMATE_REQUEST_FROM_CLIENT",
@@ -9,48 +10,96 @@ ENV_NOATT = {"attachments": [], "subject": "x", "body_text": "b"}
 ENV_ATT = {"attachments": [{"filename": "PO.pdf", "content_type": "application/pdf"}], "subject": "x", "body_text": "b"}
 
 
+def _confirm_all_musts(s):
+    for k in JOB_MUST:
+        confirm(s, k, "valor")
+    for i in range(len(s.items)):
+        for k in ITEM_MUST:
+            confirm(s, address(k, i), "valor")
+
+
 def test_build_maps_existing_signals_with_provenance():
     s = build_jobspec(RESULT, ENV_NOATT)
-    assert s.fields["item"].value == "corte laser acrílico" and s.fields["item"].source == "llm"
-    assert s.fields["deadline"].value == "2026-05-29"
-    assert s.fields["client_identity"].value == "CLIENT" and s.fields["client_identity"].source == "offline"
-    assert s.fields["design_ready"].value is None      # no attachment
-    assert s.fields["material"].value is None          # not drafted yet
+    assert len(s.items) == 1                                       # one seeded line item
+    assert s.items[0]["item"].value == "corte laser acrílico" and s.items[0]["item"].source == "llm"
+    assert s.job_fields["deadline"].value == "2026-05-29"
+    assert s.job_fields["client_identity"].value == "CLIENT" and s.job_fields["client_identity"].source == "offline"
+    assert s.job_fields["design_ready"].value is None             # no attachment
+    assert s.items[0]["material"].value is None                   # not drafted yet
+
+
+def test_draft_line_items_become_separate_items():
+    draft = {"line_items": [
+        {"item": "placas", "material": "acrílico", "thickness": "3 mm", "quantity": "20"},
+        {"item": "stickers", "material": "vinil", "colour_finish": "mate", "quantity": "100"},
+    ], "material_supplied_by": "us", "delivery": None}
+    s = build_jobspec(RESULT, ENV_NOATT, draft=draft)
+    assert len(s.items) == 2
+    assert s.items[0]["material"].value == "acrílico" and s.items[0]["material"].source == "llm"
+    assert s.items[1]["item"].value == "stickers" and s.items[1]["colour_finish"].value == "mate"
+    assert s.job_fields["material_supplied_by"].value == "us" and s.job_fields["material_supplied_by"].source == "llm"
 
 
 def test_attachment_sets_design_ready_and_review_flag():
     s = build_jobspec(RESULT, ENV_ATT)
-    assert s.has_attachment and s.fields["design_ready"].source == "offline"
-    assert readiness(s)["attachment_to_review"] is True   # must-haves missing + attachment present
+    assert s.has_attachment and s.job_fields["design_ready"].source == "offline"
+    assert readiness(s)["attachment_to_review"] is True
 
 
-def test_draft_fills_semantic_fields_as_llm():
-    s = build_jobspec(RESULT, ENV_NOATT, draft={"material": "acrílico", "quantity": "50 peças", "dimensions": None})
-    assert s.fields["material"].value == "acrílico" and s.fields["material"].source == "llm"
-    assert s.fields["quantity"].value == "50 peças"
-    assert s.fields["dimensions"].value is None           # null draft doesn't fill
-
-
-def test_readiness_missing_and_questions():
-    rd = readiness(build_jobspec(RESULT, ENV_NOATT))
-    assert not rd["estimable"]
-    assert "material" in rd["missing"] and "thickness" in rd["missing"]
-    assert any("material" in q.lower() for q in rd["questions"])
+def test_readiness_is_per_item_and_questions_are_deduped():
+    draft = {"line_items": [{"item": "a", "material": "MDF"}, {"item": "b", "material": "PVC"}]}
+    rd = readiness(build_jobspec(RESULT, ENV_NOATT, draft=draft))
+    assert not rd["estimable"] and rd["n_items"] == 2
+    assert "thickness#0" in rd["missing"] and "thickness#1" in rd["missing"]   # missing per item
+    # the same base field missing on both items asks the question only once
+    assert sum(1 for q in rd["questions"] if "espessura" in q.lower()) == 1
 
 
 def test_confirm_is_authoritative_and_can_reach_estimable():
     s = build_jobspec(RESULT, ENV_NOATT)
-    for k in MUST:
-        confirm(s, k, "valor")
+    _confirm_all_musts(s)
     rd = readiness(s)
     assert rd["estimable"] is True and rd["coverage"] == 1.0
-    assert s.fields["material"].source == "user" and s.fields["material"].confirmed
+    assert s.items[0]["material"].source == "user" and s.items[0]["material"].confirmed
 
 
-def test_score_drafts_presence_agreement():
-    specs = [{"message_id": "m1", "fields": {"material": {"value": "acrílico"}, "thickness": {"value": None}}}]
-    labels = {"m1": {"material": "acrílico", "thickness": ""}}
+def test_multi_item_not_estimable_until_every_item_complete():
+    draft = {"line_items": [{"item": "a"}, {"item": "b"}]}
+    s = build_jobspec(RESULT, ENV_ATT, draft=draft)
+    for k in JOB_MUST:
+        confirm(s, k, "v")
+    for k in ITEM_MUST:                                            # complete item 0 only
+        confirm(s, address(k, 0), "v")
+    assert readiness(s)["estimable"] is False                     # item 1 still missing must-haves
+    for k in ITEM_MUST:
+        confirm(s, address(k, 1), "v")
+    assert readiness(s)["estimable"] is True
+
+
+def test_from_dict_round_trips():
+    s = build_jobspec(RESULT, ENV_ATT, draft={"line_items": [{"material": "acrílico"}]})
+    s2 = JobSpec.from_dict(s.to_dict())
+    assert s2.message_id == s.message_id and s2.has_attachment == s.has_attachment
+    assert s2.items[0]["material"].value == "acrílico" and s2.items[0]["item"].value == s.items[0]["item"].value
+    assert readiness(s2) == readiness(s)
+
+
+def test_from_dict_migrates_legacy_flat_shape():
+    legacy = {"message_id": "m1", "subject": "s", "has_attachment": False,
+              "fields": {"item": {"value": "placa", "source": "llm", "confirmed": False},
+                         "material": {"value": "MDF", "source": "llm", "confirmed": False},
+                         "deadline": {"value": "2026-06-01", "source": "llm", "confirmed": False}}}
+    s = JobSpec.from_dict(legacy)
+    assert len(s.items) == 1 and s.items[0]["material"].value == "MDF"      # item-scope -> the one item
+    assert s.job_fields["deadline"].value == "2026-06-01"                  # job-scope -> job_fields
+
+
+def test_score_drafts_presence_agreement_base_field_level():
+    specs = [{"message_id": "m1",
+              "items": [{"material": {"value": "acrílico"}}, {"material": {"value": None}}],
+              "job_fields": {"delivery": {"value": None}}}]
+    labels = {"m1": {"material": "acrílico", "delivery": ""}}
     out = score_drafts(specs, labels)
-    assert out["per_field_agreement"]["material"] == 1.0   # both filled
-    assert out["per_field_agreement"]["thickness"] == 1.0  # both blank
+    assert out["per_field_agreement"]["material"] == 1.0   # drafted on some item & labeled
+    assert out["per_field_agreement"]["delivery"] == 1.0   # both blank
     assert out["n"] == 1

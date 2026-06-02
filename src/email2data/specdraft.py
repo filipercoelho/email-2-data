@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from . import llm
-from .schema import GEMINI_SPEC_SCHEMA, SPEC_LLM_KEYS, SPEC_SUPPLIED, SPEC_TOOL
+from .schema import (GEMINI_SPEC_SCHEMA, SPEC_ITEM_KEYS, SPEC_JOB_KEYS,
+                     SPEC_SUPPLIED, SPEC_TOOL)
+
+
+def _clean(v: Any) -> Any:
+    v = v.strip() if isinstance(v, str) else None
+    return v or None
 
 
 def load_playbook(path: str | Path) -> str:
@@ -31,12 +37,18 @@ def build_spec_message(env: dict[str, Any]) -> str:
 
 
 def coerce_spec(raw: dict[str, Any]) -> dict[str, Any]:
-    """Keep only known keys; empty/whitespace -> None; clamp material_supplied_by to its enum."""
-    out: dict[str, Any] = {}
-    for k in SPEC_LLM_KEYS:
-        v = raw.get(k)
-        v = v.strip() if isinstance(v, str) else None
-        out[k] = v or None
+    """Normalise the model output: a list of per-piece ``line_items`` (known keys only, empties dropped)
+    plus the job-level fields. Whitespace -> None; ``material_supplied_by`` clamped to its enum."""
+    items: list[dict[str, Any]] = []
+    for li in (raw.get("line_items") or []):
+        if not isinstance(li, dict):
+            continue
+        item = {k: _clean(li.get(k)) for k in SPEC_ITEM_KEYS}
+        if any(item.values()):
+            items.append(item)
+    out: dict[str, Any] = {"line_items": items}
+    for k in SPEC_JOB_KEYS:
+        out[k] = _clean(raw.get(k))
     if out["material_supplied_by"] not in SPEC_SUPPLIED:
         out["material_supplied_by"] = None
     return out

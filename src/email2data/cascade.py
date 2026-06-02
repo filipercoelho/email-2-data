@@ -69,20 +69,58 @@ def triage(raw: bytes, playbook: str, store: KnowledgeStore, client: Any, settin
     return result
 
 
-def triage_corpus(settings: dict[str, Any], store: KnowledgeStore, client: Any | None = None) -> dict[str, int]:
+def _processed_ids(out_path: Path) -> set[str]:
+    """message_ids already in results.jsonl — the source of truth for what triage has classified.
+
+    Keying off the result file (not a side cursor) is self-healing: delete a line and that email is
+    reprocessed next run; a previously-failed email was never written, so it retries automatically.
+    """
+    done: set[str] = set()
+    if not out_path.exists():
+        return done
+    for line in out_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            mid = json.loads(line).get("message_id")
+        except json.JSONDecodeError:
+            continue
+        if mid:
+            done.add(mid)
+    return done
+
+
+def triage_corpus(settings: dict[str, Any], store: KnowledgeStore, client: Any | None = None,
+                  *, full: bool = False) -> dict[str, int]:
+    """Classify the corpus. Incremental by default: only emails whose message_id is not already in
+    results.jsonl are processed (and appended), so Tier-1 LLM tokens are spent once per email. The
+    offline Tier-0 path is unaffected — already-processed mail is simply skipped before either tier.
+    ``full=True`` overwrites results.jsonl and reclassifies everything (rebuild escape hatch)."""
     p = paths(settings, settings["__settings_path__"])
     playbook = classifier.load_playbook(p["playbook"])
     client = client or classifier.make_client(settings)
     eml_files = sorted(p["corpus_dir"].glob("*.eml"))
     out_path = p["out_dir"] / "results.jsonl"
-    offline = llm = failed = 0
-    audit.log(p["audit_log"], "triage_started", "corpus", {"corpus": len(eml_files)})
 
-    with out_path.open("w", encoding="utf-8") as out:
+    done = set() if full else _processed_ids(out_path)
+    offline = llm = failed = skipped = new = 0
+    mode = "full" if full else "incremental"
+    audit.log(p["audit_log"], "triage_started", "corpus",
+              {"corpus": len(eml_files), "mode": mode, "already_done": len(done)})
+
+    with out_path.open("w" if full else "a", encoding="utf-8") as out:
         for eml in eml_files:
             try:
-                r = triage(eml.read_bytes(), playbook, store, client, settings)
+                raw = eml.read_bytes()
+                if done:  # cheap, offline message_id parse to gate already-classified mail
+                    mid = parse_eml(raw).get("message_id")
+                    if mid in done:
+                        skipped += 1
+                        continue
+                r = triage(raw, playbook, store, client, settings)
                 out.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+                done.add(r.message_id)  # guard against duplicate .eml files within one run
+                new += 1
                 if r.decided_by.startswith("tier0"):
                     offline += 1
                 else:
@@ -91,6 +129,7 @@ def triage_corpus(settings: dict[str, Any], store: KnowledgeStore, client: Any |
                 failed += 1
                 audit.log(p["audit_log"], "triage_failed", eml.name, {"error": type(exc).__name__})
 
-    counts = {"corpus": len(eml_files), "offline": offline, "llm": llm, "failed": failed}
+    counts = {"corpus": len(eml_files), "new": new, "skipped": skipped,
+              "offline": offline, "llm": llm, "failed": failed}
     audit.log(p["audit_log"], "triage_done", "corpus", counts)
     return counts

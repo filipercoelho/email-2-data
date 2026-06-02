@@ -3,6 +3,11 @@
 SAFETY (red-team B1): we open the mailbox read-only (EXAMINE) AND fetch only with ``BODY.PEEK[]``.
 We never issue STORE/DELETE/EXPUNGE/APPEND/COPY and never fetch ``RFC822``/``BODY[]`` (those set
 \\Seen). PEEK is the client-side guarantee; read-only select is the belt to that suspenders.
+
+Multi-mailbox: each account may list ``mailboxes`` (e.g. ``["INBOX", "Enviados"]``).  One
+connection handles all folders.  Emails from non-INBOX folders get a synthetic
+``X-Email2Data-Source: <folder>`` header prepended so downstream signal detection can set
+``direction = "outbound"`` for sent mail instead of relying on the From domain alone.
 """
 
 from __future__ import annotations
@@ -27,7 +32,18 @@ _BODY_RE = re.compile(rb"BODY\[\]", re.IGNORECASE)
 
 
 class FetchError(Exception):
-    """An account failed to fetch. Message names the account, never the credentials."""
+    """An account failed to fetch. Message names the account + the server's response, never the
+    credentials (imaplib's error carries the server's tagged NO/BAD reply, e.g.
+    ``[AUTHENTICATIONFAILED] Authentication failed.`` — the password is never echoed)."""
+
+
+def _imap_detail(exc: Exception) -> str:
+    """Human-readable IMAP error detail (server response), safe to surface — no credentials in it."""
+    parts = []
+    for a in getattr(exc, "args", ()) or ():
+        parts.append(a.decode("utf-8", "replace") if isinstance(a, (bytes, bytearray)) else str(a))
+    detail = " ".join(p for p in parts if p).strip()
+    return detail or type(exc).__name__
 
 
 def _imap_date(days: int) -> str:
@@ -36,6 +52,7 @@ def _imap_date(days: int) -> str:
 
 
 def _connect(settings: dict[str, Any], account: dict[str, Any]) -> imaplib.IMAP4:
+    """Open an authenticated IMAP connection — does NOT select a mailbox yet."""
     imap = settings["imap"]
     host, port = imap["host"], int(imap.get("port", 993))
     if imap.get("use_ssl", True):
@@ -43,10 +60,32 @@ def _connect(settings: dict[str, Any], account: dict[str, Any]) -> imaplib.IMAP4
     else:
         conn = imaplib.IMAP4(host, port)
     conn.login(account["username"], account_password(account))
-    typ, _ = conn.select(imap.get("mailbox", "INBOX"), readonly=True)  # EXAMINE
-    if typ != "OK":
-        raise FetchError(f"could not open mailbox read-only for account {account['id']!r}")
     return conn
+
+
+def _account_mailboxes(settings: dict[str, Any], account: dict[str, Any]) -> list[str]:
+    """Return the ordered list of IMAP folders to fetch for this account.
+
+    Per-account ``mailboxes`` list takes precedence; falls back to the top-level
+    ``imap.mailbox`` (default ``"INBOX"``).
+    """
+    if "mailboxes" in account:
+        return list(account["mailboxes"])
+    return [settings["imap"].get("mailbox", "INBOX")]
+
+
+def _source_header(folder: str) -> bytes:
+    """Synthetic header injected into emails fetched from non-INBOX folders."""
+    return f"X-Email2Data-Source: {folder}\r\n".encode()
+
+
+def _quote_mailbox(name: str) -> str:
+    """Quote a mailbox name for SELECT/EXAMINE. imaplib does not quote, so a folder whose name
+    contains a space (e.g. ``INBOX.Pedidos orcamento``) is otherwise split into two arguments and
+    the select fails with NONEXISTENT. Already-quoted names are passed through."""
+    if name.startswith('"') and name.endswith('"'):
+        return name
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _extract_rfc822(fetch_response: Any) -> bytes | None:
@@ -56,41 +95,152 @@ def _extract_rfc822(fetch_response: Any) -> bytes | None:
     return None
 
 
-def fetch_account(settings: dict[str, Any], account: dict[str, Any]) -> list[Path]:
+def _read_uidvalidity(conn: imaplib.IMAP4) -> int | None:
+    """UIDVALIDITY epoch of the currently-selected mailbox, or None if the server omits it.
+
+    A change in this value means the server renumbered UIDs — any stored ``last_uid`` is meaningless
+    and we must re-bootstrap.
+    """
+    try:
+        _typ, data = conn.response("UIDVALIDITY")
+    except Exception:  # noqa: BLE001 — server quirk; treat as unknown
+        return None
+    for item in data or []:
+        if item is None:
+            continue
+        if isinstance(item, (bytes, bytearray)):
+            item = item.decode("ascii", "ignore")
+        try:
+            return int(item)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fetch_mailbox(
+    conn: imaplib.IMAP4,
+    mailbox: str,
+    corpus_dir: Path,
+    audit_log: Path,
+    account_id: str,
+    since_days: int,
+    max_messages: int,
+    *,
+    cursor: tuple[int, int] | None = None,
+    full: bool = False,
+) -> tuple[list[Path], int | None, int]:
+    """Fetch from one already-authenticated IMAP connection.
+
+    Selects ``mailbox`` read-only, then searches one of two ways:
+      * **incremental** — a usable cursor ``(uidvalidity, last_uid)`` whose epoch still matches and
+        ``full`` is False: ``UID <last_uid+1>:*`` (only mail arrived since the last retrieve);
+      * **bootstrap** — otherwise: ``SINCE <since_days>`` capped at ``max_messages`` (first run, epoch
+        change, or a forced ``full`` rebuild).
+
+    Fetches with BODY.PEEK[]. Non-INBOX folders get ``X-Email2Data-Source`` prepended. Already-cached
+    messages (by message_id filename) are skipped silently — the belt to the cursor's suspenders.
+
+    Returns ``(written_paths, uidvalidity, max_uid_seen)`` so the caller can persist the new cursor.
+    ``max_uid_seen`` is 0 when nothing matched.
+    """
+    typ, _ = conn.select(_quote_mailbox(mailbox), readonly=True)  # EXAMINE
+    if typ != "OK":
+        audit.log(audit_log, "mailbox_skip", account_id, {"mailbox": mailbox, "reason": "select_failed"})
+        return [], None, 0
+
+    uidvalidity = _read_uidvalidity(conn)
+    last_uid = 0
+    incremental = (
+        not full
+        and cursor is not None
+        and uidvalidity is not None
+        and cursor[0] == uidvalidity
+    )
+    if incremental:
+        last_uid = cursor[1]  # type: ignore[index]
+
+    if incremental:
+        typ, data = conn.uid("SEARCH", None, "UID", f"{last_uid + 1}:*")
+    else:
+        typ, data = conn.uid("SEARCH", None, "SINCE", _imap_date(since_days))
+    if typ != "OK":
+        raise FetchError(f"SEARCH failed for account {account_id!r} mailbox {mailbox!r}")
+    uids = (data[0] or b"").split()
+
+    if incremental:
+        # IMAP ``N:*`` always echoes the highest message even when N exceeds it — filter so we never
+        # re-pull the watermark message. Oldest-first + cap so a large backlog is drained across runs
+        # (watermark advances only to what we actually fetched) instead of skipping old new mail.
+        uids = [u for u in uids if int(u) > last_uid]
+        uids = uids[:max_messages]
+    else:
+        uids = uids[-max_messages:]  # most recent N
+
+    audit.log(audit_log, "fetch_mode", account_id,
+              {"mailbox": mailbox, "mode": "incremental" if incremental else "bootstrap",
+               "from_uid": last_uid if incremental else None, "candidates": len(uids)})
+
+    inject = mailbox.upper() != "INBOX"
+    written: list[Path] = []
+    max_uid = last_uid
+    for uid in uids:
+        typ, resp = conn.uid("FETCH", uid, _FETCH_ITEM)
+        if typ != "OK":
+            continue
+        raw = _extract_rfc822(resp)
+        if not raw:
+            continue
+        try:
+            max_uid = max(max_uid, int(uid))
+        except (TypeError, ValueError):
+            pass
+        if inject:
+            raw = _source_header(mailbox) + raw
+        dest = corpus_dir / safe_filename(canonical_id_from_raw(raw))
+        if dest.exists():
+            written.append(dest)
+            continue
+        dest.write_bytes(raw)
+        written.append(dest)
+        audit.log(audit_log, "message_cached", account_id, {"file": dest.name, "mailbox": mailbox})
+    return written, uidvalidity, max_uid
+
+
+def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
+                  sync: Any | None = None, full: bool = False) -> list[Path]:
+    """Fetch one account incrementally. ``sync`` is a ``sync.SyncStore`` holding the per-mailbox UID
+    watermark; when omitted, fetch is stateless (bootstrap every time). ``full`` forces a bootstrap and
+    still advances the cursor."""
     p = paths(settings, settings["__settings_path__"])
     corpus_dir, audit_log = p["corpus_dir"], p["audit_log"]
     since_days = int(settings.get("fetch", {}).get("since_days", 30))
     max_messages = int(settings.get("fetch", {}).get("max_messages", 200))
+    mailboxes = _account_mailboxes(settings, account)
+    account_id = account["id"]
 
     conn = None
     written: list[Path] = []
     try:
         conn = _connect(settings, account)
-        typ, data = conn.uid("SEARCH", None, "SINCE", _imap_date(since_days))
-        if typ != "OK":
-            raise FetchError(f"SEARCH failed for account {account['id']!r}")
-        uids = (data[0] or b"").split()
-        uids = uids[-max_messages:]  # most recent N
-
-        for uid in uids:
-            typ, resp = conn.uid("FETCH", uid, _FETCH_ITEM)
-            if typ != "OK":
-                continue
-            raw = _extract_rfc822(resp)
-            if not raw:
-                continue
-            dest = corpus_dir / safe_filename(canonical_id_from_raw(raw))
-            if dest.exists():
-                written.append(dest)
-                continue
-            dest.write_bytes(raw)
-            written.append(dest)
-            audit.log(audit_log, "message_cached", account["id"], {"file": dest.name})
+        for mailbox in mailboxes:
+            try:
+                cursor = sync.get_cursor(account_id, mailbox) if sync is not None else None
+                paths_w, uidvalidity, max_uid = _fetch_mailbox(
+                    conn, mailbox, corpus_dir, audit_log, account_id, since_days, max_messages,
+                    cursor=cursor, full=full)
+                written.extend(paths_w)
+                # Persist only when we actually saw mail AND know the epoch — an empty poll must not
+                # clobber a good watermark, and a missing UIDVALIDITY can't anchor one.
+                if sync is not None and uidvalidity is not None and max_uid > 0:
+                    sync.set_cursor(account_id, mailbox, uidvalidity, max_uid)
+            except FetchError:
+                raise
+            except imaplib.IMAP4.error as exc:
+                raise FetchError(f"IMAP error for account {account_id!r} mailbox {mailbox!r}: "
+                                 f"{_imap_detail(exc)}") from exc
         return written
     except imaplib.IMAP4.error as exc:
-        # Do not interpolate the exception verbatim into user output beyond the type — it can echo
-        # server text; keep it terse and account-scoped.
-        raise FetchError(f"IMAP error for account {account['id']!r}: {type(exc).__name__}") from exc
+        raise FetchError(f"IMAP error for account {account_id!r}: {_imap_detail(exc)}") from exc
     finally:
         if conn is not None:
             try:
@@ -99,22 +249,34 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any]) -> list[Pat
                 pass
 
 
-def fetch_all(settings: dict[str, Any]) -> dict[str, int]:
-    """Fetch every configured account. Returns {account_id: messages_cached}. Per-account failures
-    are audited and re-raised so the CLI can report which account broke."""
+def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool = False) -> dict[str, int]:
+    """Fetch every configured account incrementally. Returns {account_id: messages_cached}.
+
+    Opens its own ``sync.SyncStore`` (``out/sync.db``) when ``sync`` is not supplied, so the
+    "since last retrieve" watermark works out of the box. ``full=True`` re-bootstraps every mailbox.
+    Per-account failures are audited and re-raised so the CLI can report which account broke."""
     p = paths(settings, settings["__settings_path__"])
     audit_log = p["audit_log"]
     results: dict[str, int] = {}
     accounts = settings["imap"].get("accounts", [])
-    audit.log(audit_log, "fetch_started", "all", {"accounts": len(accounts)})
-    for account in accounts:
-        started = time.monotonic()
-        files = fetch_account(settings, account)
-        results[account["id"]] = len(files)
-        audit.log(
-            audit_log,
-            "fetch_done",
-            account["id"],
-            {"messages": len(files), "elapsed_s": round(time.monotonic() - started, 2)},
-        )
+    audit.log(audit_log, "fetch_started", "all", {"accounts": len(accounts), "full": full})
+
+    owns_sync = sync is None
+    if owns_sync:
+        from .sync import SyncStore
+        sync = SyncStore(p["out_dir"] / "sync.db").connect()
+    try:
+        for account in accounts:
+            started = time.monotonic()
+            files = fetch_account(settings, account, sync=sync, full=full)
+            results[account["id"]] = len(files)
+            audit.log(
+                audit_log,
+                "fetch_done",
+                account["id"],
+                {"messages": len(files), "elapsed_s": round(time.monotonic() - started, 2)},
+            )
+    finally:
+        if owns_sync and sync is not None:
+            sync.close()
     return results

@@ -16,6 +16,36 @@ class ConfigError(Exception):
     """Configuration or secret-resolution failure with an actionable message."""
 
 
+def load_dotenv(path: str | Path = ".env") -> int:
+    """Populate ``os.environ`` from a ``.env`` file (KEY=VALUE per line). Zero-dependency.
+
+    Replaces ``export VAR=...`` for local + Docker runs. Already-set environment variables win (so a
+    real ``export`` or a container ``-e`` still overrides the file), and values are never logged —
+    secrets enter the process here and nowhere else. Lines that are blank or start with ``#`` are
+    skipped; surrounding quotes and a leading ``export `` are stripped. Missing file is a no-op.
+    Returns the number of keys set.
+    """
+    p = Path(path)
+    if not p.exists():
+        return 0
+    n = 0
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+            n += 1
+    return n
+
+
 def load_settings(path: str | Path = "config/settings.json") -> dict[str, Any]:
     p = Path(path)
     if not p.exists():

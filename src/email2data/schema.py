@@ -150,21 +150,41 @@ GEMINI_TRIAGE_SCHEMA = {
 # --- Phase B: job-spec draft (second pass, tiered to LEAD/PO) -----------------------------------
 # The LLM drafts only the SEMANTIC spec fields it can read in the body; everything is nullable and
 # the model is told to return null (not guess) — the spec is often in an attachment it cannot read.
-SPEC_LLM_KEYS = ["item", "material", "dimensions", "thickness", "quantity",
-                 "colour_finish", "material_supplied_by", "delivery"]
+# A single email may list SEVERAL distinct pieces, each with its own material/dimensions/etc, so the
+# per-piece fields are drafted as a LIST of line items; ``material_supplied_by``/``delivery`` are
+# job-level (one per email). ``process`` is internal (set by us), so the LLM never drafts it.
+SPEC_ITEM_KEYS = ["item", "material", "dimensions", "thickness", "quantity", "colour_finish"]
+SPEC_JOB_KEYS = ["material_supplied_by", "delivery"]
+SPEC_LLM_KEYS = SPEC_ITEM_KEYS + SPEC_JOB_KEYS  # kept for callers that want the full flat key list
 SPEC_SUPPLIED = ["client", "us", "unclear"]  # material_supplied_by is coerced to one of these or None
 
 SPEC_TOOL = {
     "name": "record_job_spec",
-    "description": "Extract the fabrication job spec explicitly stated in the email body. Return null "
-                   "for anything not stated — do NOT guess; the spec is often in an attachment you cannot read.",
+    "description": "Extract the fabrication job spec explicitly stated in the email body. List EACH "
+                   "distinct piece as its own line item (different material/dimensions/quantity = "
+                   "different item). Return null for anything not stated — do NOT guess; the spec is "
+                   "often in an attachment you cannot read.",
     "input_schema": {
         "type": "object",
-        "properties": {k: {"type": ["string", "null"]} for k in SPEC_LLM_KEYS},
+        "properties": {
+            "line_items": {
+                "type": "array",
+                "items": {"type": "object",
+                          "properties": {k: {"type": ["string", "null"]} for k in SPEC_ITEM_KEYS}},
+            },
+            **{k: {"type": ["string", "null"]} for k in SPEC_JOB_KEYS},
+        },
         "required": [],
     },
 }
 GEMINI_SPEC_SCHEMA = {
     "type": "object",
-    "properties": {k: {"type": "string", "nullable": True} for k in SPEC_LLM_KEYS},
+    "properties": {
+        "line_items": {
+            "type": "array",
+            "items": {"type": "object",
+                      "properties": {k: {"type": "string", "nullable": True} for k in SPEC_ITEM_KEYS}},
+        },
+        **{k: {"type": "string", "nullable": True} for k in SPEC_JOB_KEYS},
+    },
 }

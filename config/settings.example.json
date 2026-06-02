@@ -24,6 +24,10 @@
     "since_days": 30,
     "max_messages": 200
   },
+  "sync": {
+    "_comment": "fetch + triage are incremental (UID watermark + results.jsonl gate); on_startup auto-runs one sync in the background each time `email2data serve` boots",
+    "on_startup": true
+  },
   "llm": {
     "provider": "vertex_gemini",
     "_provider_options": "vertex_gemini (Google Gemini on Vertex, uses gcloud ADC) | anthropic (needs api_key_env)",

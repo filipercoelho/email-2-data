@@ -8,7 +8,7 @@ from email2data.signals import Signals
 
 ENV = {"message_id": "mid:x@y", "subject": "s", "from": {"email": "a@b.pt"},
        "date": "2026-05-27", "attachments": [], "body_text": "corpo"}
-SIG = Signals(sender_domain="b.pt", direction="inbound", is_bulk=False, is_automated=False, is_forward=False)
+SIG = Signals(sender_domain="b.pt", direction="inbound", source_mailbox="", is_bulk=False, is_automated=False, is_forward=False)
 SETTINGS = {"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash",
                     "max_tokens": 256, "max_retries": 3, "ignore_confidence_floor": 0.85}}
 

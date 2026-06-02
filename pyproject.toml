@@ -12,6 +12,13 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+vertex = [
+    "google-genai>=0.3",
+]
 
 [project.scripts]
 email2data = "email2data.cli:main"

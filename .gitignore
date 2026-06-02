@@ -2,9 +2,21 @@
 .AppleDouble
 .LSOverride
 
-# Env
+# Env — never commit real .env files; the template IS committed so others know what to fill in
 .env
 .env.*
+!.env.example
+
+# Credentials & keys — never commit
+.secret
+*.pem
+*.key
+*-key.json
+config/sa-key.json
+service-account*.json
+credentials*.json
+sa.json
+gcloud-*.json
 
 # Python
 __pycache__/
@@ -18,10 +30,13 @@ node_modules/
 # Logs
 *.log
 
-# Secrets & local data — never commit
+# Local data — never commit (real inbox content, contact DBs, watermarks)
 config/settings.json
 labels/*.csv
 corpus/*.eml
+*.db
+*.sqlite
+*.sqlite3
 # out/ holds personal data (subjects, addresses, bodies, contact DB) — ignore all but the keep file
 out/*
 !out/.gitkeep

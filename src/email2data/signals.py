@@ -17,6 +17,9 @@ from email.utils import parseaddr
 
 OUR_DOMAIN = "lindoservico.pt"
 
+# Folder names that indicate "we sent this" — matched case-insensitively.
+_SENT_FOLDER_RE = re.compile(r"\b(sent|enviados?)\b", re.I)
+
 # Header signals for bulk (mass mail) vs automated (auto-replies/notifications). RFC 2369 / 3834.
 _NO_REPLY_RE = re.compile(r"\b(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster)\b", re.I)
 # Forward/quote banners across clients + PT (detection only — we do not parse the block).
@@ -33,7 +36,8 @@ _FORWARD_MARKERS = (
 @dataclass
 class Signals:
     sender_domain: str
-    direction: str            # "internal" if sender domain is ours, else "inbound"
+    direction: str            # "inbound" | "internal" (our domain→our domain) | "outbound" (Sent folder)
+    source_mailbox: str       # IMAP folder this came from; "" for INBOX / unknown
     is_bulk: bool             # mass/marketing mail (List-*, Feedback-ID, Precedence bulk/list)
     is_automated: bool        # auto-reply/notification (Auto-Submitted, X-Auto-Response-Suppress, no-reply)
     is_forward: bool          # body/subject looks like a forward/quote of another message
@@ -54,9 +58,15 @@ def _h(msg: Message, name: str) -> str:
 
 
 def header_signals(msg: Message) -> Signals:
+    source_mailbox = _h(msg, "X-Email2Data-Source")
     _, frm = parseaddr(_h(msg, "From"))
     domain = (frm.rsplit("@", 1)[-1] if "@" in frm else "").lower()
-    direction = "internal" if domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN) else "inbound"
+    if source_mailbox and _SENT_FOLDER_RE.search(source_mailbox):
+        direction = "outbound"
+    elif domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN):
+        direction = "internal"
+    else:
+        direction = "inbound"
 
     bulk_hit = ""
     if _h(msg, "List-Unsubscribe") or _h(msg, "List-Id"):
@@ -77,6 +87,7 @@ def header_signals(msg: Message) -> Signals:
     return Signals(
         sender_domain=domain,
         direction=direction,
+        source_mailbox=source_mailbox,
         is_bulk=is_bulk,
         is_automated=bool(auto),
         is_forward=False,

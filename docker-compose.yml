@@ -1,0 +1,32 @@
+# email-2-data — one-command local deploy:  docker compose up --build
+# Secrets come from .env (never committed). Data dirs are mounted so the image stays clean.
+services:
+  email2data:
+    build: .
+    # Publish ONLY to host loopback — this is a single-user local workspace, never a public service.
+    # NEVER 8000.
+    ports:
+      - "127.0.0.1:8042:8042"
+    volumes:
+      # Secrets: mount .env and let the app's own loader (config.load_dotenv) read it LITERALLY.
+      # We deliberately do NOT use compose `env_file:` — compose interpolates env_file values and
+      # collapses `$$` -> `$`, which silently corrupts any password containing `$` (and would differ
+      # from local runs). Mounting the file keeps one parser and identical behavior everywhere.
+      - ./.env:/app/.env:ro
+      # settings.json + gazetteer.csv (read-only): runtime config, not baked into the image.
+      - ./config:/app/config:ro
+      # Persisted across restarts: the .eml corpus, results.jsonl, and the sync.db UID watermark.
+      - ./corpus:/app/corpus
+      - ./out:/app/out
+      # ── Vertex/Gemini auth (llm.provider = "vertex_gemini") ─────────────────────────────────────
+      # Default: reuse the gcloud login you already have on the host (Application Default Credentials).
+      # The SDK auto-discovers it at $HOME/.config/gcloud — nothing to create. Run once on the host:
+      #   gcloud auth application-default login
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+      #
+      # Portable alternative (a server with no developer login): drop a service-account JSON at
+      # config/sa-key.json (gitignored) and uncomment the env line below. It is already inside the
+      # mounted config/ dir, so no extra volume is needed.
+    # environment:
+    #   - GOOGLE_APPLICATION_CREDENTIALS=/app/config/sa-key.json
+    restart: unless-stopped

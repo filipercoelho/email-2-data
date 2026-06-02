@@ -71,7 +71,9 @@ class KnowledgeStore:
         self._conn: Optional[sqlite3.Connection] = None
 
     def connect(self) -> "KnowledgeStore":
-        self._conn = sqlite3.connect(self.db_path)
+        # check_same_thread=False for consistency with the other stores: only used in single-threaded
+        # CLI triage today, but this keeps it safe if it is ever shared across the webapp threadpool.
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         return self

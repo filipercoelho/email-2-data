@@ -31,6 +31,46 @@ def call(client: Any, cfg: dict[str, Any], system: str, user: str, *,
     return _anthropic(client, cfg, system, user, tool, text, temperature)
 
 
+def call_stream(client: Any, cfg: dict[str, Any], system: str, user: str, *,
+                temperature: float = 0.0):
+    """Yield text chunks as the model produces them (text-only — for the reply draft UI).
+
+    Provider-level token streaming. No retry-on-empty here: the caller (a live UI request) shows
+    partial text immediately, and the non-streaming ``call(..., text=True)`` remains the tested
+    fallback path when streaming is unavailable.
+    """
+    provider = cfg.get("provider", "anthropic")
+    if provider == "vertex_gemini":
+        yield from _gemini_stream(client, cfg, system, user, temperature)
+    else:
+        yield from _anthropic_stream(client, cfg, system, user, temperature)
+
+
+def _gemini_stream(client, cfg, system, user, temperature):
+    from google.genai import types
+
+    cfg_obj = types.GenerateContentConfig(
+        system_instruction=system, temperature=temperature,
+        max_output_tokens=int(cfg.get("max_tokens", 1024)),
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    stream = client.models.generate_content_stream(model=cfg["model"], contents=user, config=cfg_obj)
+    for chunk in stream:
+        if getattr(chunk, "text", None):
+            yield chunk.text
+
+
+def _anthropic_stream(client, cfg, system, user, temperature):
+    with client.messages.stream(
+        model=cfg["model"], max_tokens=int(cfg.get("max_tokens", 1024)), temperature=temperature,
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user}],
+    ) as stream:
+        for text in stream.text_stream:
+            if text:
+                yield text
+
+
 def _gemini(client, cfg, system, user, schema, text, temperature) -> Any:
     from google.genai import types
 

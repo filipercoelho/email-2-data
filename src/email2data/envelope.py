@@ -131,6 +131,24 @@ def _references(value: str | None) -> list[str]:
     return re.findall(r"<[^>]+>", value)
 
 
+def attachment_part(raw: bytes, index: int) -> tuple[str, str, bytes] | None:
+    """Return (filename, content_type, payload_bytes) for the Nth attachment, in the SAME order as
+    ``_attachments``. Bytes only — no parsing/extraction (we never read the contents). None if the
+    index is out of range. Used to serve an attachment for view/download in the UI."""
+    i = 0
+    for part in message_from_bytes(raw).walk():
+        disp = str(part.get("Content-Disposition") or "").lower()
+        filename = part.get_filename()
+        if "attachment" not in disp and not filename:
+            continue
+        if i == index:
+            payload = part.get_payload(decode=True) or b""
+            name = _decode_header(filename) if filename else f"anexo-{index}"
+            return name, (part.get_content_type() or "application/octet-stream"), payload
+        i += 1
+    return None
+
+
 def parse_eml(raw: bytes) -> dict[str, Any]:
     """Raw RFC822 bytes -> trimmed envelope.v1 dict (see approach.md data flow)."""
     msg = message_from_bytes(raw)
