@@ -75,7 +75,7 @@ TEMPLATE = r"""<!doctype html>
   .zero .s{display:block;color:var(--mut2);font-size:13px;font-weight:400;margin-top:8px}
   .hint{margin-top:14px;color:var(--mut2);font-size:11.5px;text-align:center}
   .hint b{color:var(--mut);font-weight:680}
-  .hidden{display:none}
+  .hidden{display:none!important}  /* utility: must beat .overlay's display:flex regardless of source order */
   .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--tx);color:#fff;
     padding:9px 16px;border-radius:9px;font-size:13px;box-shadow:var(--shadow);z-index:60}
   .menu{position:absolute;background:#fff;border:1px solid var(--bd);border-radius:10px;box-shadow:0 4px 16px rgba(20,24,28,.14);z-index:50;min-width:170px;overflow:hidden;padding:4px}
@@ -208,6 +208,7 @@ document.addEventListener('keydown', e => {
   if(tag==='input' || tag==='textarea'){ if(e.key==='Escape') e.target.blur(); return; }
   if(e.key==='?'){ $('#help').classList.toggle('hidden'); return; }
   if(e.key==='Escape'){ $('#help').classList.add('hidden'); $('#menu').classList.add('hidden'); return; }
+  if(!$('#help').classList.contains('hidden')) return;  // help modal open — keys inert behind it
   if(!$('#menu').classList.contains('hidden')) return;  // menu open — let its own clicks drive
   if(!rows.length) return;
   if(e.key==='j' || e.key==='ArrowDown'){ focus = Math.min(rows.length-1, focus+1); render(); scrollFocus(); e.preventDefault(); }
@@ -229,6 +230,7 @@ $('#menu').addEventListener('click', e => {
   const mi = e.target.closest('.mi'); if(!mi) return;
   const m = $('#menu'); setOwner(parseInt(m.dataset.i, 10), mi.dataset.n); m.classList.add('hidden');
 });
+$('#help').addEventListener('click', e => { if(e.target.id === 'help') $('#help').classList.add('hidden'); });
 document.addEventListener('click', e => {
   if(!e.target.closest('#menu') && !e.target.closest('[data-act="owner"]')) $('#menu').classList.add('hidden');
 });
