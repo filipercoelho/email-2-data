@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import classifier, crm as _crm, export as _export, jobspec as js, project as _project, replydraft, report
+from . import (classifier, cockpit, crm as _crm, export as _export, fila_page, jobspec as js,
+               project as _project, replydraft, report)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
 
@@ -50,6 +51,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     rpb = (reply_pb if reply_pb is not None
            else replydraft.load_playbook(Path(settings["__settings_path__"]).parents[1] / "config" / "reply_playbook.md"))
     emails, contacts, cost = prepared if prepared is not None else report.prepare(settings)
+    _team = list(settings.get("team", []) or [])  # owner roster for the Fila (A5); editable in settings.json
 
     # When the caller injects state (tests), the data isn't backed by real files — disable the
     # rebuild/startup-sync machinery so we never try to re-read results.jsonl from a fixture.
@@ -93,11 +95,18 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     _sync_lock = threading.Lock()
 
     def _rebuild_state() -> None:
-        nonlocal emails, contacts, cost, jspecs
+        nonlocal emails, contacts, cost, jspecs, _crmdb
         emails, contacts, cost = report.prepare(settings)
         jspecs = _load_jobspecs(_outdir())
         _idx.clear()
         _idx_state["built"] = False
+        # run_sync rebuilt crm.db (a new inode) — reopen so the Fila reads fresh relations, not the
+        # now-unlinked file the previous connection still points at.
+        if settings.get("__settings_path__"):
+            if _crmdb is not None:
+                _crmdb.close()
+            _db = _outdir() / "crm.db"
+            _crmdb = _crm.CrmStore(_db).connect() if _db.exists() else None
 
     def _run_sync(full: bool = False) -> dict:
         """Fetch new mail + triage new emails, then rebuild render state. Returns counts, a
@@ -467,6 +476,44 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         disp = "inline" if (ctype.startswith("image/") or ctype == "application/pdf") else "attachment"
         return Response(content=data, media_type=ctype,
                         headers={"Content-Disposition": f'{disp}; filename="{name.replace(chr(34), chr(39))}"'})
+
+    # -------------------------------------------------------------------------
+    # Cockpit Fila — response queue (cockpit.build_fila over the CRM + thread_state overlay).
+    # A SEPARATE render path from "/" (the inbox report) so it doesn't collide with that template.
+    # -------------------------------------------------------------------------
+    def _fila_rows() -> list[dict[str, Any]]:
+        if _crmdb is None:
+            return []
+        return cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
+                                  now=datetime.now(timezone.utc))
+
+    @app.get("/fila", response_class=HTMLResponse)
+    def fila():
+        return fila_page.build_fila_html(
+            _fila_rows(), _team, now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+    @app.get("/api/fila")
+    def api_fila():
+        return JSONResponse({"rows": _fila_rows(), "team": _team})
+
+    @app.post("/api/thread/handled")
+    async def thread_handled(request: Request):
+        body = await request.json()
+        root = str(body.get("thread_root", "")).strip()
+        if not root:
+            return JSONResponse({"error": "thread_root required"}, status_code=400)
+        ws.set_thread_handled(root, bool(body.get("handled", True)))
+        return JSONResponse({"ok": True, "thread_root": root})
+
+    @app.post("/api/thread/owner")
+    async def thread_owner(request: Request):
+        body = await request.json()
+        root = str(body.get("thread_root", "")).strip()
+        if not root:
+            return JSONResponse({"error": "thread_root required"}, status_code=400)
+        owner = str(body.get("owner", "")).strip()
+        ws.set_thread_owner(root, owner)
+        return JSONResponse({"ok": True, "thread_root": root, "owner": owner})
 
     return app
 

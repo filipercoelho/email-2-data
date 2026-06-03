@@ -80,17 +80,20 @@ def run_sync(
     *,
     do_fetch: bool = True,
     do_triage: bool = True,
+    do_crm: bool = True,
     full: bool = False,
 ) -> dict[str, int]:
     """Pull only new mail, then classify only the new emails. Shared by CLI, button, and startup.
 
     Token spend is bounded by both layers being incremental: fetch skips already-seen UIDs, triage
     skips message_ids already in results.jsonl. ``full=True`` forces a bootstrap + full reclassify.
+    ``do_crm`` rebuilds ``out/crm.db`` from the (now-updated) verdicts so the cockpit Fila never reads a
+    stale relations DB — cheap (deterministic, no LLM) and keeps thread/response state current.
     """
-    from . import cascade, fetch
+    from . import cascade, crm, fetch
 
     out: dict[str, int] = {"fetched": 0, "triaged_new": 0, "triaged_skipped": 0,
-                           "offline": 0, "llm": 0, "failed": 0}
+                           "offline": 0, "llm": 0, "failed": 0, "crm_recorded": 0}
     if do_fetch:
         counts = fetch.fetch_all(settings, full=full)
         out["fetched"] = sum(counts.values())
@@ -105,6 +108,8 @@ def run_sync(
         out["offline"] = t.get("offline", 0)
         out["llm"] = t.get("llm", 0)
         out["failed"] = t.get("failed", 0)
+    if do_crm:
+        out["crm_recorded"] = crm.build_crm(settings).get("recorded", 0)
     return out
 
 

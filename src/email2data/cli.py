@@ -150,40 +150,18 @@ def cmd_eval(args: argparse.Namespace) -> int:
 def cmd_crm(args: argparse.Namespace) -> int:
     """Build the CRM PoC from the corpus + existing verdicts (deterministic, no LLM)."""
     from . import crm
-    from .envelope import parse_eml
 
     settings = _load_settings(args)
     p = paths(settings, settings["__settings_path__"])
-    results_path = p["out_dir"] / "results.jsonl"
-    if not results_path.exists():
+    if not (p["out_dir"] / "results.jsonl").exists():
         print("No out/results.jsonl — run `email2data triage` first.", file=sys.stderr)
         return 1
-    verdicts = {r["message_id"]: r for r in (json.loads(x) for x in results_path.read_text().splitlines() if x)}
-
-    db = p["out_dir"] / "crm.db"
-    if db.exists():
-        db.unlink()  # rebuild clean — contact rollups are cumulative
-    store = crm.CrmStore(db).connect()
-    recorded = skipped = 0
-    for eml in sorted(p["corpus_dir"].glob("*.eml")):
-        try:
-            env = parse_eml(eml.read_bytes())
-        except Exception:  # noqa: BLE001 — isolate per-email parse failures
-            skipped += 1
-            continue
-        v = verdicts.get(env["message_id"])
-        if not v:
-            skipped += 1
-            continue
-        store.record(env, v)
-        recorded += 1
-
-    rollup = store.top_contacts(limit=10_000, external_only=False)
-    (p["out_dir"] / "contacts.jsonl").write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in rollup), encoding="utf-8")
-    c = store.counts()
-    print(f"\nRecorded {recorded} interactions ({skipped} skipped: parse fail or no verdict).")
-    print(f"Contacts: {c['contacts']} ({c['external']} external) | Interactions: {c['interactions']}")
+    counts = crm.build_crm(settings)  # shared with `sync` so the relations DB is never stale
+    print(f"\nRecorded {counts['recorded']} interactions "
+          f"({counts['skipped']} skipped: parse fail or no verdict).")
+    print(f"Contacts: {counts['contacts']} ({counts['external']} external) | "
+          f"Interactions: {counts['interactions']}")
+    store = crm.CrmStore(p["out_dir"] / "crm.db").connect()  # reopen the fresh DB for the rollup table
     print("\nTop external contacts (by volume):")
     print(f"  {'NAME':<20} {'EMAIL':<32} {'CPARTY':<9} {'MSG':>3} {'F/T/C':>7} {'LAST SEEN':<11} LAST PURPOSE")
     print("  " + "-" * 108)

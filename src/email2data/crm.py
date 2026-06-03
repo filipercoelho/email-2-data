@@ -401,3 +401,44 @@ class CrmStore:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def build_crm(settings: dict[str, Any]) -> dict[str, int]:
+    """Rebuild ``out/crm.db`` clean from the corpus + current verdicts (deterministic, no LLM).
+
+    Extracted from ``cli.cmd_crm`` so the SAME rebuild runs as part of ``sync`` — otherwise the cockpit
+    Fila (which reads ``all_interactions``) would serve a relations DB that lags the latest triage.
+    Also writes ``contacts.jsonl`` (the report's contact rollup). Returns counts."""
+    from .config import paths as _paths
+    from .envelope import parse_eml
+
+    p = _paths(settings, settings["__settings_path__"])
+    results_path = p["out_dir"] / "results.jsonl"
+    if not results_path.exists():
+        return {"recorded": 0, "skipped": 0, "interactions": 0, "contacts": 0, "external": 0}
+    verdicts = {r["message_id"]: r for r in
+                (json.loads(x) for x in results_path.read_text().splitlines() if x.strip())}
+    db = p["out_dir"] / "crm.db"
+    if db.exists():
+        db.unlink()  # rebuild clean — contact rollups are cumulative
+    store = CrmStore(db).connect()
+    recorded = skipped = 0
+    for eml in sorted(p["corpus_dir"].glob("*.eml")):
+        try:
+            env = parse_eml(eml.read_bytes())
+        except Exception:  # noqa: BLE001 — isolate per-email parse failures
+            skipped += 1
+            continue
+        v = verdicts.get(env["message_id"])
+        if not v:
+            skipped += 1
+            continue
+        store.record(env, v)
+        recorded += 1
+    rollup = store.top_contacts(limit=10_000, external_only=False)
+    (p["out_dir"] / "contacts.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rollup), encoding="utf-8")
+    c = store.counts()
+    store.close()
+    return {"recorded": recorded, "skipped": skipped, "interactions": c["interactions"],
+            "contacts": c["contacts"], "external": c["external"]}
