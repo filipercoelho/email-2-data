@@ -24,7 +24,8 @@ def _env(mid, hours_ago, frm="maria@acme.pt", subject="Orçamento 50 placas"):
 
 def _verdict(cp="CLIENT", purpose="ESTIMATE_REQUEST_FROM_CLIENT"):
     return {"direction": "inbound", "counterparty": cp, "purpose": purpose,
-            "priority": "HIGH", "urgency": 80, "entities": {}}
+            "priority": "HIGH", "urgency": 80, "entities": {},
+            "confidence": 0.9, "decided_by": "tier1:gemini-2.5-flash", "reason": "pede orçamento"}
 
 
 def _crm_with(records):
@@ -92,3 +93,28 @@ def test_build_fila_html_smoke():
                     "label": "devemos resposta há 6 h", "since": None}}],
         ["Pedro"], now_iso="2026-06-03T12:00:00")
     assert "<html" in html and "Teste" in html and "devemos resposta" in html
+
+
+def test_api_fila_includes_trust(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    rows = {x["thread_root"]: x for x in cl.get("/api/fila").json()["rows"]}
+    assert rows["t1"]["trust"]["decided_by"] == "tier1:gemini-2.5-flash"
+    assert rows["t1"]["trust"]["confidence"] == 0.9
+
+
+def test_crm_carries_trust_fields():
+    c = _crm_with([(_env("t1", 3), _verdict())])
+    row = c.all_interactions()[0]
+    assert row["confidence"] == 0.9 and row["decided_by"] == "tier1:gemini-2.5-flash"
+    assert row["reason"] == "pede orçamento"
+
+
+def test_home_serves_fila(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    r = cl.get("/")
+    assert r.status_code == 200 and "Fila" in r.text
+
+
+def test_inbox_serves_report(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.get("/inbox").status_code == 200

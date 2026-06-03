@@ -155,9 +155,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         d = spec.to_dict()
         return {"readiness": rd, "job_fields": d["job_fields"], "items": d["items"]}
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        # overlay current decisions onto each job's auto-spec (idempotent: always from the original)
+    @app.get("/inbox", response_class=HTMLResponse)
+    def inbox():
+        # The inbox report (was "/"; the Fila is now home — A3). overlay decisions onto each job's
+        # auto-spec (idempotent: always from the original).
         for e in emails:
             j = jspecs.get(e["message_id"])
             if j:
@@ -485,8 +486,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if _crmdb is None:
             return []
         return cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
-                                  now=datetime.now(timezone.utc))
+                                  now=datetime.now(timezone.utc),
+                                  reclassified=ws.get_reclassifications())
 
+    @app.get("/", response_class=HTMLResponse)
     @app.get("/fila", response_class=HTMLResponse)
     def fila():
         return fila_page.build_fila_html(

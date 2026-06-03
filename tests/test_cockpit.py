@@ -20,10 +20,11 @@ def ago(hours: float) -> str:
 
 def _row(root, mid, date, *, direction="inbound", counterparty="CLIENT",
          purpose="ESTIMATE_REQUEST_FROM_CLIENT", subject="Orçamento", has_attach=0,
-         from_email="maria@acme.pt"):
+         from_email="maria@acme.pt", confidence=0.91, decided_by="tier1:gemini", reason="pede orçamento"):
     return {"thread_root": root, "message_id": mid, "date": date, "direction": direction,
             "counterparty": counterparty, "purpose": purpose, "subject": subject,
-            "has_attach": has_attach, "from_email": from_email}
+            "has_attach": has_attach, "from_email": from_email,
+            "confidence": confidence, "decided_by": decided_by, "reason": reason}
 
 
 def _clock_for(rows, **state):
@@ -142,6 +143,31 @@ def test_owner_is_surfaced_and_sem_dono_is_blank():
     by_root = {r["thread_root"]: r for r in build_fila(rows, {"t1": {"owner": "pedro"}}, now=NOW)}
     assert by_root["t1"]["owner"] == "pedro"
     assert by_root["t2"]["owner"] == ""                          # sem dono
+
+
+# ── trust & reclassification overlay (B5) ─────────────────────────────────────────────────────────
+
+def test_trust_block_carries_dominant_verdict():
+    [r] = build_fila([_row("t1", "m1", ago(3), confidence=0.88,
+                            decided_by="tier1:gemini", reason="pede orçamento")], now=NOW)
+    t = r["trust"]
+    assert t["confidence"] == 0.88 and t["decided_by"] == "tier1:gemini"
+    assert t["reason"] == "pede orçamento" and t["committed"] is False
+
+
+def test_reclassification_overrides_and_enters_queue():
+    # AI said OTHER (excluded from the queue); the human corrected it to CLIENT → now WE_OWE + committed.
+    out = build_fila([_row("t1", "m1", ago(3), counterparty="OTHER", purpose="OTHER")],
+                     now=NOW, reclassified={"m1": {"counterparty": "CLIENT"}})
+    assert len(out) == 1
+    assert out[0]["counterparty"] == "CLIENT" and out[0]["clock"]["state"] == "WE_OWE"
+    assert out[0]["trust"]["committed"] is True
+
+
+def test_reclassification_to_other_leaves_queue():
+    out = build_fila([_row("t1", "m1", ago(3), counterparty="CLIENT")],
+                     now=NOW, reclassified={"m1": {"counterparty": "OTHER"}})
+    assert out == []                               # corrected to a non-counterparty → out of the queue
 
 
 # ── technical edges ──────────────────────────────────────────────────────────────────────────────

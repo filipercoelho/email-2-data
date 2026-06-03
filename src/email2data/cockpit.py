@@ -107,6 +107,12 @@ class ThreadSummary:
     last_outbound_date: Optional[datetime] = None # latest observed sent reply (None unless Sent fetched)
     last_direction: str = ""
     participants: list[str] = field(default_factory=list)  # external sender addresses seen
+    # Trust (B5): the verdict that set counterparty/purpose — its id (for the reclassification overlay)
+    # and its self-explanation (VISION tenet 8: confidence + who decided + why).
+    dominant_mid: str = ""
+    confidence: float = 0.0
+    decided_by: str = ""
+    reason: str = ""
 
 
 def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
@@ -129,11 +135,11 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
 
         # Dominant counterparty: the most-recent verdict that names a real external party; fall back
         # to the latest verdict (which may be INTERNAL/BULK/OTHER → an internal-only thread).
-        cp, purpose = "", ""
+        cp, purpose, dom = "", "", last
         for r in reversed(rows_asc):
             c = r.get("counterparty") or ""
             if c and c not in _NON_COUNTERPARTY:
-                cp, purpose = c, (r.get("purpose") or "")
+                cp, purpose, dom = c, (r.get("purpose") or ""), r
                 break
         if not cp:
             cp, purpose = (last.get("counterparty") or ""), (last.get("purpose") or "")
@@ -152,6 +158,10 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
             last_outbound_date=_parse_dt(last_out["date"]) if last_out else None,
             last_direction=last.get("direction") or "",
             participants=list(dict.fromkeys(senders)),
+            dominant_mid=dom.get("message_id", "") or "",
+            confidence=float(dom.get("confidence") or 0.0),
+            decided_by=dom.get("decided_by") or "",
+            reason=dom.get("reason") or "",
         ))
     return summaries
 
@@ -230,16 +240,27 @@ def sort_key(clock: dict[str, Any], counterparty: str) -> tuple[int, int, float]
 
 def build_fila(interactions: Iterable[dict[str, Any]],
                thread_states: Optional[dict[str, dict[str, Any]]] = None,
-               *, now: Optional[datetime] = None, include_resolved: bool = False) -> list[dict[str, Any]]:
-    """Top-level: fold → clock → sort. Returns Fila rows ready for the UI/JSON.
+               *, now: Optional[datetime] = None, include_resolved: bool = False,
+               reclassified: Optional[dict[str, dict[str, str]]] = None) -> list[dict[str, Any]]:
+    """Top-level: fold → reclassification overlay → clock → sort. Returns Fila rows for the UI/JSON.
 
     ``thread_states``: ``{thread_root: {"owner": str, "handled": bool, "handled_ts": str}}`` (workspace).
-    ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them so the active
-    queue shrinks to zero."""
+    ``reclassified``: ``{message_id: {"counterparty"/"purpose"/...: value_human}}`` (the precious human
+    corrections, ``Workspace.get_reclassifications``). When a thread's dominant verdict was corrected we
+    use the human value, mark the row ``committed``, and — since the override happens BEFORE the clock —
+    a correction can move a thread INTO or OUT of the active queue (e.g. OTHER→CLIENT, or CLIENT→OTHER).
+    ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them (shrink-to-zero)."""
     now = now or datetime.now(timezone.utc)
     states = thread_states or {}
+    recl = reclassified or {}
     rows: list[dict[str, Any]] = []
     for s in fold_threads(interactions):
+        rc = recl.get(s.dominant_mid) or {}
+        committed = bool(rc)
+        if rc.get("counterparty"):
+            s.counterparty = rc["counterparty"]
+        if rc.get("purpose"):
+            s.last_purpose = rc["purpose"]
         st = states.get(s.thread_root) or {}
         clock = thread_clock(s, now, handled=bool(st.get("handled")), handled_ts=st.get("handled_ts"))
         if not include_resolved and clock["state"] in (HANDLED, INTERNAL):
@@ -254,6 +275,8 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "has_attachment": s.has_attachment,
             "owner": st.get("owner") or "",
             "clock": clock,
+            "trust": {"confidence": round(s.confidence, 2), "decided_by": s.decided_by,
+                      "reason": s.reason, "committed": committed},
             "_sort": sort_key(clock, s.counterparty),
         })
     rows.sort(key=lambda r: r["_sort"], reverse=True)

@@ -26,7 +26,7 @@ from typing import Any, Optional
 from .signals import OUR_DOMAIN
 
 # Bump this if the schema changes in a way that requires a full rebuild reminder.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS interactions (
@@ -44,7 +44,10 @@ CREATE TABLE IF NOT EXISTS interactions (
     is_forward   INTEGER,
     has_attach   INTEGER,
     n_recipients INTEGER,
-    entities     TEXT     -- JSON blob of schema.Entities fields; NULL for offline-triaged mail
+    entities     TEXT,    -- JSON blob of schema.Entities fields; NULL for offline-triaged mail
+    confidence   REAL,    -- verdict trust 0-1 (Tier-2 metadata; surfaced as the Fila "trust" tag)
+    decided_by   TEXT,    -- which tier/engine decided: "tier0:bulk" | "tier1:gemini-2.5-flash" | ...
+    reason       TEXT     -- the model's one-line justification (the Fila "Porquê?")
 );
 -- Partial index: thread queries are only useful for actual replies (non-null thread_root).
 CREATE INDEX IF NOT EXISTS ix_interactions_thread ON interactions(thread_root);
@@ -175,8 +178,9 @@ class CrmStore:
         self._conn.execute(
             "INSERT OR REPLACE INTO interactions"
             "(message_id, date, from_email, direction, counterparty, purpose, priority, urgency,"
-            " subject, thread_root, is_reply, is_forward, has_attach, n_recipients, entities)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " subject, thread_root, is_reply, is_forward, has_attach, n_recipients, entities,"
+            " confidence, decided_by, reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 mid, date,
                 (env.get("from") or {}).get("email", ""),
@@ -192,6 +196,9 @@ class CrmStore:
                 int(bool(env.get("attachments"))),
                 len(env.get("to") or []) + len(env.get("cc") or []),
                 ents_json,
+                verdict.get("confidence"),
+                verdict.get("decided_by", "") or "",
+                verdict.get("reason", "") or "",
             ),
         )
 
