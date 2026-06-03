@@ -378,6 +378,12 @@ class CrmStore:
     # Reporting helpers
     # -------------------------------------------------------------------------
 
+    def all_interactions(self) -> list[dict[str, Any]]:
+        """Every interaction row, oldest-first. Feeds the cockpit Fila (thread fold + response clock)
+        in ``cockpit.py`` — one query, folded in memory (fine at this scale)."""
+        rows = self._conn.execute("SELECT * FROM interactions ORDER BY date ASC").fetchall()
+        return [dict(r) for r in rows]
+
     def counts(self) -> dict[str, int]:
         c = self._conn.execute("SELECT COUNT(*) n FROM contacts").fetchone()["n"]
         i = self._conn.execute("SELECT COUNT(*) n FROM interactions").fetchone()["n"]

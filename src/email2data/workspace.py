@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS project_field_history (
     ts         TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_pfh_project ON project_field_history(project_id, field);
+-- Thread-level response state (the cockpit Fila): one owner + a handled flag per email thread, keyed
+-- by crm.interactions.thread_root. Precious + hand-set (survives triage re-runs), like decisions.
+-- handled_ts lets the response clock REOPEN a thread when a new inbound arrives after it was handled.
+CREATE TABLE IF NOT EXISTS thread_state (
+    thread_root TEXT PRIMARY KEY,
+    owner       TEXT,                -- team member id/label; "" or NULL = sem dono
+    handled     INTEGER DEFAULT 0,
+    handled_ts  TEXT,                -- UTC ISO when marked handled; NULL when not handled
+    updated_ts  TEXT
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
@@ -178,6 +188,43 @@ class Workspace:
         for r in rows:
             result.setdefault(r["message_id"], {})[r["field"]] = r["value_human"]
         return result
+
+    # -- thread state (cockpit Fila: owner + handled, keyed by thread_root) ----------------------------
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def set_thread_owner(self, thread_root: str, owner: str, ts: str = "") -> None:
+        """Assign (or clear, with ``owner=""``) the owner of a thread. Idempotent upsert."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute(
+            "INSERT INTO thread_state(thread_root, owner, updated_ts) VALUES (?,?,?) "
+            "ON CONFLICT(thread_root) DO UPDATE SET owner=excluded.owner, updated_ts=excluded.updated_ts",
+            (thread_root, owner, ts or self._now_iso()),
+        )
+        self._conn.commit()
+
+    def set_thread_handled(self, thread_root: str, handled: bool, ts: str = "") -> None:
+        """Mark a thread handled / unhandled. Sets ``handled_ts`` on handle (so a later inbound reopens
+        it), clears it on unhandle (the undo path)."""
+        assert self._conn is not None, "call connect() first"
+        when = ts or self._now_iso()
+        self._conn.execute(
+            "INSERT INTO thread_state(thread_root, handled, handled_ts, updated_ts) VALUES (?,?,?,?) "
+            "ON CONFLICT(thread_root) DO UPDATE SET handled=excluded.handled, "
+            "handled_ts=excluded.handled_ts, updated_ts=excluded.updated_ts",
+            (thread_root, int(handled), when if handled else None, when),
+        )
+        self._conn.commit()
+
+    def thread_states(self) -> dict[str, dict[str, Any]]:
+        """``{thread_root: {owner, handled, handled_ts}}`` for the cockpit overlay (mirrors
+        ``get_reclassifications``; embedded in the report / consumed by ``cockpit.build_fila``)."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT thread_root, owner, handled, handled_ts FROM thread_state").fetchall()
+        return {r["thread_root"]: {"owner": r["owner"] or "", "handled": bool(r["handled"]),
+                                   "handled_ts": r["handled_ts"]} for r in rows}
 
     def set_item_count(self, message_id: str, n: int, ts: str = "") -> None:
         """Record the human-chosen number of line items (add/remove rows in the workspace)."""
