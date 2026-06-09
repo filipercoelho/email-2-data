@@ -31,6 +31,25 @@ which date is the deadline, resolving relative dates yourself.
 **Decide by the body, not the domain.** Vision Box / Amadeus is a CLIENT despite its domain; Spandex
 is a SUPPLIER. The `known_counterparty_hint` is a prior only — if the body contradicts it, follow the body.
 
+### Outbound emails (direction=outbound) — the sender is always Lindo; classify by the RECIPIENT
+
+When `direction=outbound` the email is from Lindo's **Sent folder** — Pedro, Rita, or a colleague
+wrote it. The sender address is always `@lindoservico.pt`, so it tells you nothing about counterparty.
+**Classify by who Lindo is writing TO** (look at the To:/recipient, the subject, and the body):
+
+- Proposal, quote, or invoice addressed to a client contact → **CLIENT**
+- Quote request, purchase order, or enquiry addressed to a supplier → **SUPPLIER**
+- Email addressed only to another `@lindoservico.pt` colleague → **INTERNAL**
+
+Typical `purpose` for outbound:
+- A proposal or quote we're sending → **FOLLOW_UP** (we're following up on a request)
+- An invoice we issued → **OUTBOUND_INVOICE**
+- A purchase order or quote request TO a supplier → **OUR_ORDER_TO_SUPPLIER**
+- An internal memo → **INTERNAL_OPS**
+
+⚠️ Never assign INTERNAL just because the sender is `@lindoservico.pt` — that is always true for
+outbound. Use INTERNAL only when both sender AND recipient are `@lindoservico.pt`.
+
 ### The golden rule
 **Never mark a possible client as BULK.** A false BULK on a real client loses business; a false
 "needs review" costs seconds. If unsure between BULK and anything real, choose the real category (or
@@ -99,4 +118,22 @@ rules — be specific.
 ```json
 {"counterparty":"CLIENT","purpose":"PO_FROM_CLIENT","urgency":75,"confidence":0.85,
  "reason":"Reencaminhamento interno de uma PO de cliente (Vision Box) — conta como CLIENT.","entities":{}}
+```
+
+**Outbound proposal to a client (direction=outbound, sender is Lindo)**
+> `direction=outbound` · From: pedro@lindoservico.pt · To: contacto@panavideo.pt
+> Assunto: Proposta de Orçamento - Acrescento de Palco - Panavideo
+> "Exmo. Sr., conforme solicitado enviamos proposta para acrescento de palco…"
+```json
+{"counterparty":"CLIENT","purpose":"FOLLOW_UP","urgency":50,"confidence":0.9,
+ "reason":"Email da Sent box enviado pela Lindo ao cliente Panavideo com proposta de orçamento. direction=outbound: classificar pelo destinatário (cliente), não pelo remetente (@lindoservico.pt).","entities":{"client_name":"Panavideo","product_or_service":"acrescento de palco"}}
+```
+
+**Outbound quote request to a supplier (direction=outbound, sender is Lindo)**
+> `direction=outbound` · From: pedro@lindoservico.pt · To: geral@ramofabril.pt
+> Assunto: Pedido de Orçamento - perfis alumínio
+> "Bom dia, precisamos de cotação para 20m de perfil alumínio 40x40…"
+```json
+{"counterparty":"SUPPLIER","purpose":"OUR_ORDER_TO_SUPPLIER","urgency":40,"confidence":0.92,
+ "reason":"Email da Sent box enviado pela Lindo a um fornecedor (Ramo Fabril) a pedir cotação de material. direction=outbound: contraparty = fornecedor destinatário, não INTERNAL.","entities":{"product_or_service":"perfil alumínio 40x40"}}
 ```

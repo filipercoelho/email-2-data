@@ -63,8 +63,20 @@ def triage(raw: bytes, playbook: str, store: KnowledgeStore, client: Any, settin
     if signals.ignorable_offline and hint is None:
         return _offline_ignore(env, signals)
 
+    # Recipient domains: derived ONLY for outbound (Sent folder) so the LLM can identify the external
+    # counterparty from the To: field rather than from the @lindoservico.pt sender. For inbound/internal
+    # the To: is always @lindoservico.pt and would confuse, not help.
+    recipient_domains: list[str] | None = None
+    if signals.direction == "outbound":
+        recipient_domains = list(dict.fromkeys(
+            a.get("email", "").rsplit("@", 1)[-1].lower()
+            for a in (env.get("to") or []) + (env.get("cc") or [])
+            if "@" in (a.get("email") or "")
+        )) or None
+
     # Tier 1: cheap LLM, given the deterministic facts + the gazetteer hint.
-    result = classifier.classify(env, signals, hint, playbook, client, settings)
+    result = classifier.classify(env, signals, hint, playbook, client, settings,
+                                 recipient_domains=recipient_domains)
     result.decided_by = f"tier1:{settings['llm']['model']}"
     return result
 

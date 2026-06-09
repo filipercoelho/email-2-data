@@ -7,6 +7,29 @@ per-message priority. This is the core of [design/cockpit.md]: it turns *"we cla
 Pure functions over CRM interaction rows (``crm.CrmStore.all_interactions``) + the precious thread_state
 overlay (owner/handled, from ``workspace.Workspace``). No I/O, no LLM — fully unit-testable.
 
+How the Fila detects replies from lindoservico.pt (the "we answered" signal)
+---------------------------------------------------------------------------
+When Pedro or any colleague sends a reply from their mail client, that reply lands in Lindo's Sent
+folder on the IMAP server. ``signals.header_signals()`` derives ``direction="outbound"`` for any
+message whose ``X-Email2Data-Source`` header names a Sent or Enviados folder. ``fold_threads()``
+tracks ``last_outbound_date`` per thread, and ``thread_clock()`` at line ~182 says:
+
+    if last_outbound_date >= last_inbound_date → AWAITING (we replied last, ball in their court)
+
+This means the Fila auto-updates — no human action needed — as long as:
+  a. The Sent folder is configured in settings.json accounts.mailboxes (it is: ``INBOX.Sent``).
+  b. The next sync has run (latency = interval between syncs; the startup + button sync are instant).
+  c. The sent reply has a proper ``In-Reply-To`` / ``References`` header matching the original thread.
+
+Gaps that prevent auto-detection:
+  • A reply sent from a mobile client that does NOT save to IMAP Sent.
+  • A NEW composition (no References header) to the same client — this becomes a separate thread_root.
+  • An internal forward that shares a thread_root with the client email: correctly left as WE_OWE
+    (the forward is not a reply TO the client).
+
+In all gap cases the fallback is the manual ``tratado`` mark (key E in the Fila), which also reopens
+the thread if a new inbound arrives after it was marked handled.
+
 The "we answered" signal under a read-only mailbox
 --------------------------------------------------
 We observe inboxes, so usually we see only inbound/internal mail, never our own sent reply. A thread's

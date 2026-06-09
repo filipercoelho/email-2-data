@@ -106,14 +106,23 @@ def enrich(signals: Signals, subject: str, body_text: str) -> Signals:
     return signals
 
 
-def facts_block(signals: Signals, gazetteer_hint: str | None) -> str:
-    """Compact, human-readable facts to attach to the LLM prompt (never a verdict)."""
+def facts_block(signals: Signals, gazetteer_hint: str | None,
+                recipient_domains: list[str] | None = None) -> str:
+    """Compact, human-readable facts to attach to the LLM prompt (never a verdict).
+
+    ``recipient_domains`` is passed ONLY for outbound emails (direction=outbound): it tells the model
+    who Lindo is writing TO so it can determine counterparty from the recipient, not the @lindoservico.pt
+    sender. For inbound/internal the To: is always @lindoservico.pt and provides no information.
+    """
     lines = [
         f"sender_domain={signals.sender_domain or '(unknown)'}",
         f"direction={signals.direction}",
         f"automated={'yes' if signals.is_automated else 'no'}",
         f"looks_forwarded={'yes' if signals.is_forward else 'no'}",
     ]
+    if recipient_domains:
+        # For outbound: the counterparty is the RECIPIENT, not the @lindoservico.pt sender.
+        lines.append(f"recipient_domains={', '.join(recipient_domains)} (use these to determine counterparty for outbound)")
     if gazetteer_hint:
         lines.append(f"known_counterparty_hint={gazetteer_hint} (PRIOR only — the body overrides)")
     return "; ".join(lines)

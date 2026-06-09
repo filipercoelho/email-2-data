@@ -30,7 +30,8 @@ def load_playbook(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def build_user_message(env: dict[str, Any], signals: Signals, gazetteer_hint: str | None) -> str:
+def build_user_message(env: dict[str, Any], signals: Signals, gazetteer_hint: str | None,
+                        recipient_domains: list[str] | None = None) -> str:
     """Signal-dense rendering: deterministic header FACTS, then deterministically extracted values
     (Idea 2), then the email. The extracted values are priors/candidates only — the body is the
     final authority (see the playbook)."""
@@ -40,7 +41,7 @@ def build_user_message(env: dict[str, Any], signals: Signals, gazetteer_hint: st
     )
     subject, body = env.get("subject", ""), env.get("body_text", "")
     offline = extract.render_candidates(extract.extract_values(subject, body))
-    facts = f"[FACTS] {facts_block(signals, gazetteer_hint)}"
+    facts = f"[FACTS] {facts_block(signals, gazetteer_hint, recipient_domains)}"
     if offline:
         facts += f"\n[OFFLINE SIGNALS — priors only, the body decides] {offline}"
     return (
@@ -96,11 +97,12 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: f
     )
 
 
-def classify(env, signals, gazetteer_hint, playbook, client, settings) -> TriageResult:
+def classify(env, signals, gazetteer_hint, playbook, client, settings,
+             *, recipient_domains: list[str] | None = None) -> TriageResult:
     """Tier-1 LLM classification of one envelope, given Tier-0 signals + a gazetteer hint."""
     cfg = settings["llm"]
     floor = float(cfg.get("ignore_confidence_floor", 0.85))
-    user = build_user_message(env, signals, gazetteer_hint)
+    user = build_user_message(env, signals, gazetteer_hint, recipient_domains)
     raw = llm.call(client, cfg, playbook, user, schema=GEMINI_TRIAGE_SCHEMA, tool=TRIAGE_TOOL)
     return _coerce(raw, env, signals, floor)
 

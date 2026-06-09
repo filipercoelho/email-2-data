@@ -10,3 +10,10 @@ toconline.pt,SUPPLIER,invoicing platform we use (we are their customer)
 amazon.es,SUPPLIER,marketplace we buy from
 dhl.com,SUPPLIER,courier
 thyssenkrupp-materials.com,SUPPLIER,metal materials
+somassul.pt,SUPPLIER,wood/materials supplier (madeiras@somassul.pt)
+ramofabril.pt,SUPPLIER,materials/hardware supplier
+banema.pt,SUPPLIER,materials supplier
+aluminios.la,SUPPLIER,aluminium profiles supplier
+multiplacas.pt,SUPPLIER,materials supplier
+4x4mt.pt,SUPPLIER,materials/services supplier
+# gmail.com is intentionally NOT in the gazetteer — too generic. Use reclassify UI for specific contacts.
