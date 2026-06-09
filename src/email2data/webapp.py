@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (classifier, cockpit, crm as _crm, export as _export, fila_page, jobspec as js,
-               project as _project, replydraft, report)
+from . import (accounts as _accounts, classifier, cockpit, contrapartes_page, crm as _crm,
+               export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
+               project as _project, projetos_page, replydraft, report)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
 
@@ -489,11 +490,76 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                                   now=datetime.now(timezone.utc),
                                   reclassified=ws.get_reclassifications())
 
+    # -------------------------------------------------------------------------
+    # Shared cluster builder (C1a/C1b) — assembled per-request; cheap (in-memory).
+    # -------------------------------------------------------------------------
+    def _clusters() -> list[_accounts.AccountCluster]:
+        if _crmdb is None:
+            return []
+        return _accounts.cluster(
+            _crmdb.all_contacts(),
+            nif_refs=_crmdb.contacts_by_nif(),
+            identity_links=ws.identity_links(),
+        )
+
+    def _clusters_as_dicts(cls: list[_accounts.AccountCluster]) -> list[dict[str, Any]]:
+        """Serialize clusters + enrich with Fila response-risk for the UI."""
+        frows = _fila_rows()
+        # Index fila rows by each email that appears in them
+        risk_by_email: dict[str, str] = {}
+        owe_by_email: dict[str, int] = {}
+        for r in frows:
+            contact = r.get("contact") or ""
+            if contact:
+                band = (r.get("clock") or {}).get("band", "none")
+                risk_by_email[contact] = max(
+                    risk_by_email.get(contact, "none"), band,
+                    key=lambda b: {"red": 3, "amber": 2, "green": 1, "none": 0}.get(b, 0)
+                )
+                if band in ("red", "amber"):
+                    owe_by_email[contact] = owe_by_email.get(contact, 0) + 1
+        out = []
+        for cl in cls:
+            we_owe = sum(owe_by_email.get(e, 0) for e in cl.emails)
+            risk = "none"
+            for e in cl.emails:
+                r_band = risk_by_email.get(e, "none")
+                if {"red": 3, "amber": 2, "green": 1, "none": 0}.get(r_band, 0) > \
+                   {"red": 3, "amber": 2, "green": 1, "none": 0}.get(risk, 0):
+                    risk = r_band
+            # Find open projects for this cluster
+            open_proj = 0
+            if _crmdb is not None:
+                for e in cl.emails:
+                    for p in pstore.list():
+                        if (p.get("client_email") or "") == e and p.get("stage") not in ("WON", "LOST", "ARCHIVED"):
+                            open_proj += 1
+            out.append({
+                "key": cl.key, "kind": cl.kind, "emails": cl.emails,
+                "display_name": cl.display_name or cl.key,
+                "nif": cl.nif, "last_counterparty": cl.last_counterparty,
+                "last_seen": cl.last_seen, "msg_count": cl.msg_count,
+                "we_owe_count": we_owe, "response_risk": risk, "open_projects": open_proj,
+            })
+        return out
+
+    def _nav_counts() -> dict[str, int]:
+        """Live counts for the nav badges (C5). Only shows non-zero."""
+        frows = _fila_rows()
+        active = len(frows)
+        para_ti_count = len(para_ti.all_items(
+            frows, _clusters(),
+            {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])},
+        ))
+        return {k: v for k, v in {"fila": active, "para-ti": para_ti_count}.items() if v}
+
     @app.get("/", response_class=HTMLResponse)
     @app.get("/fila", response_class=HTMLResponse)
     def fila():
-        return fila_page.build_fila_html(
-            _fila_rows(), _team, now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        return HTMLResponse(fila_page.build_fila_html(
+            _fila_rows(), _team,
+            now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            nav_counts=_nav_counts()))
 
     @app.get("/api/fila")
     def api_fila():
@@ -517,6 +583,115 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         owner = str(body.get("owner", "")).strip()
         ws.set_thread_owner(root, owner)
         return JSONResponse({"ok": True, "thread_root": root, "owner": owner})
+
+    # -------------------------------------------------------------------------
+    # C2 — Contrapartes lens
+    # -------------------------------------------------------------------------
+    @app.get("/contrapartes", response_class=HTMLResponse)
+    def contrapartes_list():
+        cls = _clusters()
+        return HTMLResponse(contrapartes_page.build_list_html(
+            _clusters_as_dicts(cls), nav_counts=_nav_counts()))
+
+    @app.get("/api/contrapartes")
+    def api_contrapartes():
+        return JSONResponse(_clusters_as_dicts(_clusters()))
+
+    @app.get("/contrapartes/{key:path}", response_class=HTMLResponse)
+    def contrapartes_detail(key: str):
+        cls = _clusters()
+        cluster_dict: dict[str, Any] | None = None
+        for c in _clusters_as_dicts(cls):
+            if c["key"] == key:
+                cluster_dict = c
+                break
+        if cluster_dict is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # Build timeline: all interactions for any email in cluster, sorted oldest-first.
+        timeline: list[dict[str, Any]] = []
+        if _crmdb is not None:
+            seen: set[str] = set()
+            for email in cluster_dict["emails"]:
+                for row in _crmdb.by_contact(email):
+                    mid = row["message_id"]
+                    if mid not in seen:
+                        seen.add(mid)
+                        timeline.append({
+                            "type": "interaction",
+                            "date": row.get("date", ""),
+                            "subject": row.get("subject", ""),
+                            "purpose": row.get("purpose", ""),
+                            "message_id": mid,
+                        })
+            timeline.sort(key=lambda r: r.get("date") or "")
+        # Projects whose client_email matches a cluster email.
+        cluster_projects = [
+            p for p in pstore.list()
+            if (p.get("client_email") or "") in cluster_dict["emails"]
+        ]
+        # Fila rows for this cluster
+        cluster_frows = [
+            r for r in _fila_rows()
+            if (r.get("contact") or "") in cluster_dict["emails"]
+        ]
+        return HTMLResponse(contrapartes_page.build_detail_html(
+            cluster_dict, timeline, cluster_projects, cluster_frows,
+            nav_counts=_nav_counts()))
+
+    @app.get("/api/contrapartes/{key:path}")
+    def api_contrapartes_detail(key: str):
+        cls = _clusters()
+        cluster_dict: dict[str, Any] | None = None
+        for c in _clusters_as_dicts(cls):
+            if c["key"] == key:
+                cluster_dict = c
+                break
+        if cluster_dict is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"cluster": cluster_dict})
+
+    # -------------------------------------------------------------------------
+    # C3 — Para ti decision inbox
+    # -------------------------------------------------------------------------
+    def _para_ti_items() -> list[dict[str, Any]]:
+        frows = _fila_rows()
+        all_threads = {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])}
+        return para_ti.all_items(frows, _clusters(), all_threads)
+
+    @app.get("/para-ti", response_class=HTMLResponse)
+    def para_ti_view():
+        return HTMLResponse(para_ti_page.build_html(_para_ti_items(), nav_counts=_nav_counts()))
+
+    @app.get("/api/para-ti")
+    def api_para_ti():
+        return JSONResponse({"items": _para_ti_items()})
+
+    @app.post("/api/identity/confirm")
+    async def identity_confirm(request: Request):
+        body = await request.json()
+        email = str(body.get("email", "")).strip().lower()
+        key = str(body.get("account_key", "")).strip()
+        if not email or not key:
+            return JSONResponse({"error": "email and account_key required"}, status_code=400)
+        ws.set_identity_link(email, key)
+        return JSONResponse({"ok": True, "email": email, "account_key": key})
+
+    # -------------------------------------------------------------------------
+    # C4 — Projetos lens (sidesteps report.py WIP; reuses existing /api/projects*)
+    # -------------------------------------------------------------------------
+    @app.get("/projetos", response_class=HTMLResponse)
+    def projetos_view():
+        # Build a trimmed summary list (avoid the O(projects×messages) build_canonical per row).
+        projects_summary = []
+        for p in pstore.list():
+            try:
+                _, rd, _, _ = _project.build_canonical(pstore, ws, jspecs, p["project_id"], _crmdb)
+                projects_summary.append({**p, "coverage": rd.get("coverage", 0.0),
+                                         "estimable": rd.get("estimable", False),
+                                         "n_threads": len(pstore.threads_for(p["project_id"]))})
+            except Exception:  # noqa: BLE001 — degrade gracefully on a broken project
+                projects_summary.append({**p, "coverage": 0.0, "estimable": False, "n_threads": 0})
+        return HTMLResponse(projetos_page.build_html(projects_summary, nav_counts=_nav_counts()))
 
     return app
 

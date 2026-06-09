@@ -385,6 +385,28 @@ class CrmStore:
     # Reporting helpers
     # -------------------------------------------------------------------------
 
+    def all_contacts(self) -> list[dict[str, Any]]:
+        """All contact rows (for account clustering in ``accounts.py``)."""
+        rows = self._conn.execute("SELECT * FROM contacts ORDER BY msg_count DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def contacts_by_nif(self) -> dict[str, list[str]]:
+        """``{nif: [from_email, …]}`` — every sender whose email body carried a validated NIF.
+
+        Used by account clustering to merge free-mail senders into a company cluster when
+        they share a NIF with a known domain contact."""
+        rows = self._conn.execute(
+            "SELECT er.entity_value AS nif, i.from_email "
+            "FROM entity_refs er "
+            "JOIN interactions i ON i.message_id = er.message_id "
+            "WHERE er.entity_key = 'nif' AND i.from_email != '' "
+            "GROUP BY er.entity_value, i.from_email"
+        ).fetchall()
+        result: dict[str, list[str]] = {}
+        for r in rows:
+            result.setdefault(r["nif"], []).append(r["from_email"])
+        return result
+
     def all_interactions(self) -> list[dict[str, Any]]:
         """Every interaction row, oldest-first. Feeds the cockpit Fila (thread fold + response clock)
         in ``cockpit.py`` — one query, folded in memory (fine at this scale)."""

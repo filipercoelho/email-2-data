@@ -86,12 +86,19 @@ CREATE TABLE IF NOT EXISTS thread_state (
     handled_ts  TEXT,                -- UTC ISO when marked handled; NULL when not handled
     updated_ts  TEXT
 );
+-- Identity links (C1b): human-confirmed "this email belongs to account cluster X".
+-- Overrides the deterministic clustering in accounts.py. Precious and additive — never auto-set.
+CREATE TABLE IF NOT EXISTS identity_links (
+    email       TEXT PRIMARY KEY,
+    account_key TEXT NOT NULL,       -- the cluster key (e.g. "acme.pt" or "nif:501234567")
+    ts          TEXT
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
 # PRAGMA user_version and runs any pending migrations (see `_migrate`). Unlike crm.db, this database
 # is never rebuilt, so it must evolve in place.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 RECLASSIFY_FIELDS = frozenset({"counterparty", "purpose", "priority"})
 # Reserved decision field: how many line items this job has (human override of the LLM's item count).
@@ -225,6 +232,27 @@ class Workspace:
             "SELECT thread_root, owner, handled, handled_ts FROM thread_state").fetchall()
         return {r["thread_root"]: {"owner": r["owner"] or "", "handled": bool(r["handled"]),
                                    "handled_ts": r["handled_ts"]} for r in rows}
+
+    # -- identity links (C1b) ---------------------------------------------------------------
+
+    def set_identity_link(self, email: str, account_key: str, ts: str = "") -> None:
+        """Confirm that ``email`` belongs to account cluster ``account_key``.
+
+        Overrides the deterministic clustering in ``accounts.cluster()`` for this address.
+        Idempotent upsert — safe to call again if the user changes their mind."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute(
+            "INSERT INTO identity_links(email, account_key, ts) VALUES (?,?,?) "
+            "ON CONFLICT(email) DO UPDATE SET account_key=excluded.account_key, ts=excluded.ts",
+            (email.lower().strip(), account_key, ts or self._now_iso()),
+        )
+        self._conn.commit()
+
+    def identity_links(self) -> dict[str, str]:
+        """``{email: account_key}`` — all confirmed identity links for the account clusterer."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute("SELECT email, account_key FROM identity_links").fetchall()
+        return {r["email"]: r["account_key"] for r in rows}
 
     def set_item_count(self, message_id: str, n: int, ts: str = "") -> None:
         """Record the human-chosen number of line items (add/remove rows in the workspace)."""

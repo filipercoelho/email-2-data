@@ -118,3 +118,78 @@ def test_home_serves_fila(tmp_path):
 def test_inbox_serves_report(tmp_path):
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
     assert cl.get("/inbox").status_code == 200
+
+
+# ── C2 Contrapartes routes ───────────────────────────────────────────────────
+
+def test_contrapartes_list_serves_page(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    r = cl.get("/contrapartes")
+    assert r.status_code == 200 and "Contrapartes" in r.text
+
+
+def test_api_contrapartes_returns_clusters(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    data = cl.get("/api/contrapartes").json()
+    assert isinstance(data, list)
+    # maria@acme.pt → domain cluster "acme.pt"
+    keys = [c["key"] for c in data]
+    assert any("acme" in k for k in keys)
+
+
+def test_contrapartes_detail_200(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    clusters = cl.get("/api/contrapartes").json()
+    if clusters:
+        key = clusters[0]["key"]
+        r = cl.get(f"/contrapartes/{key}")
+        assert r.status_code == 200
+
+
+def test_contrapartes_detail_404_unknown(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.get("/contrapartes/does.not.exist").status_code == 404
+
+
+# ── C3 Para ti routes ────────────────────────────────────────────────────────
+
+def test_para_ti_serves_page(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict(cp="LEAD"))]))
+    r = cl.get("/para-ti")
+    assert r.status_code == 200 and "Para ti" in r.text
+
+
+def test_api_para_ti_returns_items(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict(cp="LEAD"))]))
+    data = cl.get("/api/para-ti").json()
+    assert "items" in data and isinstance(data["items"], list)
+
+
+def test_identity_confirm_persists(tmp_path):
+    cl, ws = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    r = cl.post("/api/identity/confirm",
+                json={"email": "test@gmail.com", "account_key": "acme.pt"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert ws.identity_links().get("test@gmail.com") == "acme.pt"
+
+
+def test_identity_confirm_requires_both_fields(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.post("/api/identity/confirm", json={"email": "x@y.com"}).status_code == 400
+
+
+# ── C4 Projetos route ────────────────────────────────────────────────────────
+
+def test_projetos_serves_page(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    r = cl.get("/projetos")
+    assert r.status_code == 200 and "Projetos" in r.text
+
+
+# ── C5 Nav counts in shell ───────────────────────────────────────────────────
+
+def test_fila_page_contains_nav_links(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    html = cl.get("/").text
+    for href in ["/contrapartes", "/projetos", "/para-ti"]:
+        assert href in html
