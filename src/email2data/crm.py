@@ -437,7 +437,12 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
 
     Extracted from ``cli.cmd_crm`` so the SAME rebuild runs as part of ``sync`` — otherwise the cockpit
     Fila (which reads ``all_interactions``) would serve a relations DB that lags the latest triage.
-    Also writes ``contacts.jsonl`` (the report's contact rollup). Returns counts."""
+    Also writes ``contacts.jsonl`` (the report's contact rollup). Returns counts.
+
+    Build strategy: write into a temp file first, then ``os.replace()`` atomically so any webapp
+    connection currently reading the old crm.db can finish without a "disk I/O error" (this matters on
+    Docker Desktop macOS volumes, where unlinking an open SQLite file causes I/O errors on the reader)."""
+    import os
     from .config import paths as _paths
     from .envelope import parse_eml
 
@@ -448,9 +453,10 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
     verdicts = {r["message_id"]: r for r in
                 (json.loads(x) for x in results_path.read_text().splitlines() if x.strip())}
     db = p["out_dir"] / "crm.db"
-    if db.exists():
-        db.unlink()  # rebuild clean — contact rollups are cumulative
-    store = CrmStore(db).connect()
+    tmp = db.with_suffix(".building")
+    if tmp.exists():
+        tmp.unlink()
+    store = CrmStore(tmp).connect()
     recorded = skipped = 0
     for eml in sorted(p["corpus_dir"].glob("*.eml")):
         try:
@@ -469,5 +475,6 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rollup), encoding="utf-8")
     c = store.counts()
     store.close()
+    os.replace(tmp, db)  # atomic: old readers keep their file descriptor; new opens get fresh data
     return {"recorded": recorded, "skipped": skipped, "interactions": c["interactions"],
             "contacts": c["contacts"], "external": c["external"]}
