@@ -54,7 +54,14 @@ def triage(raw: bytes, playbook: str, store: KnowledgeStore, client: Any, settin
     env = parse_eml(raw)
     msg = email.message_from_bytes(raw)
     signals = sig.enrich(sig.header_signals(msg), env.get("subject", ""), env.get("body_text", ""))
-    hint = store.lookup(env.get("from", {}).get("email") or signals.sender_domain)
+    # For outbound emails the useful gazetteer hint is the RECIPIENT domain (we're writing to them);
+    # the sender is always @lindoservico.pt and will never match a supplier/client entry.
+    if signals.direction == "outbound" and env.get("to"):
+        first_to = (env["to"][0].get("email") or "") if env["to"] else ""
+        to_domain = first_to.rsplit("@", 1)[-1].lower() if "@" in first_to else ""
+        hint = store.lookup(first_to) or store.lookup(to_domain) or store.lookup(signals.sender_domain)
+    else:
+        hint = store.lookup(env.get("from", {}).get("email") or signals.sender_domain)
 
     # Tier 0: offline IGNORE only for bulk mail from an UNKNOWN domain. ANY gazetteer knowledge
     # (client / supplier / internal) vetoes the header-bin -> escalate to the LLM with the hint.
