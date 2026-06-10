@@ -32,11 +32,9 @@ the code change).
 `SUPPLIER_REPLY_OR_CONFIRMATION`, `INVOICE_OR_ACCOUNTING`, `FOLLOW_UP`, `PUBLICITY`,
 `INTERNAL_OPS`, `OTHER`.
 
-**`direction`** = `inbound`, `internal` (our domain → our domain), `outbound` (Sent folder).
-> ⚠️ **Known discrepancy (2026-06-10):** `signals.py` emits all three values
-> (`signals.py:72` sets `"outbound"`), but the `DIRECTION` constant at `schema.py:42` lists only
-> `["inbound", "internal"]`. The emitted set is authoritative; the constant is stale. Tracked for
-> a code fix — not corrected here (docs change).
+**`direction`** = `inbound`, `internal` (our domain → our domain), `outbound` (Sent folder) —
+all three are in the `DIRECTION` constant (`schema.py:42`), pinned by
+`tests/test_signals.py::test_schema_direction_constant_covers_every_emitted_value`.
 
 **`PRIORITIES`** = `HIGH`, `MEDIUM`, `LOW`, `IGNORE`, `NEEDS_REVIEW`.
 

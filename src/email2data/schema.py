@@ -39,7 +39,7 @@ PURPOSE = [
     "INTERNAL_OPS",
     "OTHER",
 ]
-DIRECTION = ["inbound", "internal"]  # who SENT this message (header fact, set by signals.py)
+DIRECTION = ["inbound", "internal", "outbound"]  # who SENT this message (header fact, set by signals.py)
 PRIORITIES = ["HIGH", "MEDIUM", "LOW", "IGNORE", "NEEDS_REVIEW"]
 
 # Only these counterparties may carry IGNORE. Anything else marked IGNORE is incoherent -> NEEDS_REVIEW.

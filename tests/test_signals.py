@@ -1,6 +1,6 @@
-import pytest
 from email import message_from_bytes
 
+from email2data.schema import DIRECTION
 from email2data.signals import detect_forward, header_signals
 
 INBOUND = b"From: Cliente <joao@cliente.pt>\r\nSubject: orcamento\r\n\r\nola\r\n"
@@ -31,6 +31,14 @@ def test_sent_folder_sets_outbound_direction():
 
 def test_sent_english_folder_name_also_outbound():
     assert _sig(SENT_PLAIN).direction == "outbound"
+
+
+def test_schema_direction_constant_covers_every_emitted_value():
+    """Regression: schema.DIRECTION must list every value header_signals can emit.
+    It previously omitted "outbound" while signals.py emitted it (a stale constant)."""
+    emitted = {_sig(r).direction for r in (INBOUND, INTERNAL, BULK, AUTO, SENT, SENT_PLAIN)}
+    assert emitted == {"inbound", "internal", "outbound"}
+    assert emitted <= set(DIRECTION), f"signals emits {emitted - set(DIRECTION)} not in DIRECTION"
 
 
 def test_internal_without_source_header_stays_internal():
