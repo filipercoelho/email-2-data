@@ -1,7 +1,7 @@
 # ADR-005 — The gazetteer is a prior, not a verdict
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled) |
 

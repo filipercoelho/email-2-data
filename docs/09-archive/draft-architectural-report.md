@@ -330,7 +330,7 @@ If emitting to streams/webhooks, use a transactional outbox table in PostgreSQL 
 ### Recommended Stack (Scalable but Minimal)
 
 | Purpose            | Storage              |
-| ------------------ | -------------------- |
+| --- | --- |
 | Raw emails         | Encrypted blob store |
 | Canonical metadata | PostgreSQL           |
 | Derived views      | PostgreSQL           |
@@ -486,7 +486,7 @@ Backfills MUST:
 ## 13. Risks & Trade-offs
 
 | Risk                | Mitigation                     |
-| ------------------- | ------------------------------ |
+| --- | --- |
 | Over-classification | Confidence + review            |
 | Privacy overreach   | Minimization + RBAC            |
 | Threading ambiguity | Conservative fallback          |

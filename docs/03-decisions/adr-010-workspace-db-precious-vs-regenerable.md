@@ -1,7 +1,7 @@
 # ADR-010 — workspace.db is precious; crm.db and sync.db are regenerable
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled) |
 
@@ -17,7 +17,7 @@ cache or, far worse, destroying irreplaceable human input on a rebuild.
 Stores are tiered by recoverability, and the tiers are enforced:
 
 | Store | Tier | Rebuild policy |
-|---|---|---|
+| --- | --- | --- |
 | `out/crm.db` | regenerable | `email2data crm` drops & rebuilds each run |
 | `out/sync.db` | cursor | deletable — next `fetch` re-bootstraps by date |
 | `out/workspace.db` | **precious** | **never auto-rebuilt**; evolves in place via `_migrate` (`user_version`) |

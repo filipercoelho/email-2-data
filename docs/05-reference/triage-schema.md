@@ -1,7 +1,7 @@
 # Reference — triage verdict schema
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Type | Reference |
 | Status | Active |
 | Source of truth | `src/email2data/schema.py` |

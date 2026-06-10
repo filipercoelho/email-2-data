@@ -1,7 +1,7 @@
 # ADR-009 — Incremental and idempotent by default
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; commit 7714993) |
 

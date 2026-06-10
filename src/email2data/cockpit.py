@@ -1,7 +1,7 @@
 """Response cockpit (D1) — fold per-message verdicts into per-THREAD state with a response clock.
 
 The Fila (queue) is sorted by *response risk* — "who owes the next reply, and for how long" — not by
-per-message priority. This is the core of [design/cockpit.md]: it turns *"we classified it right"* into
+per-message priority. This is the core of [docs/05-reference/cockpit-design.md]: it turns *"we classified it right"* into
 *"someone must answer this, and the clock is running."*
 
 Pure functions over CRM interaction rows (``crm.CrmStore.all_interactions``) + the precious thread_state
@@ -71,7 +71,7 @@ _STATE_RANK = {WE_OWE: 3, AWAITING: 2, INTERNAL: 1, HANDLED: 0}
 
 # Clock-colour thresholds, in hours-in-state. FIRST-DRAFT — calibrate against how the shop actually
 # triages (a client estimate is hours; a supplier chase is days). One curve for the MVP; per-counterparty
-# SLAs are a follow-up (see design/cockpit.md).
+# SLAs are a follow-up (see docs/05-reference/cockpit-design.md).
 _AMBER_AFTER_H = 4.0
 _RED_AFTER_H = 24.0
 _AWAITING_CHASE_H = _RED_AFTER_H * 3  # we only nudge an awaited reply once a chase is overdue

@@ -1,7 +1,7 @@
 # ADR-003 — The body decides counterparty, not the domain
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled) |
 

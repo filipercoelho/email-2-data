@@ -1,7 +1,7 @@
 # ADR-012 — One shared LLM plumbing layer with provider dispatch
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; commit 5c04f42) |
 

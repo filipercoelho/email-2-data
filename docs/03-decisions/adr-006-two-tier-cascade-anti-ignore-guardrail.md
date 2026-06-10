@@ -1,7 +1,7 @@
 # ADR-006 — Two-tier cascade with an asymmetric anti-IGNORE guardrail
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled) |
 

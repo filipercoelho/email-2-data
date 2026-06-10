@@ -1,4 +1,4 @@
-"""Shared shell for all cockpit lens pages (C0 — see design/cockpit.md).
+"""Shared shell for all cockpit lens pages (C0 — see docs/05-reference/cockpit-design.md).
 
 Provides ``page()`` — the single assembler every lens calls. Bundles:
   CSS   — design tokens (identical to report.py) + the full component kit
@@ -211,6 +211,9 @@ _HEAD = """<!doctype html>
   .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
   .tatt{display:inline-block;font-size:11px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
   .tatt:hover{background:#dfe8ff}
+  /* embedded messages (extracted from forwarded chains, not direct IMAP) */
+  .tmsg.embedded{background:#fafbfc;border-style:dashed}
+  .tembedded{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:1px 6px;border:1px solid var(--bd);border-radius:5px}
   /* provenance badges: which spec fields this message supplied */
   .tprov{margin-top:4px;display:flex;flex-wrap:wrap;gap:4px}
   .tprovbadge{font-size:10px;font-weight:700;background:#e7f6ee;border:1px solid #bfe6cf;color:var(--green);border-radius:5px;padding:1px 6px}
@@ -371,24 +374,40 @@ function msgHTML(m, opts){
     '<a class="tatt" href="/api/attachment/'+encodeURIComponent(m.message_id)+'/'+idx
     +'" target="_blank" rel="noopener">📎 '+esc(a.name)+'</a>').join('');
   const sp=msgSplitQuote(m.body||'');
-  const vis=sp.visible||'(sem texto novo — ver anexos/citação)';
-  const visHTML='<div class="tbody">'+esc(vis.slice(0,2000))+(vis.length>2000?'\n…':'')+'</div>';
-  const quoteHTML=sp.quoted
+  // If nothing is left after trimming quotes (whole body is a forward/reply chain), show the
+  // quoted block directly rather than a blank card — the user needs to read the content.
+  const noVisible=!sp.visible;
+  const vis=noVisible?sp.quoted:(sp.visible||'');
+  const visHTML=vis?'<div class="tbody">'+esc(vis.slice(0,2000))+(vis.length>2000?'\n…':'')+'</div>':'';
+  const quoteHTML=(!noVisible&&sp.quoted)
     ?'<button class="qtoggle">▸ mensagem citada</button>'
      +'<div class="tquote hidden">'+esc(sp.quoted.slice(0,3000))+'</div>'
     :'';
   // field provenance: which spec fields did this message supply?
+  // Uses fieldLabels() if a FIELDS registry is available (injected by Projetos lens).
   const prov=opts.provenance||{};
   const fromFields=Object.entries(prov).filter(([,mid])=>mid===m.message_id).map(([addr])=>addr);
-  const provBadges=fromFields.length
-    ?'<div class="tprov">'+fromFields.map(a=>'<span class="tprovbadge">'+esc(a.split('#')[0])+'</span>').join('')+'</div>'
-    :'';
-  return '<div class="tmsg">'
+  let provBadges='';
+  if(fromFields.length){
+    // dedupe by base key (item#0,item#1 → one "peça" badge), then map to PT label
+    const seen=new Set();
+    const labels=fromFields.map(addr=>{
+      const base=addr.split('#')[0];
+      if(seen.has(base)) return null; seen.add(base);
+      // try the FIELDS registry if available (defined by Projetos lens as byKey)
+      const label=(typeof byKey!=='undefined'&&byKey[base]&&byKey[base].label)||base;
+      return label;
+    }).filter(Boolean);
+    provBadges='<div class="tprov">'+labels.map(l=>'<span class="tprovbadge" title="campo extraído desta mensagem">'+esc(l)+'</span>').join('')+'</div>';
+  }
+  const embeddedBadge=m.embedded?'<span class="tembedded">via reencaminhamento</span>':'';
+  return '<div class="tmsg'+(m.embedded?' embedded':'')+'">'
     +'<div class="tmeta">'
     +'<span class="taddr">'+esc(m.from_email||'?')+'</span>'
     +'<span class="tarrow">→</span>'
     +'<span class="taddr">'+toStr+'</span>'
     +'<span class="tdir" style="color:'+tag.c+'">'+tag.t+'</span>'
+    +embeddedBadge
     +'<span class="tdate">'+esc((m.date||'').slice(0,16).replace('T',' '))+'</span>'
     +(atts?'<span class="tatts">'+atts+'</span>':'')
     +'</div>'

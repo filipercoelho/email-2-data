@@ -42,12 +42,16 @@ The standards are a **frozen snapshot** (standards-v1.1.0). The live source of t
 1. [VISION.md](VISION.md) — the north star and the **governing principle** ("spend compute
    in proportion to `uncertainty × business impact`") plus the 8 tenets. If a change
    contradicts a tenet, stop and flag it.
-2. [README.md](README.md) — product overview, the **module/pipeline table**, the
-   incremental-by-default model, run commands, and the store/schema table.
-3. [ROADMAP.md](ROADMAP.md) — phased plan and current status (Phases 0–2 done).
-4. [design/approach.md](design/approach.md) — right-sized v1 engineering detail;
-   [design/offline-extraction-plan.md](design/offline-extraction-plan.md) — the red-teamed
-   offline layer.
+2. [docs/00-overview.md](docs/00-overview.md) → [docs/02-architecture/module-map.md](docs/02-architecture/module-map.md)
+   — what it is, then the modules + data flow.
+3. [docs/03-decisions/index.md](docs/03-decisions/index.md) — the **ADR registry**: the
+   load-bearing "why" behind every invariant. Read once top-to-bottom.
+4. [docs/05-reference/triage-schema.md](docs/05-reference/triage-schema.md) +
+   [data-stores.md](docs/05-reference/data-stores.md) — exact vocabularies, `derive_priority`,
+   `TriageResult`, the stores. [docs/01-requirements/roadmap.md](docs/01-requirements/roadmap.md)
+   — phased status (Phases 0–2 done). Deeper engineering detail:
+   [docs/02-architecture/approach.md](docs/02-architecture/approach.md) +
+   [offline-extraction-layer.md](docs/02-architecture/offline-extraction-layer.md).
 5. The classifier brain, **editable, not code**: [config/triage_playbook.md](config/triage_playbook.md),
    [config/gazetteer.csv](config/gazetteer.csv), [config/spec_playbook.md](config/spec_playbook.md),
    [config/reply_playbook.md](config/reply_playbook.md). A playbook change is a behavior
@@ -116,9 +120,12 @@ convention). New durable facts go there, not in scratch files: decisions → `03
 ADR, exact values/contracts → `05-reference/`, how-to → `04-implementation/`.
 
 > **Adoption status (2026-06-10):** this project was retrofitted to the scaffold standard via
-> `bin/adopt-project.sh`. The `docs/` 00–09 shelves are **created but mostly empty** — the
-> existing knowledge still lives in [README.md](README.md), [VISION.md](VISION.md),
-> [ROADMAP.md](ROADMAP.md), and [design/](design/). **Deferred, tracked work:** migrate that
-> content onto the shelves and back-fill ADRs in `docs/03-decisions/` for decisions already
-> shipped (outbound classification by recipient, gazetteer-lookup-by-recipient-domain, the
-> two-tier triage cascade). Until then, the files above remain the real source of truth.
+> `bin/adopt-project.sh`, and the `docs/` 00–09 shelves are now **populated and canonical** —
+> 12 ADRs ([registry](docs/03-decisions/index.md)), the [reference schemas](docs/05-reference/index.md),
+> the [architecture map](docs/02-architecture/index.md), and QA/ops/requirements shelves. The
+> old `design/` reports were migrated onto the shelves (the superseded draft report lives in
+> [docs/09-archive/](docs/09-archive/); `design/` now holds only scripts). `VISION.md` stays at
+> root as the north-star; the `config/*_playbook.md` files stay put as live runtime config.
+> `README.md` is a thin front-door pointing here. **One open item:** the stale `DIRECTION`
+> constant flagged in [docs/05-reference/triage-schema.md](docs/05-reference/triage-schema.md)
+> (a code fix, not a docs fix).

@@ -1,7 +1,7 @@
 # Reference — data stores & outputs
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Type | Reference |
 | Status | Active |
 | Last reviewed | 2026-06-10 |

@@ -1,7 +1,7 @@
 # Acceptance criteria & evaluation
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Type | QA |
 | Status | Active |
 | Last reviewed | 2026-06-10 |

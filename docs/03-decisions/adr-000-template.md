@@ -1,7 +1,7 @@
 # ADR-000 — <title>
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Proposed / Accepted / Superseded |
 | Date | 2026-06-10 |
 

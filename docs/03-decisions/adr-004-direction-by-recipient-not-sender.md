@@ -1,7 +1,7 @@
 # ADR-004 — Direction is a separate axis; outbound is classified by recipient
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; commits 7df53b7, 93676ae) |
 

@@ -1,7 +1,7 @@
 # ADR-001 — Spend compute in proportion to uncertainty × business impact
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; principle since Phase 0) |
 

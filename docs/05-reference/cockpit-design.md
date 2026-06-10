@@ -30,7 +30,7 @@ built. We harvest the proposal's best ideas as derived layers; we decline its re
 ### What it unifies (not new scope)
 
 | Roadmap thread | Becomes, in the cockpit |
-|---|---|
+| --- | --- |
 | **P6 Delivery** — "triage from the queue, not the mailbox" | the **Fila** lens |
 | **P4** — dynamic thread-aware priority, "who owes the next reply, how long it's been" | the **response clock** |
 | **P4** — CRM substrate (`crm.py`) + (deferred) identity resolution | the **Contrapartes** lens |
@@ -94,7 +94,7 @@ text) · `Owner chip` (`sem dono` = subtle warning) · `Confidence tag` (`regra�
 Each is a shippable unit. Sizes: **S** ≈ ½–1 day · **M** ≈ 2–3 days · **L** ≈ 4–6 days.
 
 | # | Deliverable | What it is | Graft / phase | Depends on | Size |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | **D1** | **Response clock + thread state** | per-thread *who-owes-whom* + age + risk score + sort key | I1 · P4 | `crm.interactions` (thread_root, direction, date), `AWAITED_OUTBOUND` | **M** |
 | **D2** | **Ownership** | one owner per thread/project; `sem dono` flag; assign action; team roster | I2 | new `thread_state` in `Workspace` | **S** |
 | **D3** | **Fila lens (hero UI)** | thread-collapsed queue, risk sort, thread card + clock + owner chip + action bar, keyboard + optimistic + undo, zero state | P6 | D1, D2, the component kit | **L** |

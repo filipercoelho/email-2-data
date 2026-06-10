@@ -1,7 +1,7 @@
 # ADR-008 — Every verdict records who decided it
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled) |
 

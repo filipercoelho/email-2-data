@@ -5,7 +5,7 @@ Canonical knowledge base. Structure is the company standard (00–09); see
 **Place knowledge on the right shelf — don't write hybrid files.**
 
 | Shelf | Dominant question |
-|---|---|
+| --- | --- |
 | [00-overview](00-overview.md) | What is this project? |
 | [01-requirements](01-requirements/index.md) | What must it do? |
 | [02-architecture](02-architecture/index.md) | How is it structured, and why? |

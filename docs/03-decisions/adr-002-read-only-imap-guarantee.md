@@ -1,7 +1,7 @@
 # ADR-002 — Read-only IMAP is an absolute, pinned guarantee
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; red-team B1, since Phase 0) |
 

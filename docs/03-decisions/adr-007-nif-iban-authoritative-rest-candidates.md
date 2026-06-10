@@ -1,7 +1,7 @@
 # ADR-007 — Deterministic extraction: NIF/IBAN authoritative, amounts/dates as candidates
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; commit 6e24dd4) |
 

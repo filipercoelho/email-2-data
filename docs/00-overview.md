@@ -1,7 +1,7 @@
 # email-2-data
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Type | Overview |
 | Audience | All |
 | Status | Active |

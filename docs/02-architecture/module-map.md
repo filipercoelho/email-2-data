@@ -1,7 +1,7 @@
 # Architecture — module map & data flow
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Type | Architecture |
 | Status | Active |
 | Last reviewed | 2026-06-10 |

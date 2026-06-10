@@ -1,4 +1,4 @@
-"""C1a/C1b — deterministic account clustering (see design/cockpit.md).
+"""C1a/C1b — deterministic account clustering (see docs/05-reference/cockpit-design.md).
 
 Groups CRM contacts into account clusters by domain and NIF. Recomputed per-request
 from ``crm.all_contacts()`` + ``crm.contacts_by_nif()`` — no durable ``accounts`` table,

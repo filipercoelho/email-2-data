@@ -1,7 +1,7 @@
 # ADR-011 — Export sends only a job shell, and never auto-fires
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Status | Accepted |
 | Date | 2026-06-10 (back-filled; commit 7714993) |
 
