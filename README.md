@@ -81,9 +81,10 @@ cp .env.example .env                                    # fill in secrets (gitig
 docker compose up --build                               # → http://127.0.0.1:8042
 ```
 
-The image carries **no secrets or inbox data**: `.env` is injected via `env_file`, and `config/`
-(read-only), `corpus/`, and `out/` are bind-mounted so the UID watermark + results persist across
-restarts. The container binds `0.0.0.0:8042` internally but is published only to host loopback
+The image carries **no secrets or inbox data**: `.env` is **bind-mounted read-only and parsed by
+the app's own `config.load_dotenv`** (not compose `env_file:`, which would collapse `$$`→`$` and
+corrupt a secret containing `$`), and `config/` (read-only), `corpus/`, and `out/` are bind-mounted
+so the UID watermark + results persist across restarts. The container binds `0.0.0.0:8042` internally but is published only to host loopback
 (`127.0.0.1:8042`) — single-user, never public, never 8000. On boot it runs one incremental `sync`
 (fetch-new + triage-new) automatically.
 

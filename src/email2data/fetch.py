@@ -22,6 +22,7 @@ from typing import Any
 from . import audit
 from .config import account_password, paths
 from .identity import canonical_id_from_raw, safe_filename
+from .signals import is_sent_folder
 
 # Forbidden anywhere in this module — asserted by a test. If you need one of these, you are no longer
 # building a read-only system; stop and rethink.
@@ -77,6 +78,21 @@ def _account_mailboxes(settings: dict[str, Any], account: dict[str, Any]) -> lis
 def _source_header(folder: str) -> bytes:
     """Synthetic header injected into emails fetched from non-INBOX folders."""
     return f"X-Email2Data-Source: {folder}\r\n".encode()
+
+
+_SOURCE_HDR_RE = re.compile(rb"^X-Email2Data-Source:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _existing_is_sent(dest: Path) -> bool:
+    """Whether the already-cached .eml carries a Sent ``X-Email2Data-Source`` header. The header is
+    prepended at the very top, so a small read suffices. Used to decide if a new Sent-folder copy
+    should override a non-Sent cached one."""
+    try:
+        head = dest.read_bytes()[:1024]
+    except OSError:
+        return False
+    m = _SOURCE_HDR_RE.search(head)
+    return bool(m) and is_sent_folder(m.group(1).decode("ascii", "ignore"))
 
 
 def _quote_mailbox(name: str) -> str:
@@ -181,6 +197,7 @@ def _fetch_mailbox(
                "from_uid": last_uid if incremental else None, "candidates": len(uids)})
 
     inject = mailbox.upper() != "INBOX"
+    is_sent = is_sent_folder(mailbox)
     written: list[Path] = []
     max_uid = last_uid
     for uid in uids:
@@ -198,6 +215,14 @@ def _fetch_mailbox(
             raw = _source_header(mailbox) + raw
         dest = corpus_dir / safe_filename(canonical_id_from_raw(raw))
         if dest.exists():
+            # First-writer-wins — EXCEPT a Sent-folder copy must override a non-Sent cached one, so a
+            # message that lives in BOTH an INBOX and a Sent folder is classified outbound regardless
+            # of fetch order (the X-Email2Data-Source header drives direction downstream). Order-
+            # independent: we check the cached file, not which mailbox happened to run first.
+            if is_sent and not _existing_is_sent(dest):
+                dest.write_bytes(raw)
+                audit.log(audit_log, "message_source_upgraded", account_id,
+                          {"file": dest.name, "mailbox": mailbox})
             written.append(dest)
             continue
         dest.write_bytes(raw)

@@ -107,6 +107,8 @@ TEMPLATE = r"""<!doctype html>
   .htop{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   h1{margin:0;font-size:17px;font-weight:680;letter-spacing:-.01em}
   .sub{color:var(--mut);font-size:12.5px}
+  .nlink{color:var(--mut);text-decoration:none;font-size:13px;font-weight:600;padding:5px 10px;border-radius:8px}
+  .nlink:hover{background:var(--bg);color:var(--tx)}
   .stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}
   .stat{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:7px 13px;min-width:84px}
   .stat .n{font-size:18px;font-weight:680;letter-spacing:-.02em} .stat.cost .n{color:var(--int)}
@@ -128,16 +130,20 @@ TEMPLATE = r"""<!doctype html>
   .count{color:var(--mut);font-size:12px;margin-left:auto}
   /* ── Faceted filter panel (always-visible chip rows) ─────────────────── */
   .filters{border:1px solid var(--bd);border-radius:12px;background:var(--card);box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden}
-  .filters .fhd{display:flex;align-items:center;gap:10px;padding:9px 13px;cursor:pointer;user-select:none;font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--mut)}
+  .filters .fhd{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;padding:9px 13px;cursor:pointer;user-select:none;font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--mut)}
   .filters .fhd:hover{color:var(--ac)} .filters .fhd .ar{transition:transform .15s} .filters.col .fhd .ar{transform:rotate(-90deg)}
   .filters .fhd .nact{font-weight:600;text-transform:none;letter-spacing:0;color:var(--ac);background:#eef2ff;border:1px solid #cdd7ff;border-radius:20px;padding:1px 9px;font-size:11px}
   .filters .fhd .clr{margin-left:auto;font-weight:600;text-transform:none;letter-spacing:0;color:var(--ac);font-size:12px}
   .filters .fhd .clr:hover{text-decoration:underline}
+  .filters .fsum{display:inline-flex;flex-wrap:wrap;gap:6px;min-width:0}
+  .fpill{display:inline-flex;align-items:center;gap:4px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:20px;padding:2px 9px;font-size:11.5px;font-weight:600;text-transform:none;letter-spacing:0;cursor:pointer}
+  .fpill:hover{background:#e0e7ff}
   .filters .fbody{padding:4px 13px 11px;border-top:1px solid var(--bd2)} .filters.col .fbody{display:none}
   .frow{display:flex;align-items:flex-start;gap:9px;padding:7px 0;border-top:1px solid var(--bd2)} .frow:first-child{border-top:none}
   .frow .rl{flex:0 0 78px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:700;color:var(--mut2);padding-top:6px}
   .frow .rc{display:flex;flex-wrap:wrap;gap:6px;min-width:0;flex:1}
   .frow .chip{padding:4px 10px;font-size:11.5px}
+  .frow .subt{align-self:center;font-size:10px;color:var(--mut2);font-weight:700;margin:0 1px 0 4px;text-transform:uppercase;letter-spacing:.04em}
   .banner{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#eef2ff;border:1px solid #cdd7ff;border-radius:9px;padding:8px 12px;margin-bottom:12px;font-size:12.5px}
   .banner b{color:var(--ac)} .banner .x{margin-left:auto;cursor:pointer;color:var(--ac);font-weight:600}
   .layout{display:grid;grid-template-columns:390px 1fr;gap:16px;align-items:start}
@@ -284,8 +290,6 @@ TEMPLATE = r"""<!doctype html>
   .vh{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
   .khint{margin-left:auto;border:1px solid var(--bd);background:var(--card);color:var(--mut);border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:var(--shadow)}
   .khint:hover{color:var(--ac);border-color:var(--ac)}
-  /* ── Toolbar chip groups wrap instead of clipping off-screen ─────────── */
-  #leadchips{display:inline-flex;flex-wrap:wrap;gap:7px;min-width:0;vertical-align:middle}
   /* ── Toasts (replace alert/confirm) ──────────────────────────────────── */
   #toasts{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
   .toast{pointer-events:auto;background:#15181c;color:#fff;border-radius:10px;padding:10px 14px;font-size:13px;box-shadow:0 6px 22px rgba(20,24,28,.25);display:flex;align-items:center;gap:14px;max-width:min(92vw,460px);animation:tin .18s ease}
@@ -321,6 +325,10 @@ TEMPLATE = r"""<!doctype html>
 <body>
 <header>
   <div class="htop"><h1 id="title">email-2-data · workspace</h1><span class="sub" id="sub"></span>
+    <a class="nlink" href="/">Fila</a>
+    <a class="nlink" href="/contrapartes">Contrapartes</a>
+    <a class="nlink" href="/projetos">Projetos</a>
+    <a class="nlink" href="/para-ti">Para ti</a>
     <button class="khint" id="syncBtn" onclick="syncNow()" title="buscar emails novos + triagem (incremental)" style="display:none">↻ Sincronizar</button>
     <span class="sub" id="syncStatus" aria-live="polite"></span>
     <button class="khint" onclick="toggleHelp(true)" title="atalhos de teclado (?)" aria-label="Mostrar atalhos de teclado">⌨ atalhos</button></div>
@@ -360,7 +368,7 @@ TEMPLATE = r"""<!doctype html>
   </div>
   <div id="emails">
     <div class="toolbar">
-      <input type="search" id="q" placeholder="Procurar assunto, remetente, corpo…" aria-label="Procurar emails" oninput="_deb('q',function(){renderFilters();renderList();})"/>
+      <input type="search" id="q" placeholder="Procurar assunto, remetente, corpo…" aria-label="Procurar emails" oninput="_deb('q',function(){renderFilters('emails');renderList();})"/>
       <span class="count" id="ecount"></span>
     </div>
     <div id="filters" class="filters" aria-label="Filtros"></div>
@@ -372,13 +380,14 @@ TEMPLATE = r"""<!doctype html>
   </div>
   <div id="contacts" class="hidden">
     <div class="toolbar">
-      <input type="search" id="cq" placeholder="Procurar nome, email, domínio…" aria-label="Procurar contactos" oninput="_deb('cq',renderContacts)"/>
-      <span class="chip on" id="extchip" onclick="toggleExt()">só externos</span>
+      <input type="search" id="cq" placeholder="Procurar nome, email, domínio…" aria-label="Procurar contactos" oninput="_deb('cq',function(){renderFilters('contacts');renderContacts();})"/>
+      <span class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:700">ordenar</span>
       <span class="chip on" id="csort-msgs" onclick="setCSort('msgs')">+ mensagens</span>
       <span class="chip" id="csort-silent" onclick="setCSort('silent')">+ silenciosos</span>
       <span class="chip" id="csort-name" onclick="setCSort('name')">A→Z</span>
       <span class="count" id="ccount"></span>
     </div>
+    <div id="cfilters" class="filters" aria-label="Filtros"></div>
     <div class="layout">
       <div class="list" id="clist"></div>
       <div class="detail" id="cdetail"><div class="empty">Selecione um contacto para ver o historial e ligações.</div></div>
@@ -386,10 +395,10 @@ TEMPLATE = r"""<!doctype html>
   </div>
   <div id="leads" class="hidden">
     <div class="toolbar">
-      <input type="search" id="lq" placeholder="Procurar cliente, assunto…" aria-label="Procurar leads" oninput="_deb('lq',renderLeads)"/>
-      <span id="leadchips"></span>
+      <input type="search" id="lq" placeholder="Procurar cliente, assunto…" aria-label="Procurar leads" oninput="_deb('lq',function(){renderFilters('leads');renderLeads();})"/>
       <span class="count" id="lcount"></span>
     </div>
+    <div id="lfilters" class="filters" aria-label="Filtros"></div>
     <div class="layout">
       <div class="list" id="llist"></div>
       <div class="detail" id="ldetail"><div class="empty">Selecione uma conversa.</div></div>
@@ -397,11 +406,12 @@ TEMPLATE = r"""<!doctype html>
   </div>
   <div id="projects" class="hidden">
     <div class="toolbar">
-      <input type="search" id="pq" placeholder="Procurar projeto, cliente…" aria-label="Procurar projetos" oninput="_deb('pq',renderProjects)"/>
+      <input type="search" id="pq" placeholder="Procurar projeto, cliente…" aria-label="Procurar projetos" oninput="_deb('pq',function(){renderFilters('projects');renderProjects();})"/>
       <input id="pnew-title" placeholder="Título do novo projeto" style="flex:0 0 220px"/>
       <span class="chip on" onclick="createProject()">+ Novo projeto</span>
       <span class="count" id="pcount"></span>
     </div>
+    <div id="pfilters" class="filters" aria-label="Filtros"></div>
     <div class="layout">
       <div class="list" id="plist"></div>
       <div class="detail" id="pdetail"><div class="empty">Selecione um projeto.</div></div>
@@ -420,34 +430,78 @@ const CPpt={CLIENT:'Cliente',LEAD:'Lead',SUPPLIER:'Fornecedor',INTERNAL:'Interno
 const PURpt={PO_FROM_CLIENT:'Encomenda de cliente',ESTIMATE_REQUEST_FROM_CLIENT:'Pedido de orçamento',OUTBOUND_INVOICE:'Fatura nossa',OUR_ORDER_TO_SUPPLIER:'Encomenda a fornecedor',SUPPLIER_REPLY_OR_CONFIRMATION:'Resposta de fornecedor',INVOICE_OR_ACCOUNTING:'Fatura / contabilidade',FOLLOW_UP:'Seguimento',PUBLICITY:'Publicidade',INTERNAL_OPS:'Operações internas',OTHER:'Outro'};
 const PRIpt={HIGH:'Alta',MEDIUM:'Média',LOW:'Baixa',IGNORE:'Ignorar',NEEDS_REVIEW:'Rever'};
 const DIRpt={inbound:'entrada',outbound:'saída',internal:'interno'};
-// ─── Faceted filter registry ─────────────────────────────────────────────────
-// One entry per filterable data point. enum = multi-select chips (OR within, AND across);
-// flag = single toggle. Bucket fields (urgency/confidence/date) are enums over computed ranges so
-// the whole toolbar stays chip-consistent. To filter on a NEW data point, add one entry here.
+// Stage + lead-status labels/colors — defined here so the project/lead facet registries can use them.
+const STAGEcol={LEAD:'#0d9488',GATHERING:'#3358d4',ESTIMABLE:'#13a36a',QUOTED:'#7c5cff',WON:'#13a36a',LOST:'#e5484d',ARCHIVED:'#9aa1ab'};
+const STAGEpt={LEAD:'Lead',GATHERING:'A reunir',ESTIMABLE:'Orçamentável',QUOTED:'Orçamentado',WON:'Ganho',LOST:'Perdido',ARCHIVED:'Arquivado'};
+const LSTATUSpt={unanswered:'Sem resposta',waiting:'A aguardar deles',active:'Ativa'};
+const LSTATUScol={unanswered:'#e5484d',waiting:'#f5a623',active:'#13a36a'};
+// ─── Generic faceted-filter registry, keyed by tab ───────────────────────────
+// Each tab declares facets over ITS object type. enum = multi-select chips (OR within, AND across);
+// flag = single toggle. Bucket fields are enums over computed ranges. The engine
+// (matchFacets/facetCounts/applyFacets/renderFilters) is fully generic and shared by all four tabs;
+// dataset()/search() make counts + free-text search per-tab. To filter on a NEW data point, add one
+// entry to the relevant tab. NOTE: facet test()/dataset() may reference helpers defined later in this
+// script (realAtts, _allLeadThreads, projData, …) — fine, they're only invoked at render time.
 const _NOW=new Date();
 function _daysAgo(s){if(!s)return null;const t=Date.parse(String(s).slice(0,10));return isNaN(t)?null:Math.floor((_NOW-t)/86400000);}
-const FGROUPS=['Prioridade','Tipo','Purpose','Direção','Sinais','Estado','Entidades'];
-const FACETS=[
-  {key:'priority',group:'Prioridade',type:'enum',values:PRIS,labelFor:v=>PRIpt[v]||v,colorFor:v=>PRIcol[v],test:(e,v)=>e.priority===v},
-  {key:'counterparty',group:'Tipo',type:'enum',values:Object.keys(CPpt),labelFor:v=>CPpt[v]||v,colorFor:v=>CPcol[v],test:(e,v)=>e.counterparty===v},
-  {key:'purpose',group:'Purpose',type:'enum',values:Object.keys(PURpt),labelFor:v=>PURpt[v]||v,test:(e,v)=>e.purpose===v},
-  {key:'direction',group:'Direção',type:'enum',label:'Direção',values:['inbound','outbound','internal'],labelFor:v=>DIRpt[v]||v,test:(e,v)=>e.direction===v},
-  {key:'decided',group:'Direção',type:'enum',label:'Decisão',values:['offline','llm'],labelFor:v=>v==='offline'?'offline':'via LLM',test:(e,v)=>{const t0=(e.decided_by||'').startsWith('tier0');return v==='offline'?t0:!t0;}},
-  {key:'urgency',group:'Sinais',type:'enum',label:'Urgência',values:['hi','mid','lo'],labelFor:v=>({hi:'alta ≥70',mid:'média 40–69',lo:'baixa <40'}[v]),test:(e,v)=>{const u=e.urgency||0;return v==='hi'?u>=70:v==='mid'?(u>=40&&u<70):u<40;}},
-  {key:'confidence',group:'Sinais',type:'enum',label:'Confiança',values:['hi','lo'],labelFor:v=>v==='hi'?'alta ≥0.7':'baixa <0.7',test:(e,v)=>{const c=e.confidence==null?1:e.confidence;return v==='hi'?c>=0.7:c<0.7;}},
-  {key:'received',group:'Sinais',type:'enum',label:'Recebido',values:['today','w','m','old'],labelFor:v=>({today:'hoje',w:'últ. 7 dias',m:'últ. 30 dias',old:'+ antigo'}[v]),test:(e,v)=>{const d=_daysAgo(e._date);if(d==null)return false;return v==='today'?d===0:v==='w'?(d>=1&&d<=7):v==='m'?(d>=8&&d<=30):d>30;}},
-  {key:'has_attachment',group:'Estado',type:'flag',label:'Com anexo',test:e=>realAtts(e).length>0},
-  {key:'is_reply',group:'Estado',type:'flag',label:'É resposta',test:e=>!!e._reply},
-  {key:'unanswered',group:'Estado',type:'flag',label:'Sem resposta',test:e=>!threadHasOutbound[e._thread]&&_isLeadThread(e._thread)&&e.direction!=='outbound'},
-  {key:'has_jobspec',group:'Estado',type:'flag',label:'Tem job-spec',test:e=>!!e._jobspec},
-  {key:'estimable',group:'Estado',type:'flag',label:'Orçamentável',test:e=>!!(e._jobspec&&e._jobspec.readiness&&e._jobspec.readiness.estimable)},
-  {key:'reclassified',group:'Estado',type:'flag',label:'Corrigido',test:e=>!!(e._auto_counterparty||e._auto_purpose||e._auto_priority)},
-  {key:'has_deadline',group:'Entidades',type:'flag',label:'Prazo',test:e=>!!(e.entities&&e.entities.deadline)},
-  {key:'has_money',group:'Entidades',type:'flag',label:'Valor',test:e=>!!(e.entities&&e.entities.money)},
-  {key:'has_nif',group:'Entidades',type:'flag',label:'NIF',test:e=>!!(e.entities&&e.entities.nif)},
-  {key:'has_iban',group:'Entidades',type:'flag',label:'IBAN',test:e=>!!(e.entities&&e.entities.iban)},
-];
-const FACET_BY={}; FACETS.forEach(f=>FACET_BY[f.key]=f);
+function _volBucket(n,v){n=n||0;return v==='1'?n===1:v==='s'?(n>=2&&n<=5):v==='m'?(n>=6&&n<=20):n>20;}
+const TABFILTERS={
+  emails:{searchId:'q', dataset:()=>EMAILS,
+    search:e=>`${e.subject} ${e.from_addr} ${e.reason} ${e.purpose} ${e.counterparty} ${e._body}`,
+    groups:['Prioridade','Tipo','Purpose','Direção','Sinais','Estado','Entidades'],
+    facets:[
+      {key:'priority',group:'Prioridade',type:'enum',values:PRIS,labelFor:v=>PRIpt[v]||v,colorFor:v=>PRIcol[v],test:(e,v)=>e.priority===v},
+      {key:'counterparty',group:'Tipo',type:'enum',values:Object.keys(CPpt),labelFor:v=>CPpt[v]||v,colorFor:v=>CPcol[v],test:(e,v)=>e.counterparty===v},
+      {key:'purpose',group:'Purpose',type:'enum',values:Object.keys(PURpt),labelFor:v=>PURpt[v]||v,test:(e,v)=>e.purpose===v},
+      {key:'direction',group:'Direção',type:'enum',label:'Direção',values:['inbound','outbound','internal'],labelFor:v=>DIRpt[v]||v,test:(e,v)=>e.direction===v},
+      {key:'decided',group:'Direção',type:'enum',label:'Decisão',values:['offline','llm'],labelFor:v=>v==='offline'?'offline':'via LLM',test:(e,v)=>{const t0=(e.decided_by||'').startsWith('tier0');return v==='offline'?t0:!t0;}},
+      {key:'urgency',group:'Sinais',type:'enum',label:'Urgência',values:['hi','mid','lo'],labelFor:v=>({hi:'alta ≥70',mid:'média 40–69',lo:'baixa <40'}[v]),test:(e,v)=>{const u=e.urgency||0;return v==='hi'?u>=70:v==='mid'?(u>=40&&u<70):u<40;}},
+      {key:'confidence',group:'Sinais',type:'enum',label:'Confiança',values:['hi','lo'],labelFor:v=>v==='hi'?'alta ≥0.7':'baixa <0.7',test:(e,v)=>{const c=e.confidence==null?1:e.confidence;return v==='hi'?c>=0.7:c<0.7;}},
+      {key:'received',group:'Sinais',type:'enum',label:'Recebido',values:['today','w','m','old'],labelFor:v=>({today:'hoje',w:'últ. 7 dias',m:'últ. 30 dias',old:'+ antigo'}[v]),test:(e,v)=>{const d=_daysAgo(e._date);if(d==null)return false;return v==='today'?d===0:v==='w'?(d>=1&&d<=7):v==='m'?(d>=8&&d<=30):d>30;}},
+      {key:'has_attachment',group:'Estado',type:'flag',label:'Com anexo',test:e=>realAtts(e).length>0},
+      {key:'is_reply',group:'Estado',type:'flag',label:'É resposta',test:e=>!!e._reply},
+      {key:'unanswered',group:'Estado',type:'flag',label:'Sem resposta',test:e=>!threadHasOutbound[e._thread]&&_isLeadThread(e._thread)&&e.direction!=='outbound'},
+      {key:'has_jobspec',group:'Estado',type:'flag',label:'Tem job-spec',test:e=>!!e._jobspec},
+      {key:'estimable',group:'Estado',type:'flag',label:'Orçamentável',test:e=>!!(e._jobspec&&e._jobspec.readiness&&e._jobspec.readiness.estimable)},
+      {key:'reclassified',group:'Estado',type:'flag',label:'Corrigido',test:e=>!!(e._auto_counterparty||e._auto_purpose||e._auto_priority)},
+      {key:'has_deadline',group:'Entidades',type:'flag',label:'Prazo',test:e=>!!(e.entities&&e.entities.deadline)},
+      {key:'has_money',group:'Entidades',type:'flag',label:'Valor',test:e=>!!(e.entities&&e.entities.money)},
+      {key:'has_nif',group:'Entidades',type:'flag',label:'NIF',test:e=>!!(e.entities&&e.entities.nif)},
+      {key:'has_iban',group:'Entidades',type:'flag',label:'IBAN',test:e=>!!(e.entities&&e.entities.iban)},
+    ]},
+  contacts:{searchId:'cq', dataset:()=>CONTACTS,
+    search:c=>`${c.display_name||''} ${c.email} ${c.domain||''}`,
+    groups:['Tipo','Purpose','Origem','Atividade','Volume'],
+    facets:[
+      {key:'last_counterparty',group:'Tipo',type:'enum',label:'Tipo',values:Object.keys(CPpt),labelFor:v=>CPpt[v]||v,colorFor:v=>CPcol[v],test:(c,v)=>c.last_counterparty===v},
+      {key:'last_purpose',group:'Purpose',type:'enum',label:'Purpose',values:Object.keys(PURpt),labelFor:v=>PURpt[v]||v,test:(c,v)=>c.last_purpose===v},
+      {key:'origin',group:'Origem',type:'enum',label:'Origem',values:['int','ext'],labelFor:v=>v==='int'?'interno':'externo',test:(c,v)=>v==='int'?!!c.is_internal:!c.is_internal},
+      {key:'activity',group:'Atividade',type:'enum',label:'Visto',values:['w','m','q','silent'],labelFor:v=>({w:'últ. 7 dias',m:'últ. 30 dias',q:'últ. 90 dias',silent:'silencioso >90d'}[v]),test:(c,v)=>{const d=_daysAgo(c.last_from_date);if(d==null)return v==='silent';return v==='w'?d<=7:v==='m'?(d>7&&d<=30):v==='q'?(d>30&&d<=90):d>90;}},
+      {key:'volume',group:'Volume',type:'enum',label:'Mensagens',values:['1','s','m','l'],labelFor:v=>({'1':'1',s:'2–5',m:'6–20',l:'20+'}[v]),test:(c,v)=>_volBucket(c.msg_count,v)},
+    ]},
+  leads:{searchId:'lq', dataset:()=>_allLeadThreads(),
+    search:t=>`${(t.emails[0]&&t.emails[0].subject)||''} ${_threadClientEmail(t.thread)} ${nameOf(_threadClientEmail(t.thread))}`,
+    groups:['Estado','Espera','Marcadores'],
+    facets:[
+      {key:'status',group:'Estado',type:'enum',label:'Estado',values:['unanswered','waiting','active'],labelFor:v=>LSTATUSpt[v]||v,colorFor:v=>LSTATUScol[v],test:(t,v)=>t.status===v},
+      {key:'wait',group:'Espera',type:'enum',label:'Espera',values:['a','b','c','d'],labelFor:v=>({a:'≤3 dias',b:'4–7 dias',c:'8–30 dias',d:'>30 dias'}[v]),test:(t,v)=>{const d=t.ds;if(d==null)return false;return v==='a'?d<=3:v==='b'?(d>=4&&d<=7):v==='c'?(d>=8&&d<=30):d>30;}},
+      {key:'estimable',group:'Marcadores',type:'flag',label:'Orçamentável',test:t=>{const b=_bestJobspecEmail(t.emails);return !!(b&&b._jobspec&&b._jobspec.readiness&&b._jobspec.readiness.estimable);}},
+      {key:'has_attachment',group:'Marcadores',type:'flag',label:'Com anexo',test:t=>t.emails.some(e=>realAtts(e).length>0)},
+    ]},
+  projects:{searchId:'pq', dataset:()=>projData,
+    search:p=>`${p.title||''} ${p.client_name||''} ${p.client_email||''}`,
+    groups:['Estágio','Cobertura','Marcadores'],
+    facets:[
+      {key:'stage',group:'Estágio',type:'enum',label:'Estágio',values:Object.keys(STAGEcol),labelFor:v=>STAGEpt[v]||v,colorFor:v=>STAGEcol[v],test:(p,v)=>p.stage===v},
+      {key:'coverage',group:'Cobertura',type:'enum',label:'Cobertura',values:['full','hi','lo'],labelFor:v=>({full:'completa',hi:'alta ≥70%',lo:'baixa <70%'}[v]),test:(p,v)=>{const c=p.coverage||0;return v==='full'?c>=0.999:v==='hi'?(c>=0.7&&c<0.999):c<0.7;}},
+      {key:'estimable',group:'Marcadores',type:'flag',label:'Orçamentável',test:p=>!!p.estimable},
+      {key:'exported',group:'Marcadores',type:'flag',label:'Exportado',test:p=>!!p.external_id},
+    ]},
+};
+// Per-tab facet lookup + per-tab filter state. FSTATE[tab][key] = Set (enum) | true (flag).
+Object.values(TABFILTERS).forEach(t=>{t.by={};t.facets.forEach(f=>t.by[f.key]=f);});
+const FSTATE={emails:{},contacts:{},leads:{},projects:{}};
+const FCOLLAPSED={emails:true,contacts:true,leads:true,projects:true};
 // Per-item fields shown as rows; job-level split into must (shown) + optional (in <details>).
 const ITEM_OPT=ITEM_KEYS.filter(k=>!ITEM_MUST.includes(k));               // e.g. colour_finish
 const JOB_OPT=JOB_KEYS.filter(k=>!JOB_MUST.includes(k)&&k!=='client_identity'); // quality/delivery/budget
@@ -576,17 +630,19 @@ function onKey(ev){
 
 // ─── URL deep-linking (hash router) ──────────────────────────────────────────
 let _urlReady=false;
+// Registry-driven, per active tab: enum facets → comma-joined values under their key; flags → key=1;
+// the tab's search box under its searchId; plus the tab's selection + (emails) thread.
 function writeURL(){
   if(!_urlReady)return;
   const p=new URLSearchParams(); p.set('tab',curTab);
-  if(curTab==='emails'){
-    const t=navStack[navStack.length-1]; if(t&&t.kind==='email')p.set('sel',t.id);
-    // Registry-driven: enum facets → comma-joined values under their key; active flags → key=1.
-    FACETS.forEach(f=>{const v=F[f.key]; if(!v)return; p.set(f.key, f.type==='flag'?'1':[...v].join(','));});
-    if(threadFilter)p.set('thread',threadFilter);
-    const q=(document.getElementById('q')||{}).value||''; if(q)p.set('q',q);
-  }else if(curTab==='contacts'){if(selContact)p.set('sel',selContact);}
-  else if(curTab==='leads'){if(selLeadThread)p.set('sel',selLeadThread);if(leadFilter!=='all')p.set('lf',leadFilter);}
+  const cfg=TABFILTERS[curTab], F=FSTATE[curTab];
+  if(cfg){
+    cfg.facets.forEach(f=>{const v=F[f.key]; if(!v)return; p.set(f.key, f.type==='flag'?'1':[...v].join(','));});
+    const sv=(document.getElementById(cfg.searchId)||{}).value||''; if(sv)p.set(cfg.searchId,sv);
+  }
+  if(curTab==='emails'){const t=navStack[navStack.length-1]; if(t&&t.kind==='email')p.set('sel',t.id); if(threadFilter)p.set('thread',threadFilter);}
+  else if(curTab==='contacts'){if(selContact)p.set('sel',selContact);}
+  else if(curTab==='leads'){if(selLeadThread)p.set('sel',selLeadThread);}
   else if(curTab==='projects'){if(selProject)p.set('sel',selProject);}
   const h='#'+p.toString();
   if(location.hash!==h){try{history.replaceState(null,'',h);}catch(_){}}
@@ -594,55 +650,59 @@ function writeURL(){
 function applyURLState(){
   const h=(location.hash||'').slice(1); if(!h)return null;
   const p=new URLSearchParams(h); const tab=p.get('tab')||'emails';
-  if(tab==='emails'){
-    F={};
-    FACETS.forEach(f=>{const raw=p.get(f.key); if(raw==null)return;
+  const cfg=TABFILTERS[tab];
+  if(cfg){
+    const F={};
+    cfg.facets.forEach(f=>{const raw=p.get(f.key); if(raw==null)return;
       if(f.type==='flag'){F[f.key]=true;}
       else{const vs=raw.split(',').filter(v=>f.values.includes(v)); if(vs.length)F[f.key]=new Set(vs);}});
-    threadFilter=p.get('thread')||'';
-    const qel=document.getElementById('q'); if(qel)qel.value=p.get('q')||'';
-    const sel=p.get('sel'); if(sel&&byMid[sel])navStack=[{kind:'email',id:sel}];
-  }else if(tab==='contacts'){selContact=p.get('sel')||null;}
-  else if(tab==='leads'){leadFilter=p.get('lf')||'all';selLeadThread=p.get('sel')||null;}
+    FSTATE[tab]=F;
+    const qel=document.getElementById(cfg.searchId); if(qel)qel.value=p.get(cfg.searchId)||'';
+  }
+  if(tab==='emails'){threadFilter=p.get('thread')||''; const sel=p.get('sel'); if(sel&&byMid[sel])navStack=[{kind:'email',id:sel}];}
+  else if(tab==='contacts'){selContact=p.get('sel')||null;}
+  else if(tab==='leads'){selLeadThread=p.get('sel')||null;}
   else if(tab==='projects'){selProject=p.get('sel')||null;}
   return tab;
 }
 
-// Filter state: F[key] = Set of selected values (enum facets) | true (active flags). threadFilter is
-// separate — set by clicking "↳ N na thread", not a registry facet. filtersCollapsed = panel UI only.
-let F={}, threadFilter='', filtersCollapsed=false;
+// threadFilter (emails only) is a special, non-registry filter set by clicking "↳ N na thread".
+let threadFilter='';
 const _LEAD_CPS=new Set(['LEAD','CLIENT']), _LEAD_PURS=new Set(['ESTIMATE_REQUEST_FROM_CLIENT','PO_FROM_CLIENT']);
 function _isLeadThread(t){return [...(threadMids[t]||[])].some(m=>{const e=byMid[m];return e&&(_LEAD_CPS.has(e.counterparty)||_LEAD_PURS.has(e.purpose));});}
-function anyFilter(){return !!threadFilter||Object.keys(F).length>0;}
-function _afterFilterChange(){renderFilters();renderList();}   // renderList() also writes the URL
-function toggleFacet(key,v){const s=F[key]||(F[key]=new Set());s.has(v)?s.delete(v):s.add(v);if(!s.size)delete F[key];_afterFilterChange();}
-function toggleFlag(key){F[key]?delete F[key]:F[key]=true;_afterFilterChange();}
-function setCp(cp){toggleFacet('counterparty',cp);}            // badge click-to-filter (detail view)
-function setThread(t){threadFilter=(threadFilter==t?'':t);_afterFilterChange();}
-function toggleFiltersPanel(){filtersCollapsed=!filtersCollapsed;renderFilters();}
-function clearFilters(){F={};threadFilter='';_afterFilterChange();}
-// Does email e pass every active facet? (flag → test true; enum → at least one selected value matches)
-function _matchFacets(e,exceptKey){
+const _RERENDER={emails:()=>renderList(),contacts:()=>renderContacts(),leads:()=>renderLeads(),projects:()=>renderProjects()};
+function anyFilter(tab){return Object.keys(FSTATE[tab]).length>0||(tab==='emails'&&!!threadFilter);}
+function _afterFilterChange(tab){renderFilters(tab);_RERENDER[tab]();}   // re-render also writes the URL
+function toggleFacet(tab,key,v){const F=FSTATE[tab],s=F[key]||(F[key]=new Set());s.has(v)?s.delete(v):s.add(v);if(!s.size)delete F[key];_afterFilterChange(tab);}
+function toggleFlag(tab,key){const F=FSTATE[tab];F[key]?delete F[key]:F[key]=true;_afterFilterChange(tab);}
+function setCp(cp){toggleFacet('emails','counterparty',cp);}   // email badge click-to-filter (detail view)
+function setThread(t){threadFilter=(threadFilter==t?'':t);_afterFilterChange('emails');}
+function toggleFiltersPanel(tab){FCOLLAPSED[tab]=!FCOLLAPSED[tab];renderFilters(tab);}
+function clearFilters(tab){FSTATE[tab]={};if(tab==='emails')threadFilter='';_afterFilterChange(tab);}
+// Does object o pass every active facet of `tab`? (flag → test true; enum → ≥1 selected value matches)
+function matchFacets(tab,o,exceptKey){
+  const F=FSTATE[tab],by=TABFILTERS[tab].by;
   for(const k in F){
     if(k===exceptKey)continue;
-    const f=FACET_BY[k]; if(!f)continue;
-    if(f.type==='flag'){if(!f.test(e))return false;}
-    else{let ok=false;for(const v of F[k]){if(f.test(e,v)){ok=true;break;}}if(!ok)return false;}
+    const f=by[k]; if(!f)continue;
+    if(f.type==='flag'){if(!f.test(o))return false;}
+    else{let ok=false;for(const v of F[k]){if(f.test(o,v)){ok=true;break;}}if(!ok)return false;}
   }
   return true;
 }
-function _matchSearchThread(e){
-  if(threadFilter&&e._thread!==threadFilter)return false;
-  const q=(document.getElementById('q').value||'').toLowerCase();
-  return !q||(`${e.subject} ${e.from_addr} ${e.reason} ${e.purpose} ${e.counterparty} ${e._body}`).toLowerCase().includes(q);
+function searchPass(tab,o){
+  const cfg=TABFILTERS[tab],el=document.getElementById(cfg.searchId),q=((el&&el.value)||'').toLowerCase();
+  return !q||cfg.search(o).toLowerCase().includes(q);
 }
-function filtered(){return EMAILS.filter(e=>_matchFacets(e)&&_matchSearchThread(e));}
+// Filter an already-loaded array through a tab's active facets + its search box.
+function applyFacets(tab,rows){return rows.filter(o=>searchPass(tab,o)&&matchFacets(tab,o));}
+function filtered(){return EMAILS.filter(e=>(!threadFilter||e._thread===threadFilter)&&searchPass('emails',e)&&matchFacets('emails',e));}
 // Narrowing counts: how many results each chip would yield given the REST of the active selection.
-function facetCounts(f){
-  const base=EMAILS.filter(e=>_matchSearchThread(e)&&_matchFacets(e,f.key));
-  if(f.type==='flag')return base.reduce((n,e)=>n+(f.test(e)?1:0),0);
+function facetCounts(tab,f){
+  const base=TABFILTERS[tab].dataset().filter(o=>searchPass(tab,o)&&matchFacets(tab,o,f.key)&&(tab!=='emails'||!threadFilter||o._thread===threadFilter));
+  if(f.type==='flag')return base.reduce((n,o)=>n+(f.test(o)?1:0),0);
   const c={}; f.values.forEach(v=>c[v]=0);
-  base.forEach(e=>f.values.forEach(v=>{if(f.test(e,v))c[v]++;}));
+  base.forEach(o=>f.values.forEach(v=>{if(f.test(o,v))c[v]++;}));
   return c;
 }
 
@@ -683,36 +743,50 @@ function renderHeader(){
   dist.innerHTML=PRIS.filter(p=>by[p]).map(p=>`<span style="flex:${by[p]};background:${PRIcol[p]}" title="${p}: ${by[p]}"></span>`).join('');
   dist.setAttribute('aria-label','Distribuição de prioridade — '+(PRIS.filter(p=>by[p]).map(p=>`${p}: ${by[p]}`).join(', ')||'sem dados'));
 }
-// ─── Faceted filter panel (always-visible, grouped chip rows) ────────────────
-function _chipHtml(f,v,n){
-  const sel=F[f.key]&&F[f.key].has(v), col=f.colorFor&&f.colorFor(v);
+// ─── Shared faceted filter panel — collapsed by default, one per tab ─────────
+const _FILTEL={emails:'filters',contacts:'cfilters',leads:'lfilters',projects:'pfilters'};
+function _chipHtml(tab,f,v,n){
+  const sel=FSTATE[tab][f.key]&&FSTATE[tab][f.key].has(v), col=f.colorFor&&f.colorFor(v);
   const style=col&&sel?` style="background:${col};border-color:${col};color:#fff"`:col?` style="border-color:${col}88;color:${col}"`:'';
-  return `<span class="chip${sel?' on':''}${n?'':' z'}"${style} role="checkbox" aria-checked="${!!sel}" tabindex="0" onclick="toggleFacet('${f.key}','${esc(v)}')">${esc(f.labelFor(v))}<span class="cn">${n}</span></span>`;
+  return `<span class="chip${sel?' on':''}${n?'':' z'}"${style} role="checkbox" aria-checked="${!!sel}" tabindex="0" onclick="toggleFacet('${tab}','${f.key}','${esc(v)}')">${esc(f.labelFor(v))}<span class="cn">${n}</span></span>`;
 }
-function _flagHtml(f,n){
-  const sel=!!F[f.key];
-  return `<span class="chip${sel?' on':''}${n?'':' z'}" role="checkbox" aria-checked="${sel}" tabindex="0" onclick="toggleFlag('${f.key}')">${esc(f.label)}<span class="cn">${n}</span></span>`;
+function _flagHtml(tab,f,n){
+  const sel=!!FSTATE[tab][f.key];
+  return `<span class="chip${sel?' on':''}${n?'':' z'}" role="checkbox" aria-checked="${sel}" tabindex="0" onclick="toggleFlag('${tab}','${f.key}')">${esc(f.label)}<span class="cn">${n}</span></span>`;
 }
-function renderFilters(){
-  const el=document.getElementById('filters'); if(!el)return;
-  const nact=Object.keys(F).length+(threadFilter?1:0);
+// Removable pills shown in the collapsed header — one per active selection.
+function _activePills(tab){
+  const F=FSTATE[tab],by=TABFILTERS[tab].by,out=[];
+  for(const k in F){const f=by[k];if(!f)continue;
+    if(f.type==='flag')out.push(`<span class="fpill" onclick="event.stopPropagation();toggleFlag('${tab}','${k}')">${esc(f.label)} ✕</span>`);
+    else for(const v of F[k])out.push(`<span class="fpill" onclick="event.stopPropagation();toggleFacet('${tab}','${k}','${esc(v)}')">${esc(f.labelFor(v))} ✕</span>`);
+  }
+  if(tab==='emails'&&threadFilter){const e=byMid[[...(threadMids[threadFilter]||[])][0]];
+    out.push(`<span class="fpill" onclick="event.stopPropagation();setThread('${esc(threadFilter)}')">thread: ${esc(((e&&e.subject)||'').slice(0,24))} ✕</span>`);}
+  return out.join('');
+}
+function renderFilters(tab){
+  tab=tab||curTab;
+  const cfg=TABFILTERS[tab], el=document.getElementById(_FILTEL[tab]); if(!cfg||!el)return;
+  const collapsed=FCOLLAPSED[tab], nact=Object.keys(FSTATE[tab]).length+(tab==='emails'&&threadFilter?1:0);
   let rows='';
-  FGROUPS.forEach(g=>{
-    const fs=FACETS.filter(f=>f.group===g); if(!fs.length)return;
+  cfg.groups.forEach(g=>{
+    const fs=cfg.facets.filter(f=>f.group===g); if(!fs.length)return;
     const multiEnum=fs.filter(f=>f.type==='enum').length>1;
     let cells='';
     fs.forEach(f=>{
-      const cnt=facetCounts(f);
-      if(f.type==='flag'){cells+=_flagHtml(f,cnt);return;}
-      if(multiEnum&&f.label)cells+=`<span class="subt" style="align-self:center;font-size:10px;color:var(--mut2);font-weight:700;margin:0 1px 0 4px">${esc(f.label)}</span>`;
-      cells+=f.values.map(v=>_chipHtml(f,v,cnt[v])).join('');
+      const cnt=facetCounts(tab,f);
+      if(f.type==='flag'){cells+=_flagHtml(tab,f,cnt);return;}
+      if(multiEnum&&f.label)cells+=`<span class="subt">${esc(f.label)}</span>`;
+      cells+=f.values.map(v=>_chipHtml(tab,f,v,cnt[v])).join('');
     });
     rows+=`<div class="frow"><span class="rl">${esc(g)}</span><span class="rc">${cells}</span></div>`;
   });
-  const clr=anyFilter()?`<span class="clr" role="button" tabindex="0" onclick="event.stopPropagation();clearFilters()">limpar tudo ✕</span>`:'';
-  el.className='filters'+(filtersCollapsed?' col':'');
-  el.innerHTML=`<div class="fhd" role="button" tabindex="0" aria-expanded="${!filtersCollapsed}" onclick="toggleFiltersPanel()">
-      <span class="ar">▾</span> Filtros ${nact?`<span class="nact">${nact} ativo${nact!==1?'s':''}</span>`:''}${clr}</div>
+  const clr=anyFilter(tab)?`<span class="clr" role="button" tabindex="0" onclick="event.stopPropagation();clearFilters('${tab}')">limpar tudo ✕</span>`:'';
+  const summary=collapsed?`<span class="fsum">${nact?_activePills(tab):'<span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">sem filtros — clique para filtrar</span>'}</span>`:'';
+  el.className='filters'+(collapsed?' col':'');
+  el.innerHTML=`<div class="fhd" role="button" tabindex="0" aria-expanded="${!collapsed}" onclick="toggleFiltersPanel('${tab}')">
+      <span class="ar">▾</span> Filtros ${nact?`<span class="nact">${nact}</span>`:''}${summary}${clr}</div>
     <div class="fbody">${rows}</div>`;
 }
 function renderBanner(){
@@ -1012,14 +1086,13 @@ function renderDetail(){
   else if(top.kind=='org')d.innerHTML=bc+orgCard(top.id);
 }
 
-let extOnly=true,selContact=null,cSort='msgs';
-function toggleExt(){extOnly=!extOnly;document.getElementById('extchip').classList.toggle('on',extOnly);renderContacts();}
+let selContact=null,cSort='msgs';
 function setCSort(s){cSort=s;['msgs','silent','name'].forEach(x=>{const el=document.getElementById('csort-'+x);if(el)el.classList.toggle('on',x===s);});renderContacts();}
 function daysSince(d){if(!d)return Infinity;const t=new Date(d).getTime();return isNaN(t)?Infinity:Math.floor((Date.now()-t)/86400000);}
 function daysLabel(d){const n=daysSince(d);if(n===Infinity)return'—';if(n===0)return'hoje';if(n<7)return`${n}d`;if(n<30)return`${Math.round(n/7)}sem`;if(n<365)return`${Math.round(n/30)}m`;return`${Math.round(n/365)}a`;}
 function renderContacts(){
-  const q=(document.getElementById('cq').value||'').toLowerCase();
-  let rows=CONTACTS.filter(c=>(!extOnly||!c.is_internal)&&(!q||(`${c.display_name||''} ${c.email} ${c.domain||''}`).toLowerCase().includes(q)));
+  renderFilters('contacts');
+  let rows=applyFacets('contacts',CONTACTS);
   if(cSort==='silent')rows=rows.slice().sort((a,b)=>{const da=daysSince(a.last_from_date),db=daysSince(b.last_from_date);if(da===Infinity&&db===Infinity)return 0;if(da===Infinity)return 1;if(db===Infinity)return-1;return db-da;});
   else if(cSort==='name')rows=rows.slice().sort((a,b)=>(a.display_name||a.email).localeCompare(b.display_name||b.email));
   if(selContact&&!rows.find(c=>c.email===selContact))selContact=rows.length?rows[0].email:null;
@@ -1154,14 +1227,15 @@ function switchTab(t){curTab=t;
   writeURL();}
 
 // ─── Projects tab (live only; cross-thread canonical spec + export) ────────────
+// STAGEcol/STAGEpt are defined up top with the filter registry. projData caches the full list
+// (incl. archived) so the Estágio facet can filter every stage client-side.
 let projData=[], selProject=null, projDetail=null;
-const STAGEcol={LEAD:'#0d9488',GATHERING:'#3358d4',ESTIMABLE:'#13a36a',QUOTED:'#7c5cff',WON:'#13a36a',LOST:'#e5484d',ARCHIVED:'#9aa1ab'};
 
 async function loadProjects(){
   if(!LIVE){document.getElementById('plist').innerHTML='';
     document.getElementById('pdetail').innerHTML='<div class="empty">Projetos disponíveis no modo live (<code>email2data serve</code>).</div>';
     document.getElementById('pcount').textContent='';return;}
-  try{const r=await fetch('/api/projects');projData=r.ok?await r.json():[];}
+  try{const r=await fetch('/api/projects?archived=true');projData=r.ok?await r.json():[];}
   catch(e){projData=[];}
   if(!selProject&&projData.length)selProject=projData[0].project_id;
   await renderProjects();
@@ -1294,8 +1368,8 @@ function deleteProject(pid){
 
 async function renderProjects(){
   if(!LIVE)return;
-  const q=(document.getElementById('pq')?.value||'').toLowerCase();
-  let rows=projData.filter(p=>!q||(p.title||'').toLowerCase().includes(q)||(p.client_name||'').toLowerCase().includes(q)||(p.client_email||'').toLowerCase().includes(q));
+  renderFilters('projects');
+  let rows=applyFacets('projects',projData);
   _vis.projects=rows.map(p=>p.project_id);
   document.getElementById('pcount').textContent=`${rows.length} projeto(s)`;
   document.getElementById('plist').innerHTML=rows.map(p=>projCard(p,p.project_id===selProject)).join('')||'<div class="empty">Sem projetos. Crie um a partir de um título ou de uma lead.</div>';
@@ -1305,8 +1379,7 @@ async function renderProjects(){
 }
 
 // ─── Leads tab ───────────────────────────────────────────────────────────────
-let selLeadThread=null, leadFilter='all';
-const LEAD_FILTERS=[['all','Todos'],['unanswered','Sem resposta'],['waiting','A aguardar deles'],['estimable','Estimável']];
+let selLeadThread=null;
 
 function _leadStatus(thread){
   const mids=[...(threadMids[thread]||[])];
@@ -1399,23 +1472,12 @@ function leadThreadDetail(t){
 }
 
 function renderLeads(){
-  const q=(document.getElementById('lq')?.value||'').toLowerCase();
-  let threads=_allLeadThreads().filter(t=>{
-    if(leadFilter==='unanswered')return t.status==='unanswered';
-    if(leadFilter==='waiting')return t.status==='waiting';
-    if(leadFilter==='estimable')return!!(_bestJobspecEmail(t.emails)?._jobspec?.readiness?.estimable);
-    return true;
-  });
-  if(q)threads=threads.filter(t=>{
-    const c=_threadClientEmail(t.thread);
-    return(t.emails[0]?.subject||'').toLowerCase().includes(q)||c.toLowerCase().includes(q)||nameOf(c).toLowerCase().includes(q);
-  });
+  renderFilters('leads');
+  let threads=applyFacets('leads',_allLeadThreads());
+  if(selLeadThread&&!threads.find(t=>t.thread===selLeadThread))selLeadThread=threads.length?threads[0].thread:null;
   if(!selLeadThread&&threads.length)selLeadThread=threads[0].thread;
   _vis.leads=threads.map(t=>t.thread);
   document.getElementById('lcount').textContent=`${threads.length} conversas`;
-  document.getElementById('leadchips').innerHTML=LEAD_FILTERS.map(([k,l])=>
-    `<span class="chip ${leadFilter===k?'on':''}" onclick="leadFilter='${k}';renderLeads()">${l}${k!=='all'?' '+threads.filter(t=>k==='estimable'?!!(_bestJobspecEmail(t.emails)?._jobspec?.readiness?.estimable):t.status===k).length:''}</span>`
-  ).join('');
   document.getElementById('llist').innerHTML=threads.map(t=>leadThreadCard(t,t.thread===selLeadThread)).join('')||'<div class="empty">Nenhuma conversa encontrada.</div>';
   const sel=threads.find(t=>t.thread===selLeadThread);
   document.getElementById('ldetail').innerHTML=sel?leadThreadDetail(sel):'<div class="empty">Selecione uma conversa.</div>';
@@ -1424,14 +1486,14 @@ function renderLeads(){
 
 function _init(){
   const tab=applyURLState();
-  renderHeader(); renderFilters(); renderList(); renderContacts();
+  renderHeader(); renderFilters('emails'); renderList(); renderContacts();
   if(tab&&tab!=='emails')switchTab(tab);
   _urlReady=true; writeURL();
 }
 _init();
 document.addEventListener('keydown',onKey);
 window.addEventListener('hashchange',()=>{   // external/manual URL changes (replaceState does not fire this)
-  const tab=applyURLState(); renderHeader(); renderFilters(); renderList(); renderContacts();
+  const tab=applyURLState(); renderHeader(); renderFilters('emails'); renderList(); renderContacts();
   if(tab&&tab!=='emails')switchTab(tab);
 });
 </script>

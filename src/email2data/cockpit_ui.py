@@ -194,6 +194,26 @@ _HEAD = """<!doctype html>
   .ring-fill.done{stroke:var(--green)}
   .ring-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--tx)}
+  /* ── shared email thread rendering (Fila + Projetos) ─────────────────── */
+  .texp{display:flex;flex-direction:column;gap:9px;white-space:normal;cursor:default}
+  .thead{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-bottom:2px}
+  .tsum{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+  .tmsg{background:#f8f9fb;border:1px solid var(--bd2);border-radius:9px;padding:8px 11px}
+  .tmeta{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;font-size:11px}
+  .taddr{font-weight:650;font-size:12px;color:var(--tx)}
+  .tarrow{color:var(--mut2)}
+  .tdir{font-weight:700;text-transform:uppercase;font-size:9.5px;letter-spacing:.04em}
+  .tdate{color:var(--mut2);margin-left:auto}
+  .tatts{flex-basis:100%;margin-top:3px}
+  .tbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+  .qtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0}
+  .qtoggle:hover{color:var(--ac)}
+  .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
+  .tatt{display:inline-block;font-size:11px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
+  .tatt:hover{background:#dfe8ff}
+  /* provenance badges: which spec fields this message supplied */
+  .tprov{margin-top:4px;display:flex;flex-wrap:wrap;gap:4px}
+  .tprovbadge{font-size:10px;font-weight:700;background:#e7f6ee;border:1px solid #bfe6cf;color:var(--green);border-radius:5px;padding:1px 6px}
   /* ── timeline (C2 Contrapartes) ──────────────────────────────────────── */
   .timeline{list-style:none;margin:0;padding:0}
   .titem{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bd2)}
@@ -305,6 +325,94 @@ const S={
 };
 const undo=[];
 function doUndo(){const u=undo.pop();if(!u){toast(S.nadaDesfazer);return;}u.revert();toast(S.desfeito);announce(S.desfeito);}
+
+/* ── shared email-thread rendering ─────────────────────────────────────
+   Used by both the Fila inline thread view and the Projetos source panel.
+   Single source of truth: fix once here, both pages benefit.           */
+function msgDirTag(d){
+  if(d==='inbound') return {t:'recebido',c:'var(--ac)'};
+  if(d==='internal') return {t:'interno',c:'var(--mut)'};
+  return {t:'enviado',c:'var(--int)'};
+}
+function msgThreadSummary(msgs){
+  const us=msgs.filter(m=>m.direction!=='inbound').length, them=msgs.length-us;
+  const ds=msgs.map(m=>(m.date||'').slice(0,10)).filter(Boolean);
+  const range=ds.length?(ds[0]===ds[ds.length-1]?ds[0]:ds[0]+' → '+ds[ds.length-1]):'';
+  const p=[msgs.length+' '+(msgs.length===1?'mensagem':'mensagens')];
+  if(us)p.push(us+' de nós'); if(them)p.push(them+' recebida'+(them===1?'':'s'));
+  if(range)p.push(range);
+  return p.join(' · ');
+}
+function msgSplitQuote(raw){
+  const body=(raw||'').replace(/\r\n/g,'\n');
+  const pats=[
+    /^>.*/m,
+    /^\s*-{2,}\s*(original message|mensagem original)\s*-{2,}/im,
+    /^_{5,}\s*$/m,
+    /^No dia .+/m,
+    /^Em .+escreveu:/im,
+    /^On .+wrote:$/im,
+    /^\s*De:\s.+\n(?:.*\n){0,3}?\s*(Enviad[ao]|Para):/im,
+    /^\s*From:\s.+\n(?:.*\n){0,3}?\s*(Sent|To):/im,
+  ];
+  let idx=-1;
+  for(const re of pats){const m=re.exec(body); if(m&&(idx<0||m.index<idx)) idx=m.index;}
+  if(idx<0) return {visible:body.trim(), quoted:''};
+  return {visible:body.slice(0,idx).trim(), quoted:body.slice(idx).trim()};
+}
+/* Render one message. opts: { provenance: {addr: message_id} } lets the Projetos panel
+   highlight which fields came from which message. */
+function msgHTML(m, opts){
+  opts=opts||{};
+  const tag=msgDirTag(m.direction);
+  const to=(m.to||[]);
+  const toStr=to.length?(esc(to[0])+(to.length>1?' +'+(to.length-1):'')):'—';
+  const atts=(m.attachments||[]).map((a,idx)=>
+    '<a class="tatt" href="/api/attachment/'+encodeURIComponent(m.message_id)+'/'+idx
+    +'" target="_blank" rel="noopener">📎 '+esc(a.name)+'</a>').join('');
+  const sp=msgSplitQuote(m.body||'');
+  const vis=sp.visible||'(sem texto novo — ver anexos/citação)';
+  const visHTML='<div class="tbody">'+esc(vis.slice(0,2000))+(vis.length>2000?'\n…':'')+'</div>';
+  const quoteHTML=sp.quoted
+    ?'<button class="qtoggle">▸ mensagem citada</button>'
+     +'<div class="tquote hidden">'+esc(sp.quoted.slice(0,3000))+'</div>'
+    :'';
+  // field provenance: which spec fields did this message supply?
+  const prov=opts.provenance||{};
+  const fromFields=Object.entries(prov).filter(([,mid])=>mid===m.message_id).map(([addr])=>addr);
+  const provBadges=fromFields.length
+    ?'<div class="tprov">'+fromFields.map(a=>'<span class="tprovbadge">'+esc(a.split('#')[0])+'</span>').join('')+'</div>'
+    :'';
+  return '<div class="tmsg">'
+    +'<div class="tmeta">'
+    +'<span class="taddr">'+esc(m.from_email||'?')+'</span>'
+    +'<span class="tarrow">→</span>'
+    +'<span class="taddr">'+toStr+'</span>'
+    +'<span class="tdir" style="color:'+tag.c+'">'+tag.t+'</span>'
+    +'<span class="tdate">'+esc((m.date||'').slice(0,16).replace('T',' '))+'</span>'
+    +(atts?'<span class="tatts">'+atts+'</span>':'')
+    +'</div>'
+    +provBadges
+    +visHTML+quoteHTML
+    +'</div>';
+}
+/* Render a full thread panel (summary line + all messages). */
+function msgThreadHTML(msgs, opts){
+  const head='<div class="thead"><span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
+  return '<div class="texp">'+head+msgs.map(m=>msgHTML(m,opts)).join('')+'</div>';
+}
+/* Quote-toggle wiring — attach once to a container, handles all .qtoggle clicks inside it. */
+function msgWireQuoteToggles(container){
+  container.addEventListener('click',function(e){
+    const qt=e.target.closest('.qtoggle'); if(!qt) return;
+    const q=qt.nextElementSibling;
+    if(q&&q.classList.contains('tquote')){
+      const hid=q.classList.toggle('hidden');
+      qt.textContent=(hid?'▸':'▾')+' mensagem citada';
+    }
+    e.stopPropagation();
+  });
+}
 let _pi=[],_pf=0;
 function openPalette(){_pi=paletteItems('');_pf=0;$('#_palette').classList.remove('hidden');_rp();const q=$('#_pq');q.value='';q.focus();}
 function closePalette(){$('#_palette').classList.add('hidden');}
@@ -312,7 +420,7 @@ function _rp(){_pf=Math.max(0,Math.min(_pf,_pi.length-1));$('#_presults').innerH
 function _runP(i){const it=_pi[i];if(!it)return;closePalette();it.run();}
 function toggleDensity(){document.body.classList.toggle('compact');try{localStorage.setItem('fila-density',document.body.classList.contains('compact')?'compact':'');}catch(e){}}
 function onEsc(){}  /* lens may override */
-async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);return;}if(!r.ok){toast(S.syncFalhou);return;}await r.json();toast(S.sincronizado);}catch(e){toast(S.syncFalhou);}}
+async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);return;}if(!r.ok){toast(S.syncFalhou);return;}await r.json();toast(S.sincronizado);setTimeout(()=>location.reload(),700);}catch(e){toast(S.syncFalhou);}}
 """
 
 # ── shell event wiring (runs after lens JS, calls lens functions) ─────────────

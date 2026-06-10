@@ -14,7 +14,21 @@ from . import cockpit_ui
 _LENS_JS = r"""
 /* ── Fila lens state ────────────────────────────────────────────────── */
 let rows = ROWS.slice(), focus = 0, filter = null;
-let _prevRisk = null;
+let _prevRisk = null, _scrollOnLoad = false;
+
+/* ── URL focus (deep-link from /?focus=<thread_root>) ───────────────── */
+(function(){
+  const p = new URLSearchParams(location.search);
+  const tgt = p.get('focus');
+  if(tgt){
+    const idx = rows.findIndex(r => r.thread_root === tgt);
+    if(idx >= 0){ focus = idx; _scrollOnLoad = true; }
+    history.replaceState(null, '', '/');
+  }
+})();
+setTimeout(function(){
+  if(_scrollOnLoad){const el=document.querySelector('.row.on');if(el)el.scrollIntoView({block:'center'});}
+}, 0);
 
 function view(){ return filter ? rows.filter(r=>(r.counterparty||'')===filter) : rows; }
 function riskCount(){ return view().filter(r=>['red','amber'].includes((r.clock||{}).band)).length; }
@@ -47,10 +61,13 @@ function render(){
     const meta=[esc(r.contact||''),r.n_messages>1?(r.n_messages+' msgs'):'',r.has_attachment?'📎':'',
                 r.purpose?esc(String(r.purpose).toLowerCase()):''].filter(Boolean).join(' · ');
     const why=(r._why&&tr.reason)?'<div class="why">'+esc(tr.reason)+'</div>':'';
-    return '<div class="row'+(i===focus?' on':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
+    return '<div class="row'+(i===focus?' on':'')+(r._open?' open':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
       +'<span class="cp '+esc(r.counterparty||'OTHER')+'">'+esc(r.counterparty||'—')+'</span>'
-      +'<div class="rmain"><div class="subj">'+esc(r.subject||'(sem assunto)')+'</div>'
-      +'<div class="rmeta">'+meta+(trust?' '+trust:'')+'</div>'+why+'</div>'
+      +'<div class="rmain" data-act="thread" title="abrir conversa (Enter)">'
+      +'<div class="subj">'+esc(r.subject||'(sem assunto)')+(r._open?' <span class="chev open">▾</span>':' <span class="chev">▸</span>')+'</div>'
+      +'<div class="rmeta">'+meta+(trust?' '+trust:'')
+      +(r.project?' <button class="rpchip" data-act="openproj" title="já está no projeto '+esc(r.project.project_id)+' — abrir">📁 '+esc(r.project.title||r.project.project_id)+'</button>':'')
+      +'</div>'+why+_threadHTML(r)+'</div>'
       +'<span class="clock '+esc(c.band||'none')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
       +'<button class="owner'+(r.owner?'':' empty')+'" data-act="owner" aria-label="atribuir dono">'+owner+'</button>'
       +'<div class="acts"><button data-act="handled" aria-label="marcar tratado" title="tratado (E)">✓</button>'
@@ -91,11 +108,66 @@ function ownerMenu(i){
   if(row){const b=row.getBoundingClientRect();m.style.top=(window.scrollY+b.bottom+4)+'px';m.style.left=(window.scrollX+Math.max(8,b.right-180))+'px';}
 }
 
+/* ── thread expansion ───────────────────────────────────────────────── */
+const _threadCache = {};   // thread_root → messages array (fetch-once)
+
+async function toggleThread(i){
+  const v=view(), r=v[i]; if(!r) return;
+  if(r._open){ r._open=false; render(); return; }
+  // show loading state immediately
+  r._open=true; r._threadMsgs=null; r._threadErr=null; render();
+  const root = r.thread_root;
+  if(_threadCache[root]){
+    r._threadMsgs=_threadCache[root]; render(); return;
+  }
+  try{
+    const d = await (await fetch('/api/thread/'+encodeURIComponent(root))).json();
+    if(d.error){ r._threadErr=d.error; }
+    else{ _threadCache[root]=d.messages; r._threadMsgs=d.messages; }
+  }catch(e){ r._threadErr='falhou ao carregar'; }
+  render();
+}
+
+/* project banner: open the existing project, or offer to create one from this thread (no dupes) */
+function _projHTML(r){
+  if(r.project) return '<button class="pchip in" data-act="openproj" title="abrir o projeto onde este pedido já está a ser tratado">📁 '
+    +esc(r.project.title||r.project.project_id)+' · '+esc((r.project.stage||'').toLowerCase())+' — abrir</button>';
+  return '<button class="pchip new" data-act="mkproj" title="criar um projeto a partir desta thread (importa contexto + anexos)">+ criar projeto</button>';
+}
+
+function _threadHTML(r){
+  if(!r._open) return '';
+  const msgs = r._threadMsgs;
+  const err  = r._threadErr;
+  if(!msgs && !err) return '<div class="texp"><span class="tsum">a carregar…</span></div>';
+  if(err) return '<div class="texp"><span style="color:var(--red);font-size:12.5px">'+esc(err)+'</span></div>';
+  // project banner prepended before the shared summary line
+  const head='<div class="thead">'+_projHTML(r)+'<span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
+  return '<div class="texp">'+head+msgs.map(m=>msgHTML(m)).join('')+'</div>';
+}
+
 /* ── command bus (B1) ───────────────────────────────────────────────── */
 function dispatch(action,i){
   if(action==='handled')handle(i);
   else if(action==='owner')ownerMenu(i);
   else if(action==='why')toggleWhy(i);
+  else if(action==='thread')toggleThread(i);
+  else if(action==='mkproj')makeProject(i);
+  else if(action==='openproj')openProject(i);
+}
+
+/* project: jump into the existing one, or create from this thread and go straight to it */
+function openProject(i){
+  const r=view()[i]; if(r&&r.project) location.href='/projetos?p='+encodeURIComponent(r.project.project_id);
+}
+async function makeProject(i){
+  const r=view()[i]; if(!r) return;
+  if(r.project){ openProject(i); return; }  // never double-create
+  toast('a criar projeto…');
+  try{
+    const d=await post('/api/projects',{title:r.subject||'(sem assunto)',from_message:r.thread_root});
+    location.href='/projetos?p='+encodeURIComponent(d.project_id);
+  }catch(e){ toast(S.revertido); }
 }
 
 /* ── lens keyboard handler ──────────────────────────────────────────── */
@@ -105,6 +177,7 @@ function onKey(e){
   else if(e.key==='k'||e.key==='ArrowUp'){focus=Math.max(0,focus-1);render();const r=document.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'});e.preventDefault();}
   else if(e.key==='e'||e.key==='E')dispatch('handled',focus);
   else if(e.key==='a'||e.key==='A')dispatch('owner',focus);
+  else if(e.key==='Enter'||e.key==='o'||e.key==='O'){dispatch('thread',focus);e.preventDefault();}
 }
 function onEsc(){ if(filter){filter=null;render();} }
 
@@ -131,9 +204,15 @@ function paletteItems(q){
 /* ── list events ────────────────────────────────────────────────────── */
 $('#_list').addEventListener('click',e=>{
   const row=e.target.closest('.row'); if(!row) return;
+  // quote toggle: local show/hide, no re-render (would reset it) — handle before row dispatch
+  const qt=e.target.closest('.qtoggle');
+  if(qt){const q=qt.nextElementSibling;
+    if(q&&q.classList.contains('tquote')){const hid=q.classList.toggle('hidden');qt.textContent=(hid?'▸':'▾')+' mensagem citada';}
+    e.stopPropagation();return;}
   const i=parseInt(row.dataset.i,10); focus=i;
   const act=e.target.closest('[data-act]');
-  if(act){dispatch(act.dataset.act,i);e.stopPropagation();}else render();
+  const inThread=act&&act.dataset.act==='thread'&&e.target.closest('.texp');
+  if(act&&!inThread){dispatch(act.dataset.act,i);e.stopPropagation();}else render();
 });
 $('#_menu').addEventListener('click',e=>{
   const mi=e.target.closest('.mi'); if(!mi) return;
@@ -152,14 +231,27 @@ _BODY_HTML = """
   </div>
   <div id="_list" class="list" role="list" aria-label="Fila de resposta"></div>
   <div id="_zero" class="zero hidden">✓ Tudo tratado<span class="s">nada está a cair · 0 em risco</span></div>
-  <div class="hint"><b>J/K</b> mover · <b>E</b> tratado · <b>A</b> dono · <b>Z</b> desfazer · <b>⌘K</b> comandos · <b>?</b> ajuda</div>
+  <div class="hint"><b>J/K</b> mover · <b>Enter</b> abrir · <b>E</b> tratado · <b>A</b> dono · <b>Z</b> desfazer · <b>⌘K</b> comandos · <b>?</b> ajuda</div>
 </div>
 """
 
 _EXTRA_CSS = """
+  /* Fila-specific (shared thread CSS lives in cockpit_ui) */
   .risk{color:var(--red);background:#fbeaea;border-color:#f3c9c9!important}
   .risk.clear{color:var(--green);background:#e7f6ee;border-color:#bfe6cf!important}
   .risk.pulse{animation:pop .35s ease}
+  .rmain[data-act]{cursor:pointer}
+  .chev{color:var(--mut2);font-size:11px}
+  .chev.open{color:var(--ac)}
+  .row.open{align-items:flex-start}
+  .row .texp{margin:10px 0 2px;padding-left:11px;border-left:2px solid var(--bd)}
+  .pchip{font-size:11.5px;font-weight:650;border-radius:8px;padding:3px 10px;cursor:pointer;border:1px solid}
+  .pchip.in{background:#eef2ff;border-color:#cdd7ff;color:var(--ac)}
+  .pchip.in:hover{background:#e0e8ff}
+  .pchip.new{background:#fff;border-color:var(--bd);color:var(--mut)}
+  .pchip.new:hover{border-color:var(--int);color:var(--int);background:#effbf7}
+  .rpchip{font-size:10.5px;font-weight:650;border:1px solid #cdd7ff;background:#eef2ff;color:var(--ac);border-radius:6px;padding:1px 7px;cursor:pointer}
+  .rpchip:hover{background:#e0e8ff}
 """
 
 

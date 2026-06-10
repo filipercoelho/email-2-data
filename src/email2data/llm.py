@@ -23,12 +23,17 @@ def _attempts(cfg: dict[str, Any]) -> int:
 
 def call(client: Any, cfg: dict[str, Any], system: str, user: str, *,
          schema: Optional[dict] = None, tool: Optional[dict] = None,
-         text: bool = False, temperature: float = 0.0) -> Any:
-    """Run one LLM call with retries. Returns a dict (structured output) or a str (``text=True``)."""
+         text: bool = False, temperature: float = 0.0,
+         images: Optional[list[dict]] = None) -> Any:
+    """Run one LLM call with retries. Returns a dict (structured output) or a str (``text=True``).
+
+    ``images`` (each ``{"mime","data": bytes}``) are sent alongside the text as multimodal input — the
+    spec pass uses this to let the model read drawing attachments. Ignored by providers/calls without
+    image support; ``None`` keeps the plain text-only path unchanged."""
     provider = cfg.get("provider", "anthropic")
     if provider == "vertex_gemini":
-        return _gemini(client, cfg, system, user, schema, text, temperature)
-    return _anthropic(client, cfg, system, user, tool, text, temperature)
+        return _gemini(client, cfg, system, user, schema, text, temperature, images)
+    return _anthropic(client, cfg, system, user, tool, text, temperature, images)
 
 
 def call_stream(client: Any, cfg: dict[str, Any], system: str, user: str, *,
@@ -71,9 +76,13 @@ def _anthropic_stream(client, cfg, system, user, temperature):
                 yield text
 
 
-def _gemini(client, cfg, system, user, schema, text, temperature) -> Any:
+def _gemini(client, cfg, system, user, schema, text, temperature, images=None) -> Any:
     from google.genai import types
 
+    contents: Any = user
+    if images:
+        contents = [user] + [types.Part.from_bytes(data=im["data"], mime_type=im["mime"])
+                             for im in images]
     last = None
     for _ in range(_attempts(cfg)):  # retry-on-empty: a 200 with empty text is transient
         try:
@@ -85,7 +94,7 @@ def _gemini(client, cfg, system, user, schema, text, temperature) -> Any:
             if not text:
                 kw.update(response_mime_type="application/json", response_schema=schema)
             resp = client.models.generate_content(
-                model=cfg["model"], contents=user, config=types.GenerateContentConfig(**kw))
+                model=cfg["model"], contents=contents, config=types.GenerateContentConfig(**kw))
             if resp.text:
                 return resp.text.strip() if text else json.loads(resp.text)
             last = "empty text"
@@ -94,14 +103,21 @@ def _gemini(client, cfg, system, user, schema, text, temperature) -> Any:
     raise LLMError(f"gemini failed after retries ({last})")
 
 
-def _anthropic(client, cfg, system, user, tool, text, temperature) -> Any:
+def _anthropic(client, cfg, system, user, tool, text, temperature, images=None) -> Any:
+    import base64
+    content: Any = user
+    if images:  # text block + one image block per attachment (base64 source)
+        content = [{"type": "text", "text": user}] + [
+            {"type": "image", "source": {"type": "base64", "media_type": im["mime"],
+                                         "data": base64.b64encode(im["data"]).decode()}}
+            for im in images]
     last = None
     for _ in range(_attempts(cfg)):
         try:
             kw: dict[str, Any] = dict(
                 model=cfg["model"], max_tokens=int(cfg.get("max_tokens", 1024)), temperature=temperature,
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user}],
+                messages=[{"role": "user", "content": content}],
             )
             if not text:
                 kw.update(tools=[tool], tool_choice={"type": "tool", "name": tool["name"]})

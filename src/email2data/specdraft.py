@@ -29,9 +29,19 @@ def load_playbook(path: str | Path) -> str:
 def build_spec_message(env: dict[str, Any]) -> str:
     atts = env.get("attachments") or []
     att_lines = "\n".join(f"  - {a.get('filename') or '(sem nome)'} [{a.get('content_type')}]" for a in atts)
+    # Extracted attachment TEXT (PDFs) is inlined here; attachment IMAGES ride along as multimodal
+    # parts via ``draft`` so the model reads the drawing itself — see ``envelope.attachment_media``.
+    text_blocks = "".join(
+        f"\n--- Conteúdo do anexo: {t.get('filename')} ---\n{t.get('text', '')}\n"
+        for t in (env.get("attachment_texts") or [])
+    )
+    imgs = env.get("attachment_images") or []
+    img_note = (f"\n[{len(imgs)} imagem(ns) de anexo seguem como input visual — lê desenhos/medidas delas]"
+                if imgs else "")
     return (
         f"Subject: {env.get('subject', '')}\n"
-        f"Attachments ({len(atts)}):\n{att_lines or '  (nenhum)'}\n"
+        f"Attachments ({len(atts)}):\n{att_lines or '  (nenhum)'}{img_note}\n"
+        f"{text_blocks}"
         f"---\n{env.get('body_text', '')}"
     )
 
@@ -55,7 +65,11 @@ def coerce_spec(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def draft(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any]) -> dict[str, Any]:
-    """Draft the semantic spec for one (job-relevant) email. Returns coerced {key: str|None}."""
+    """Draft the semantic spec for one (job-relevant) email. Returns coerced {key: str|None}.
+
+    ``env`` may carry ``attachment_texts``/``attachment_images`` (from ``envelope.attachment_media``);
+    the images are passed as multimodal input so the model can read drawing attachments directly."""
     raw = llm.call(client, settings["llm"], playbook, build_spec_message(env),
-                   schema=GEMINI_SPEC_SCHEMA, tool=SPEC_TOOL)
+                   schema=GEMINI_SPEC_SCHEMA, tool=SPEC_TOOL,
+                   images=(env.get("attachment_images") or None))
     return coerce_spec(raw)

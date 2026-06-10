@@ -174,9 +174,6 @@ def cmd_crm(args: argparse.Namespace) -> int:
     return 0
 
 
-_JOB_PURPOSES = {"ESTIMATE_REQUEST_FROM_CLIENT", "PO_FROM_CLIENT"}
-
-
 def _write_labelsheet(path: Path, specs: list[dict]) -> None:
     from . import jobspec as js
     cols = ["message_id", "subject"] + js.MUST + js.SHOULD
@@ -198,59 +195,27 @@ def _read_spec_labels(path: Path) -> dict[str, dict[str, str]]:
 
 
 def cmd_jobspec(args: argparse.Namespace) -> int:
-    """Phase A/B: build JobSpecs + Gate-1 readiness for job-relevant emails (LEAD / PO / estimate)."""
-    from . import classifier, jobspec as js, replydraft, specdraft
-    from .envelope import parse_eml
+    """Phase A/B: build JobSpecs + Gate-1 readiness for job-relevant emails (LEAD / PO / estimate).
+
+    Full rebuild (every job email); the per-email pipeline now lives in ``specbuild`` so the webapp
+    can run the same extraction incrementally after each sync."""
+    from . import specbuild
 
     settings = _load_settings(args)
     p = paths(settings, settings["__settings_path__"])
-    base = Path(settings["__settings_path__"]).parents[1]
     results_path = p["out_dir"] / "results.jsonl"
     if not results_path.exists():
         print("No out/results.jsonl — run `email2data triage` first.", file=sys.stderr)
         return 1
-    results = [json.loads(x) for x in results_path.read_text().splitlines() if x]
-    mid2file = {}
-    for eml in p["corpus_dir"].glob("*.eml"):
-        try:
-            mid2file[parse_eml(eml.read_bytes())["message_id"]] = eml
-        except Exception:  # noqa: BLE001
-            pass
+    counts = specbuild.rebuild_jobspecs(
+        settings, draft=args.draft, reply=args.reply, incremental=False,
+        log=lambda m: print(f"  {m}", file=sys.stderr))
 
-    jobs = [r for r in results if r.get("purpose") in _JOB_PURPOSES or r.get("counterparty") == "LEAD"]
-    need_llm = args.draft or args.reply
-    client = classifier.make_client(settings) if need_llm else None
-    spec_pb = specdraft.load_playbook(base / "config" / "spec_playbook.md") if args.draft else None
-    reply_pb = replydraft.load_playbook(base / "config" / "reply_playbook.md") if args.reply else None
-
-    specs, drafted_n, replied_n = [], 0, 0
-    for r in jobs:
-        eml = mid2file.get(r["message_id"])
-        env = parse_eml(eml.read_bytes()) if eml else {"attachments": [], "subject": r.get("subject", ""), "body_text": ""}
-        drafted = None
-        if args.draft and eml:
-            try:
-                drafted = specdraft.draft(env, spec_pb, client, settings)
-                drafted_n += 1
-            except Exception as exc:  # noqa: BLE001
-                print(f"  draft failed {r['message_id'][:24]}: {type(exc).__name__}", file=sys.stderr)
-        spec = js.build_jobspec(r, env, drafted)
-        rd = js.readiness(spec)
-        entry = {**spec.to_dict(), "readiness": rd}
-        if args.reply:
-            try:
-                entry["draft_reply"] = replydraft.draft_reply(entry, rd, reply_pb, client, settings)
-                replied_n += 1
-            except Exception as exc:  # noqa: BLE001
-                print(f"  reply failed {r['message_id'][:24]}: {type(exc).__name__}", file=sys.stderr)
-        specs.append(entry)
-
-    (p["out_dir"] / "jobspecs.jsonl").write_text(
-        "\n".join(json.dumps(s, ensure_ascii=False) for s in specs), encoding="utf-8")
+    specs = [json.loads(x) for x in (p["out_dir"] / "jobspecs.jsonl").read_text().splitlines() if x]
     _write_labelsheet(p["out_dir"] / "spec_labelsheet.csv", specs)
 
-    tags = (f" · drafted {drafted_n}" if args.draft else "") + (f" · replies {replied_n}" if args.reply else "")
-    print(f"\n{len(jobs)} job-relevant emails (LEAD/PO/estimate){tags}")
+    tags = (f" · drafted {counts['drafted']}" if args.draft else "") + (" · replies" if args.reply else "")
+    print(f"\n{counts['total']} job-relevant emails (LEAD/PO/estimate){tags}")
     print(f"  {'EST':<3} {'COV':>4} {'ATT':>3}  {'MISSING must-haves':<38} SUBJECT")
     print("  " + "-" * 92)
     for s in sorted(specs, key=lambda x: -x["readiness"]["coverage"]):

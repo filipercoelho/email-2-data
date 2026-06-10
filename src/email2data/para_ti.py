@@ -21,6 +21,24 @@ from .schema import HIGH_VALUE_PURPOSES
 CONFIDENCE_FLOOR: float = 0.60
 
 
+def _thread_context(r: dict[str, Any]) -> dict[str, Any]:
+    """Thread context pulled from a Fila row — the information a human needs to act."""
+    clock = r.get("clock") or {}
+    trust = r.get("trust") or {}
+    return {
+        "contact": r.get("contact") or "",
+        "counterparty": r.get("counterparty") or "",
+        "purpose": r.get("purpose") or "",
+        "n_messages": r.get("n_messages") or 1,
+        "has_attachment": bool(r.get("has_attachment")),
+        "clock_label": clock.get("label") or "",
+        "clock_band": clock.get("band") or "none",
+        "reason": trust.get("reason") or "",         # AI's one-line summary of the email
+        "confidence": trust.get("confidence") or 0.0,
+        "decided_by": trust.get("decided_by") or "",
+    }
+
+
 def low_confidence_items(
     fila_rows: list[dict[str, Any]],
     *,
@@ -46,10 +64,10 @@ def low_confidence_items(
                     f"Confiança {int(conf * 100)}% ({decided}) — "
                     f"classificado como {r.get('counterparty', '?')} · {r.get('purpose', '?')}"
                 ),
+                "context": _thread_context(r),
                 "accept": {
-                    "label": "Confirmar",
-                    "hint": "Abre o email no inbox para reclassificar",
-                    "href": f"/inbox#{r['thread_root']}",
+                    "label": "Ver na Fila",
+                    "href": f"/?focus={r['thread_root']}",
                 },
             })
     return items
@@ -78,10 +96,8 @@ def propose_project_items(
             "kind": "propor_projeto",
             "thread_root": r["thread_root"],
             "title": r.get("subject") or "(sem assunto)",
-            "why": (
-                f"{cp} · {r.get('purpose', '?')} · "
-                + (r.get("contact") or "")
-            ).rstrip(" · "),
+            "why": (r.get("contact") or "").rstrip(),
+            "context": _thread_context(r),
             "accept": {
                 "label": "Criar projeto",
                 "api": "/api/projects",
@@ -89,6 +105,7 @@ def propose_project_items(
                     "title": r.get("subject") or "(sem assunto)",
                     "from_message": r["thread_root"],
                 },
+                "nav": "/projetos",
             },
         })
     return items
@@ -124,15 +141,28 @@ def identity_candidate_items(
                 items.append({
                     "kind": "confirmar_identidade",
                     "email": email,
-                    "title": f"{email} → {dk}?",
-                    "why": (
-                        f"Endereço pessoal com {cl.msg_count} mensagens; "
-                        f"nome parece corresponder a {dk}"
-                    ),
+                    "title": f"{email}",
+                    "why": f"nome parece corresponder a {dk}",
+                    "context": {
+                        "contact": email,
+                        "n_messages": cl.msg_count,
+                        "proposed_cluster": dk,
+                        "counterparty": cl.last_counterparty or "",
+                        "last_seen": cl.last_seen or "",
+                        "reason": (
+                            f"Endereço pessoal com {cl.msg_count} mensagem"
+                            f"{'ns' if cl.msg_count != 1 else ''}, "
+                            f"possivelmente da empresa {dk}"
+                        ),
+                        "clock_label": "", "clock_band": "none",
+                        "has_attachment": False, "confidence": 0.0, "decided_by": "",
+                        "purpose": "",
+                    },
                     "accept": {
                         "label": f"Confirmar → {dk}",
                         "api": "/api/identity/confirm",
                         "payload": {"email": email, "account_key": dk},
+                        "nav": f"/contrapartes/{dk}",
                     },
                 })
                 break  # one candidate per free-mail address

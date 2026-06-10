@@ -65,3 +65,56 @@ def test_incremental_search_uses_only_uid_range_no_forbidden_verbs():
     assert '"SEARCH", None, "SINCE"' in code
     # Watermark filtering happens client-side (defensive against the IMAP "N:*" highest-message echo).
     assert "u for u in uids if int(u) > last_uid" in code
+
+
+# ── Sent-wins dedup: direction must not depend on fetch order ────────────────
+
+from email import message_from_bytes  # noqa: E402
+
+from email2data.identity import canonical_id_from_raw, safe_filename  # noqa: E402
+from email2data.signals import header_signals  # noqa: E402
+
+# From our own domain → "internal" without a Sent header, "outbound" when fetched from a Sent folder.
+_RAW = (b"Message-ID: <dedup-001@lindoservico.pt>\r\nFrom: orcamentos@lindoservico.pt\r\n"
+        b"To: orcamentos@lindoservico.pt\r\nSubject: ping\r\n\r\nbody\r\n")
+
+
+def _replay(corpus: Path, order):
+    """Replay _fetch_mailbox's dedup decision for a sequence of mailboxes, return the cached file."""
+    for mailbox in order:
+        raw = (fetch._source_header(mailbox) + _RAW) if mailbox.upper() != "INBOX" else _RAW
+        dest = corpus / safe_filename(canonical_id_from_raw(raw))
+        if dest.exists():
+            if fetch.is_sent_folder(mailbox) and not fetch._existing_is_sent(dest):
+                dest.write_bytes(raw)  # Sent copy overrides a non-Sent cached one
+            continue
+        dest.write_bytes(raw)
+    return next(corpus.glob("*"))
+
+
+def _direction(path: Path) -> str:
+    return header_signals(message_from_bytes(path.read_bytes())).direction
+
+
+def test_existing_is_sent_detects_sent_header(tmp_path):
+    sent = tmp_path / "a.eml"
+    sent.write_bytes(fetch._source_header("INBOX.Sent") + _RAW)
+    plain = tmp_path / "b.eml"
+    plain.write_bytes(_RAW)
+    assert fetch._existing_is_sent(sent) is True
+    assert fetch._existing_is_sent(plain) is False
+
+
+def test_sent_copy_wins_inbox_first(tmp_path):
+    """INBOX fetched before Sent (the order that used to lose the outbound signal)."""
+    assert _direction(_replay(tmp_path, ["INBOX", "INBOX.Sent"])) == "outbound"
+
+
+def test_sent_copy_wins_sent_first(tmp_path):
+    """Sent fetched before INBOX — must not be downgraded back to internal."""
+    assert _direction(_replay(tmp_path, ["INBOX.Sent", "INBOX"])) == "outbound"
+
+
+def test_inbox_only_stays_internal(tmp_path):
+    """No Sent copy at all → an own-domain message stays internal (no false outbound)."""
+    assert _direction(_replay(tmp_path, ["INBOX"])) == "internal"

@@ -20,6 +20,9 @@ _BODY = """
   <div id="_zero" class="zero hidden">✓ Sem decisões pendentes<span class="s">nada precisa da tua atenção agora</span></div>
   <div class="hint"><b>J/K</b> navegar · <b>Y</b> aceitar · <b>N</b> ignorar · <b>?</b> ajuda</div>
 </div>
+<style>
+  .gate.on{border-color:var(--ac);box-shadow:0 0 0 2px rgba(51,88,212,.15),var(--shadow)}
+</style>
 """
 
 # Colours per gate kind
@@ -33,26 +36,88 @@ let items = ITEMS.slice(), focus = 0, dismissed = new Set();
 
 function visible(){ return items.filter((_,i)=>!dismissed.has(i)); }
 
+function _clockDot(band){
+  const col={'red':'var(--red)','amber':'var(--amber)','green':'var(--green)'}[band]||'var(--mut2)';
+  return '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+col+';margin-right:5px;vertical-align:middle"></span>';
+}
+
+function _purposeLabel(p){
+  return {'ESTIMATE_REQUEST_FROM_CLIENT':'pedido orçamento','PO_FROM_CLIENT':'encomenda (PO)',
+          'FOLLOW_UP':'follow-up','OUR_ORDER_TO_SUPPLIER':'encomenda a fornecedor',
+          'SUPPLIER_REPLY_OR_CONFIRMATION':'resposta fornecedor','OUTBOUND_INVOICE':'fatura',
+          'INVOICE_OR_ACCOUNTING':'faturação'}[p] || (p||'').toLowerCase().replace(/_/g,' ');
+}
+
+function renderCard(item, i){
+  const ctx = item.context || {};
+  const kindCls = KIND_CLASS[item.kind] || 'rever';
+  const kindLbl = KIND_LABEL[item.kind] || item.kind;
+  const acc = item.accept || {};
+  const isFocused = i === focus;
+
+  // context line: clock + contact + messages + attachment
+  const clockPart = ctx.clock_label
+    ? _clockDot(ctx.clock_band) + '<span style="font-weight:600;color:'
+      + ({'red':'var(--red)','amber':'var(--amber)','green':'var(--green)'}[ctx.clock_band]||'var(--mut)')
+      + '">' + esc(ctx.clock_label) + '</span>'
+    : '';
+  const contactPart = ctx.contact ? '<span style="color:var(--mut)">'+esc(ctx.contact)+'</span>' : '';
+  const msgsPart = ctx.n_messages > 1
+    ? '<span style="color:var(--mut2)">'+ctx.n_messages+' msgs</span>' : '';
+  const attPart = ctx.has_attachment
+    ? '<span title="tem anexo">📎</span>' : '';
+  const purposePart = ctx.purpose
+    ? '<span style="color:var(--mut2);font-style:italic">'+esc(_purposeLabel(ctx.purpose))+'</span>' : '';
+  const ctxParts = [clockPart, purposePart, contactPart, msgsPart, attPart].filter(Boolean);
+  const ctxLine = ctxParts.length
+    ? '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 8px;font-size:12px">'
+      + ctxParts.join('') + '</div>'
+    : '';
+
+  // AI reason — the most valuable context: what the model understood
+  const reasonBlock = ctx.reason
+    ? '<div style="background:#fffdf3;border:1px solid #f0e6c0;border-radius:8px;padding:8px 12px;'
+      + 'font-size:12.5px;color:#4a4326;line-height:1.55;margin-bottom:10px">'
+      + '<span style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;'
+      + 'color:var(--mut);margin-right:6px">O que a IA leu</span>'
+      + esc(ctx.reason) + '</div>'
+    : '';
+
+  // identity-specific extra context
+  const identityExtra = (item.kind === 'confirmar_identidade' && ctx.proposed_cluster)
+    ? '<div style="font-size:12.5px;color:var(--mut);margin-bottom:8px">'
+      + 'Proposta de ligação: <strong>'+esc(ctx.contact)+'</strong> → empresa <strong>'
+      + esc(ctx.proposed_cluster)+'</strong>'
+      + (ctx.last_seen ? ' · última actividade: '+esc(ctx.last_seen.slice(0,10)) : '')
+      + '</div>'
+    : '';
+
+  const acceptBtn = acc.api
+    ? '<button class="act-btn accept" data-i="'+i+'" data-act="accept">'+esc(acc.label||'Aceitar')+'</button>'
+    : (acc.href ? '<a class="act-btn accept" href="'+esc(acc.href)+'">'+esc(acc.label||'Ver')+'</a>' : '');
+
+  const filaLink = item.thread_root
+    ? ' <a href="/?focus='+esc(item.thread_root)+'" style="font-size:12px;color:var(--ac);text-decoration:none;margin-left:6px">ver na fila →</a>'
+    : '';
+
+  return '<div class="gate'+(isFocused?' on':'')+'" data-i="'+i+'" style="cursor:pointer">'
+    + '<span class="gkind '+kindCls+'">'+esc(kindLbl)+'</span>'
+    + '<div style="font-weight:650;font-size:14.5px;margin-bottom:2px">'+esc(item.title||'')+'</div>'
+    + ctxLine
+    + reasonBlock
+    + identityExtra
+    + '<div class="gacts">' + acceptBtn
+    + '<button class="act-btn" data-i="'+i+'" data-act="dismiss">Ignorar</button>'
+    + filaLink + '</div></div>';
+}
+
 function render(){
   const v = visible();
-  const cnt = $('#_count'); if(cnt) cnt.textContent = v.length ? v.length + ' pendente'+(v.length===1?'':'s') : '';
+  const cnt = $('#_count');
+  if(cnt) cnt.textContent = v.length ? v.length + ' pendente'+(v.length===1?'':'s') : '';
   const zero = $('#_zero'); if(zero) zero.classList.toggle('hidden', v.length > 0);
   if(focus >= v.length) focus = Math.max(0, v.length - 1);
-  const list = $('#_list');
-  list.innerHTML = v.map((item, i) => {
-    const kindCls = KIND_CLASS[item.kind] || 'rever';
-    const kindLbl = KIND_LABEL[item.kind] || item.kind;
-    const acc = item.accept || {};
-    const acceptBtn = acc.api
-      ? '<button class="act-btn accept" data-i="'+i+'" data-act="accept">'+esc(acc.label||'Aceitar')+'</button>'
-      : (acc.href ? '<a class="act-btn accept" href="'+esc(acc.href)+'">'+esc(acc.label||'Ver')+'</a>' : '');
-    return '<div class="gate'+(i===focus?' on':'')+'" data-i="'+i+'">'
-      +'<span class="gkind '+kindCls+'">'+esc(kindLbl)+'</span>'
-      +'<div class="gtitle">'+esc(item.title||'')+'</div>'
-      +'<div class="gwhy">'+esc(item.why||'')+'</div>'
-      +'<div class="gacts">'+acceptBtn
-      +'<button class="act-btn" data-i="'+i+'" data-act="dismiss">Ignorar</button></div></div>';
-  }).join('');
+  $('#_list').innerHTML = v.map((item, i) => renderCard(item, i)).join('');
 }
 
 async function acceptItem(i){
@@ -62,6 +127,7 @@ async function acceptItem(i){
     try{
       await post(acc.api, acc.payload||{});
       dismissed.add(items.indexOf(item)); render(); toast('feito');
+      if(acc.nav) setTimeout(()=>{ location.href=acc.nav; }, 700);
     } catch(e){ toast(S.revertido); }
   }
 }

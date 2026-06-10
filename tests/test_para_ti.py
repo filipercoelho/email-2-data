@@ -105,7 +105,8 @@ def test_identity_candidate_similar_local_part():
     items = identity_candidate_items(clusters)
     assert len(items) == 1
     assert items[0]["kind"] == "confirmar_identidade"
-    assert "acme.pt" in items[0]["title"]
+    assert items[0]["title"] == "john.acme@gmail.com"             # title is now the email address
+    assert "acme.pt" in items[0]["context"]["proposed_cluster"]   # cluster in context
 
 
 def test_identity_candidate_below_min_msg_count_skipped():

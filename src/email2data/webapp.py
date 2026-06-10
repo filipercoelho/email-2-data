@@ -114,12 +114,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         ``{"running": True}`` marker if a sync is already in flight, or ``{"error": msg}`` on a clean
         failure (e.g. the IMAP password isn't set) — never raises, so a daemon thread can't crash and
         the button gets a tidy message instead of a 500."""
+        from . import specbuild
         from . import sync as _syncmod
         if not _sync_lock.acquire(blocking=False):
             return {"running": True}
         _sync["running"] = True
         try:
             counts = _syncmod.run_sync(settings, full=full)
+            # Keep the spec layer fresh: newly-triaged leads get jobspecs (incremental → only new
+            # message_ids pay the LLM cost). Without this, jobspecs.jsonl silently goes stale and
+            # projects created from new leads arrive empty. Degrades to offline if no LLM client.
+            try:
+                counts["jobspecs"] = specbuild.rebuild_jobspecs(
+                    settings, draft=True, incremental=True, log=lambda m: print(f"  {m}"))
+            except Exception as exc:  # noqa: BLE001 — never let a spec-build error fail the sync
+                print(f"  jobspec rebuild skipped — {type(exc).__name__}: {exc}")
             _rebuild_state()
             _sync["last_counts"] = counts
             _sync["last_ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -290,6 +299,53 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             )
         return JSONResponse(out)
 
+    @app.get("/api/thread/{thread_root:path}")
+    def api_thread(thread_root: str):
+        """Return the messages of one email thread with body text, for the Fila inline preview.
+
+        Uses the CRM thread index + the corpus .eml files. Each message carries:
+        subject, from_email, date, direction, counterparty, body (capped at 3000 chars),
+        has_attachment, and attachment names.  Returns 503 when CRM is unavailable.
+        """
+        from .envelope import parse_eml as _parse_eml
+        if _crmdb is None:
+            return JSONResponse({"error": "CRM not available"}, status_code=503)
+        interactions = _crmdb.thread(thread_root)
+        if not interactions:
+            return JSONResponse({"error": "thread not found"}, status_code=404)
+        messages = []
+        for row in interactions:
+            mid = row.get("message_id", "")
+            msg: dict = {
+                "message_id": mid,
+                "subject": row.get("subject", ""),
+                "from_email": row.get("from_email", ""),
+                "date": row.get("date", ""),
+                "direction": row.get("direction", ""),
+                "counterparty": row.get("counterparty", ""),
+                "body": "",
+                "to": [],
+                "has_attachment": bool(row.get("has_attach")),
+                "attachments": [],
+            }
+            f = _file_for(mid)
+            if f:
+                try:
+                    env = _parse_eml(Path(f).read_bytes())
+                    body = env.get("body_text") or ""
+                    msg["body"] = body[:3000]
+                    msg["body_truncated"] = len(body) > 3000
+                    # recipients so the UI can show "sent to whom", not just "→ enviado"
+                    msg["to"] = [a.get("email") for a in (env.get("to") or []) if a.get("email")]
+                    msg["attachments"] = [
+                        {"name": a.get("filename") or "(sem nome)", "type": a.get("content_type", "")}
+                        for a in (env.get("attachments") or [])
+                    ]
+                except Exception:  # noqa: BLE001
+                    pass
+            messages.append(msg)
+        return JSONResponse({"thread_root": thread_root, "messages": messages})
+
     @app.get("/api/relations/{message_id}")
     def get_relations(message_id: str):
         """Return thread siblings, same-contact history, and entity cross-refs for one message.
@@ -338,6 +394,20 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             "dangling_threads": _project.dangling_threads(pstore, pid, _crmdb),
         }
 
+    def _resolve_ref(ref: str) -> tuple[str, str, list[dict]]:
+        """Resolve a project source reference → (thread_root, seed_message_id, thread_rows).
+
+        ``ref`` may be a message_id OR a thread_root — Para-ti suggestions send the *root*, the
+        report UI sends a message_id. We resolve the canonical root and pick a ``seed_message_id``
+        that actually has a jobspec (so line items can be seeded), preferring ``ref`` itself when it
+        is one. Without this, a suggested project whose root message wasn't triaged attaches nothing
+        and arrives empty. ``seed_message_id`` is "" when no message in the thread has a spec."""
+        root = _project.resolve_thread_root(_crmdb, ref)
+        rows = _crmdb.thread(root) if _crmdb is not None else []
+        mids = [r["message_id"] for r in rows] or [ref]
+        seed_mid = ref if ref in jspecs else next((m for m in mids if m in jspecs), "")
+        return root, seed_mid, rows
+
     @app.get("/api/projects")
     def list_projects(archived: bool = False):
         out = []
@@ -354,14 +424,25 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if not title:
             return JSONResponse({"error": "title required"}, status_code=400)
         client = (body.get("client_email") or None)
-        mid = str(body.get("from_message", "") or "")
+        # `from_message` may be a message_id OR a thread_root (suggestions send the root). Resolve it
+        # so the project ALWAYS arrives with its source thread attached, line items seeded, and client
+        # identity filled — the whole point of creating a project from a lead.
+        ref = str(body.get("from_message", "") or "")
         client_name = client
-        if mid and mid in jspecs:
-            client_name = jspecs[mid].get("counterparty") or client
+        root = seed_mid = ""
+        rows: list[dict] = []
+        if ref:
+            root, seed_mid, rows = _resolve_ref(ref)
+            if seed_mid and seed_mid in jspecs:
+                client_name = jspecs[seed_mid].get("counterparty") or client_name
+            if not client:  # best-effort client email: first inbound sender in the thread
+                client = next((r.get("from_email") for r in rows
+                               if r.get("direction") == "inbound" and r.get("from_email")), None)
         pid = pstore.create(title, client_email=client, client_name=client_name)
-        if mid and mid in jspecs:
-            pstore.attach_thread(pid, _project.resolve_thread_root(_crmdb, mid))
-            _project.seed_items_from(pstore, ws, jspecs, pid, mid)
+        if root:
+            pstore.attach_thread(pid, root)
+            if seed_mid:
+                _project.seed_items_from(pstore, ws, jspecs, pid, seed_mid)
         return JSONResponse({"project_id": pid})
 
     @app.get("/api/projects/{pid}")
@@ -397,8 +478,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         ref = str(body.get("ref", "")).strip()
         if not ref:
             return JSONResponse({"error": "ref required"}, status_code=400)
-        pstore.attach_thread(pid, _project.resolve_thread_root(_crmdb, ref))
-        _project.seed_items_from(pstore, ws, jspecs, pid, ref)
+        # Accept a message_id OR a thread_root and seed from a message that has a spec (see _resolve_ref).
+        root, seed_mid, _rows = _resolve_ref(ref)
+        pstore.attach_thread(pid, root)
+        if seed_mid:
+            _project.seed_items_from(pstore, ws, jspecs, pid, seed_mid)
         return JSONResponse(_project_view(pid))
 
     @app.post("/api/projects/{pid}/field")
@@ -486,9 +570,20 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def _fila_rows() -> list[dict[str, Any]]:
         if _crmdb is None:
             return []
-        return cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
+        rows = cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
                                   now=datetime.now(timezone.utc),
                                   reclassified=ws.get_reclassifications())
+        # Annotate each thread with the project it already belongs to (if any), so the Fila can show
+        # "already in project X" and offer open-vs-create — preventing duplicate projects from one lead.
+        root2proj: dict[str, dict] = {}
+        for pr in pstore.list(include_archived=True):
+            info = {"project_id": pr["project_id"], "title": pr.get("title") or pr["project_id"],
+                    "stage": pr.get("stage") or ""}
+            for root in pstore.threads_for(pr["project_id"]):
+                root2proj.setdefault(root, info)
+        for r in rows:
+            r["project"] = root2proj.get(r.get("thread_root"))
+        return rows
 
     # -------------------------------------------------------------------------
     # Shared cluster builder (C1a/C1b) — assembled per-request; cheap (in-memory).

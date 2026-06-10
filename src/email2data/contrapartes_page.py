@@ -115,7 +115,7 @@ function render(){
     $('#_threads').innerHTML = '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);font-weight:680;margin-bottom:8px">Threads abertas</div>'
       + frows.map(r=>{
         const c=r.clock||{};
-        return '<div class="row" style="border-left:3px solid transparent;border-radius:10px;margin-bottom:6px" onclick="location.href=\'/?focus='+esc(r.thread_root)+'\'">'
+        return '<div class="row" style="border-left:3px solid transparent;border-radius:10px;margin-bottom:6px" onclick="location.href=\'/?focus='+encodeURIComponent(r.thread_root)+'\'">'
           +'<span class="cp '+esc(r.counterparty||'OTHER')+'">'+esc(r.counterparty||'—')+'</span>'
           +'<div class="rmain"><div class="subj">'+esc(r.subject||'(sem assunto)')+'</div>'
           +'<div class="rmeta">'+esc(r.contact||'')+'</div></div>'

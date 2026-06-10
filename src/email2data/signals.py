@@ -20,6 +20,13 @@ OUR_DOMAIN = "lindoservico.pt"
 # Folder names that indicate "we sent this" — matched case-insensitively.
 _SENT_FOLDER_RE = re.compile(r"\b(sent|enviados?)\b", re.I)
 
+
+def is_sent_folder(name: str) -> bool:
+    """True if an IMAP folder name denotes a Sent/Enviados folder. The ONE definition of "we sent
+    this" — used by direction classification here and by fetch's dedup (a Sent copy must win over a
+    non-Sent one so a message present in both INBOX and Sent is classified outbound either way)."""
+    return bool(name and _SENT_FOLDER_RE.search(name))
+
 # Header signals for bulk (mass mail) vs automated (auto-replies/notifications). RFC 2369 / 3834.
 _NO_REPLY_RE = re.compile(r"\b(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster)\b", re.I)
 # Forward/quote banners across clients + PT (detection only — we do not parse the block).
@@ -61,7 +68,7 @@ def header_signals(msg: Message) -> Signals:
     source_mailbox = _h(msg, "X-Email2Data-Source")
     _, frm = parseaddr(_h(msg, "From"))
     domain = (frm.rsplit("@", 1)[-1] if "@" in frm else "").lower()
-    if source_mailbox and _SENT_FOLDER_RE.search(source_mailbox):
+    if is_sent_folder(source_mailbox):
         direction = "outbound"
     elif domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN):
         direction = "internal"

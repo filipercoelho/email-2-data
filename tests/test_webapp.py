@@ -34,12 +34,17 @@ def test_index_renders_the_live_report(tmp_path):
 
 
 def test_faceted_filter_panel_wired(tmp_path):
-    """The data-driven facet engine + its container/labels must be present in the rendered HTML, so a
-    template break (renamed function, dropped facet) is caught without a browser."""
+    """The generic, tab-aware facet engine + a filter container per tab must be present in the rendered
+    HTML, so a template break (renamed function, dropped facet, missing container) is caught without a
+    browser."""
     html = _client(tmp_path).get("/").text
-    assert 'id="filters"' in html and "function renderFilters(" in html
-    assert "const FACETS=" in html and "function facetCounts(" in html
-    for group in ("Prioridade", "Tipo", "Purpose", "Sinais", "Estado", "Entidades"):
+    assert "const TABFILTERS=" in html and "function renderFilters(" in html
+    assert "function applyFacets(" in html and "function facetCounts(" in html
+    # one filter container per tab
+    for cid in ('id="filters"', 'id="cfilters"', 'id="lfilters"', 'id="pfilters"'):
+        assert cid in html
+    # representative group labels across the four registries
+    for group in ("Prioridade", "Entidades", "Atividade", "Espera", "Estágio", "Cobertura"):
         assert group in html
 
 
