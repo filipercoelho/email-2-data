@@ -1,5 +1,10 @@
 # DRAFT - Architectural Report
 
+> **ARCHIVED (2026-06-10).** This is the early enterprise-grade target sketch. The system we
+> actually built is the right-sized v1 — see [approach.md](../02-architecture/approach.md) and
+> [module-map.md](../02-architecture/module-map.md) for current reality. Kept for forensic
+> reference only; do not treat as current.
+
 ## Multi-Inbox Email Intelligence Service
 
 ### (Canonical Ingestion → Extraction → Event Platform)

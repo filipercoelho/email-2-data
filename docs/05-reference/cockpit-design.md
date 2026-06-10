@@ -1,9 +1,9 @@
 # Cockpit — the triage-delivery surface
 
-Companion to [VISION.md](../VISION.md) and [ROADMAP.md](../ROADMAP.md). This is the design detail for
+Companion to [VISION.md](../../VISION.md) and [roadmap.md](../01-requirements/roadmap.md). This is the design detail for
 the **delivery layer**: the surface the team actually works in. It does not introduce new scope — it is
 the **convergence point** of work already on the roadmap, plus the two ideas the customer-graph proposal
-([design/draft-architectural-report.md](draft-architectural-report.md)) got right that we don't yet have.
+([draft-architectural-report.md](../09-archive/draft-architectural-report.md)) got right that we don't yet have.
 
 Status legend: ✅ done · 🔄 in progress · ⬜ planned.
 
@@ -140,7 +140,7 @@ Contrapartes lens (D4) · Para ti (D5) · identity clustering (D6) · readiness 
    **validate who-owes-whom on a hand-checked 20–30 thread sample from the real 265-corpus.**
 2. **Day 2 — persistence + API:** `thread_state` table in `Workspace` (owner, handled, ts); endpoints
    (`POST /api/thread/{root}/handled`, `/owner`, undo) following the `confirm`/`reply` pattern in
-   [webapp.py](../src/email2data/webapp.py); confirm state survives a `sync` re-run.
+   [webapp.py](../../src/email2data/webapp.py); confirm state survives a `sync` re-run.
 3. **Days 3–4 — Fila UI** in the report template: thread cards, clock, owner chip, action bar; risk sort;
    keyboard + optimistic + undo; zero state. *Coordinate with the in-flight `report.py` WIP.*
 4. **Day 5 — end-to-end validation** on the 265-corpus; fix clock edge cases; extend `test_webapp`.
@@ -180,4 +180,4 @@ shows confidence + `decided_by`.
 
 ---
 
-*Next: wire this as the Phase-6 delivery detail in [ROADMAP.md](../ROADMAP.md), then build D1.*
+*Next: wire this as the Phase-6 delivery detail in [roadmap.md](../01-requirements/roadmap.md), then build D1.*

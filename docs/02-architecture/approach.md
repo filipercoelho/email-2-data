@@ -1,6 +1,6 @@
 # Approach — v1 (right-sized)
 
-Companion to [draft-architectural-report.md](draft-architectural-report.md). That document is the
+Companion to [draft-architectural-report.md](../09-archive/draft-architectural-report.md). That document is the
 long-term, enterprise-grade target. **This document is what we actually build first**, and why it is
 deliberately smaller.
 

@@ -54,5 +54,6 @@ Not an email client. Not sending mail (strictly read-only). Not autonomous decis
 stays in the loop). Not locked to one provider or one mailbox.
 
 ---
-See [ROADMAP.md](ROADMAP.md) for the phased plan and [design/approach.md](design/approach.md) for the
-right-sized v1 engineering detail.
+See [roadmap.md](docs/01-requirements/roadmap.md) for the phased plan and
+[docs/02-architecture/approach.md](docs/02-architecture/approach.md) for the right-sized v1
+engineering detail.
