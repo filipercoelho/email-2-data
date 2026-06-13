@@ -228,6 +228,38 @@ def readiness(spec: JobSpec) -> dict[str, Any]:
     }
 
 
+def askables(spec: JobSpec) -> list[dict[str, Any]]:
+    """The selectable clarifying prompts for a client email, derived from the spec's gaps.
+
+    One entry per registry base key that (a) has a clarifying question and (b) is still a gap —
+    missing on the job (job-scope) or on at least one line item (item-scope). The dedup matches
+    ``readiness``: ask "material?" once, not once per piece. Each entry carries enough for the UI
+    to group and pre-tick it:
+
+      * ``tier``     — "must" | "should" (drives grouping: gaps vs optionals)
+      * ``internal`` — the question is an internal note ("(interno) …"); **never sent to the
+        client** (the old client-side ``startsWith('(interno')`` filter, now explicit)
+      * ``default``  — pre-ticked? must-gaps yes, should-gaps and internals no
+
+    Registry order is preserved, so the on-screen checklist reads top-to-bottom like ``FIELDS``.
+    """
+    out: list[dict[str, Any]] = []
+    for k, label, tier, q, scope in FIELDS:
+        if tier == "context" or not q:
+            continue
+        if scope == "job":
+            fld = spec.job_fields.get(k)
+            gap = not (fld and fld.value)
+        else:  # item-scope: a gap if ANY line item is missing it (none → treat as a gap)
+            gap = (not spec.items) or any(not (it.get(k) and it[k].value) for it in spec.items)
+        if not gap:
+            continue
+        internal = q.startswith("(interno")
+        out.append({"key": k, "label": label, "tier": tier, "question": q,
+                    "internal": internal, "default": tier == "must" and not internal})
+    return out
+
+
 def score_drafts(specs: list[dict], labels: dict[str, dict[str, str]]) -> dict[str, Any]:
     """Functional eval (Phase B): per-field draft-vs-label presence agreement over the labeled set.
 

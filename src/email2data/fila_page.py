@@ -13,25 +13,105 @@ from . import cockpit_ui
 
 _LENS_JS = r"""
 /* ── Fila lens state ────────────────────────────────────────────────── */
-let rows = ROWS.slice(), focus = 0, filter = null;
-let _prevRisk = null, _scrollOnLoad = false;
+let rows = ROWS.slice(), focus = 0;
+let filters = {};   /* active filters — keys: counterparty, purpose, band, owner, domain,
+                       hasAttachment, minAgeDays, search. Pass null to remove a key. */
+let _prevRisk = null, urlThread = null;
 
-/* ── URL focus (deep-link from /?focus=<thread_root>) ───────────────── */
-(function(){
-  const p = new URLSearchParams(location.search);
-  const tgt = p.get('focus');
-  if(tgt){
-    const idx = rows.findIndex(r => r.thread_root === tgt);
-    if(idx >= 0){ focus = idx; _scrollOnLoad = true; }
-    history.replaceState(null, '', '/');
+/* ── filter helpers ─────────────────────────────────────────────────── */
+function hasFilters(){ return Object.keys(filters).length > 0; }
+function setFilter(key, val){
+  if(val===null){ delete filters[key]; }
+  else{ filters[key]=val; }
+  if(key==='search'){
+    const si=$('#_search');
+    if(si) si.value = (val===null) ? '' : (filters.search||'');
   }
-})();
-setTimeout(function(){
-  if(_scrollOnLoad){const el=document.querySelector('.row.on');if(el)el.scrollIntoView({block:'center'});}
-}, 0);
+  focus=0; syncURL(); render();
+}
+function clearFilters(){
+  filters={};
+  const si=$('#_search'); if(si) si.value='';
+  focus=0; syncURL(); render();
+}
 
-function view(){ return filter ? rows.filter(r=>(r.counterparty||'')===filter) : rows; }
+/* ── URL state ──────────────────────────────────────────────────────────
+   The Fila is a list with inline thread-expansion, so its deep-link state rides in the
+   query string (not a path segment, unlike /projetos/<id> or /contrapartes/<key>):
+     ?counterparty=<CP>   — counterparty filter (legacy key preserved)
+     ?purpose=<P>         — purpose filter
+     ?band=<B>            — urgency band filter
+     ?owner=<O>           — owner filter (empty string = "sem dono")
+     ?domain=<D>          — sender domain filter
+     ?attachment=1        — has-attachment filter
+     ?minDays=<N>         — minimum age in days
+     ?search=<Q>          — free text on subject + contact
+     ?thread=<root>       — the expanded thread
+   The URL is kept in sync with replaceState (same approach as the report), so it is
+   shareable / survives a refresh without spamming the Back history. The legacy
+   ?focus=<root> link (Para-ti / Contrapartes) still focuses that row, then drops the
+   param from the address bar. */
+function syncURL(){
+  const p = new URLSearchParams();
+  if(filters.counterparty) p.set('counterparty', filters.counterparty);
+  if(filters.purpose) p.set('purpose', filters.purpose);
+  if(filters.band) p.set('band', filters.band);
+  if('owner' in filters) p.set('owner', filters.owner||'');
+  if(filters.domain) p.set('domain', filters.domain);
+  if(filters.hasAttachment) p.set('attachment','1');
+  if(filters.minAgeDays!=null) p.set('minDays', String(filters.minAgeDays));
+  if(filters.search) p.set('search', filters.search);
+  if(urlThread) p.set('thread', urlThread);
+  const base = location.pathname.split('?')[0];
+  const qs = p.toString(), url = base + (qs ? ('?'+qs) : '');
+  if(location.pathname + location.search !== url){ try{history.replaceState(null,'',url);}catch(_){} }
+}
+
+/* ── view with multi-filter ─────────────────────────────────────────── */
+function view(){
+  return rows.filter(r=>{
+    if('counterparty' in filters && (r.counterparty||'')!==filters.counterparty) return false;
+    if('purpose' in filters && (r.purpose||'')!==filters.purpose) return false;
+    if('band' in filters && (r.clock||{}).band!==filters.band) return false;
+    if('owner' in filters && (r.owner||'')!==filters.owner) return false;
+    if('domain' in filters){
+      const d=(r.contact||'').split('@')[1]||'';
+      if(d!==filters.domain) return false;
+    }
+    if('hasAttachment' in filters && !r.has_attachment) return false;
+    if('minAgeDays' in filters && ((r.clock||{}).age_hours||0)/24 < filters.minAgeDays) return false;
+    if('search' in filters && filters.search){
+      const q=filters.search.toLowerCase();
+      const hay=[(r.subject||''),(r.contact||''),(r.counterparty||''),(r.purpose||'')].join(' ').toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
 function riskCount(){ return view().filter(r=>['red','amber'].includes((r.clock||{}).band)).length; }
+
+/* ── filter bar ─────────────────────────────────────────────────────── */
+const _FLABEL = {
+  counterparty: v=>'contraparte: '+v,
+  purpose: v=>'tipo: '+v.toLowerCase().replace(/_/g,' '),
+  band: v=>({'red':'urgente','amber':'a atrasar','green':'recente'}[v]||v),
+  owner: v=>v?'dono: @'+v:'sem dono',
+  domain: v=>'domínio: '+v,
+  hasAttachment: ()=>'com anexo',
+  minAgeDays: v=>'≥'+v+(v===1?' dia':' dias'),
+  search: v=>'busca: "'+v+'"',
+};
+function renderFbar(){
+  const chips=[];
+  for(const [k,v] of Object.entries(filters)){
+    const lf=_FLABEL[k]; if(!lf) continue;
+    chips.push('<button class="fchip" data-fkey="'+esc(k)+'">'+esc(lf(v))+' ✕</button>');
+  }
+  const fb=$('#_fbar'); if(!fb) return;
+  if(chips.length){ fb.innerHTML=chips.join(''); fb.classList.remove('hidden'); }
+  else{ fb.innerHTML=''; fb.classList.add('hidden'); }
+}
 
 /* ── render ────────────────────────────────────────────────────────── */
 function render(){
@@ -44,8 +124,17 @@ function render(){
     _prevRisk=n;
   }
   const cnt=$('#_count'); if(cnt) cnt.textContent=v.length?S.threads(v.length):S.semDados;
-  const fc=$('#_fchip'); if(fc){fc.classList.toggle('hidden',!filter);if(filter)fc.innerHTML=esc('filtrado: '+filter)+' ✕';}
-  const zero=$('#_zero'); if(zero) zero.classList.toggle('hidden',v.length>0);
+  renderFbar();
+  const zero=$('#_zero');
+  if(zero){
+    zero.classList.toggle('hidden',v.length>0);
+    if(!v.length){
+      const noRes=hasFilters()&&rows.length>0;
+      zero.innerHTML=noRes
+        ?'Sem resultados<span class="s">nenhuma thread corresponde aos filtros activos</span>'
+        :'✓ Tudo tratado<span class="s">nada está a cair · 0 em risco</span>';
+    }
+  }
   announce(v.length?S.threads(v.length)+' por tratar':'Tudo tratado');
   if(focus>=v.length) focus=Math.max(0,v.length-1);
 
@@ -113,9 +202,12 @@ const _threadCache = {};   // thread_root → messages array (fetch-once)
 
 async function toggleThread(i){
   const v=view(), r=v[i]; if(!r) return;
-  if(r._open){ r._open=false; render(); return; }
-  // show loading state immediately
-  r._open=true; r._threadMsgs=null; r._threadErr=null; render();
+  if(r._open){ r._open=false;
+    if(urlThread===r.thread_root){ urlThread=null; syncURL(); }   // collapsing the URL thread → clear it
+    render(); return; }
+  // show loading state immediately + reflect the open thread in the URL (shareable / refresh-safe)
+  r._open=true; r._threadMsgs=null; r._threadErr=null;
+  urlThread=r.thread_root; syncURL(); render();
   const root = r.thread_root;
   if(_threadCache[root]){
     r._threadMsgs=_threadCache[root]; render(); return;
@@ -158,7 +250,7 @@ function dispatch(action,i){
 
 /* project: jump into the existing one, or create from this thread and go straight to it */
 function openProject(i){
-  const r=view()[i]; if(r&&r.project) location.href='/projetos?p='+encodeURIComponent(r.project.project_id);
+  const r=view()[i]; if(r&&r.project) location.href='/projetos/'+encodeURIComponent(r.project.project_id);
 }
 async function makeProject(i){
   const r=view()[i]; if(!r) return;
@@ -166,7 +258,7 @@ async function makeProject(i){
   toast('a criar projeto…');
   try{
     const d=await post('/api/projects',{title:r.subject||'(sem assunto)',from_message:r.thread_root});
-    location.href='/projetos?p='+encodeURIComponent(d.project_id);
+    location.href='/projetos/'+encodeURIComponent(d.project_id);
   }catch(e){ toast(S.revertido); }
 }
 
@@ -179,7 +271,7 @@ function onKey(e){
   else if(e.key==='a'||e.key==='A')dispatch('owner',focus);
   else if(e.key==='Enter'||e.key==='o'||e.key==='O'){dispatch('thread',focus);e.preventDefault();}
 }
-function onEsc(){ if(filter){filter=null;render();} }
+function onEsc(){ if(hasFilters()) clearFilters(); }
 
 /* ── palette items ──────────────────────────────────────────────────── */
 function paletteItems(q){
@@ -193,21 +285,62 @@ function paletteItems(q){
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
   ];
+  if(hasFilters()) items.unshift({kind:'filtro',label:'limpar filtros',run:clearFilters});
+
+  // Counterparty filters
   [...new Set(rows.map(r=>r.counterparty).filter(Boolean))].forEach(cp=>
-    items.push({kind:'contraparte',label:cp,run:()=>{filter=cp;focus=0;render();}}));
+    items.push({kind:'contraparte',label:cp,run:()=>setFilter('counterparty',cp)}));
+
+  // Purpose filters
+  [...new Set(rows.map(r=>r.purpose).filter(Boolean))].forEach(p=>
+    items.push({kind:'tipo',label:p.toLowerCase().replace(/_/g,' '),sub:p,run:()=>setFilter('purpose',p)}));
+
+  // Urgency band filters
+  const _blab={'red':'urgente (vermelho)','amber':'a atrasar (laranja)','green':'recente (verde)'};
+  ['red','amber','green'].forEach(b=>{
+    if(rows.some(r=>(r.clock||{}).band===b))
+      items.push({kind:'urgência',label:_blab[b]||b,run:()=>setFilter('band',b)});
+  });
+
+  // Owner filters
+  [...new Set(rows.map(r=>r.owner).filter(Boolean))].forEach(o=>
+    items.push({kind:'dono',label:'@'+o,run:()=>setFilter('owner',o)}));
+  if(rows.some(r=>!r.owner))
+    items.push({kind:'dono',label:'sem dono',run:()=>setFilter('owner','')});
+
+  // Domain filters (derived from contact email)
+  [...new Set(rows.map(r=>(r.contact||'').split('@')[1]).filter(Boolean))].forEach(d=>
+    items.push({kind:'domínio',label:d,run:()=>setFilter('domain',d)}));
+
+  // Has attachment
+  if(rows.some(r=>r.has_attachment))
+    items.push({kind:'filtro',label:'com anexo',run:()=>setFilter('hasAttachment',true)});
+
+  // Age threshold filters
+  [1,3,7].forEach(days=>{
+    if(rows.some(r=>((r.clock||{}).age_hours||0)/24>=days))
+      items.push({kind:'tempo',label:'≥'+days+(days===1?' dia':' dias')+' em espera',run:()=>setFilter('minAgeDays',days)});
+  });
+
+  // Subject search (navigate to row)
   view().forEach(r=>items.push({kind:'assunto',label:r.subject||'(sem assunto)',
     sub:(r.counterparty||'')+' · '+(r.contact||''),
     run:()=>{const i=view().findIndex(x=>x.thread_root===r.thread_root);if(i>=0){focus=i;render();const el=document.querySelector('.row.on');if(el)el.scrollIntoView({block:'nearest'});}}}));
+
   return q?items.filter(it=>(it.label+' '+(it.sub||'')+' '+it.kind).toLowerCase().includes(q)):items;
 }
 
 /* ── list events ────────────────────────────────────────────────────── */
 $('#_list').addEventListener('click',e=>{
   const row=e.target.closest('.row'); if(!row) return;
-  // quote toggle: local show/hide, no re-render (would reset it) — handle before row dispatch
+  // quote/raw toggle: local show/hide, no re-render
   const qt=e.target.closest('.qtoggle');
   if(qt){const q=qt.nextElementSibling;
     if(q&&q.classList.contains('tquote')){const hid=q.classList.toggle('hidden');qt.textContent=(hid?'▸':'▾')+' mensagem citada';}
+    e.stopPropagation();return;}
+  const rt=e.target.closest('.rawtoggle');
+  if(rt){const rb=rt.nextElementSibling;
+    if(rb&&rb.classList.contains('rawbody')){const hid=rb.classList.toggle('hidden');rt.textContent=hid?'ver original':'ver limpo';}
     e.stopPropagation();return;}
   const i=parseInt(row.dataset.i,10); focus=i;
   const act=e.target.closest('[data-act]');
@@ -218,7 +351,50 @@ $('#_menu').addEventListener('click',e=>{
   const mi=e.target.closest('.mi'); if(!mi) return;
   setOwner(parseInt($('#_menu').dataset.i,10),mi.dataset.n);$('#_menu').classList.add('hidden');
 });
-const _fc=$('#_fchip'); if(_fc)_fc.addEventListener('click',()=>{filter=null;render();});
+
+/* filter bar chip clicks */
+const _fb=$('#_fbar'); if(_fb)_fb.addEventListener('click',e=>{
+  const chip=e.target.closest('.fchip'); if(chip) setFilter(chip.dataset.fkey,null);
+});
+
+/* search input — updates filters.search without going through setFilter to avoid cursor-jump */
+const _si=$('#_search');
+if(_si) _si.addEventListener('input',e=>{
+  const v=e.target.value;
+  if(v){ filters.search=v; }else{ delete filters.search; }
+  focus=0; syncURL(); render();
+});
+
+/* ── URL ↔ view sync (initial load + Back/Forward) ──────────────────────── */
+function applyURLState(){
+  const p = new URLSearchParams(location.search);
+  filters = {};
+  const cpv=p.get('counterparty'); if(cpv) filters.counterparty=cpv;
+  const pv=p.get('purpose'); if(pv) filters.purpose=pv;
+  const bv=p.get('band'); if(bv) filters.band=bv;
+  if(p.has('owner')) filters.owner=p.get('owner')||'';  // '' = "sem dono" filter
+  const dv=p.get('domain'); if(dv) filters.domain=dv;
+  if(p.get('attachment')==='1') filters.hasAttachment=true;
+  const md=p.get('minDays'); if(md) filters.minAgeDays=parseFloat(md);
+  const sv=p.get('search'); if(sv) filters.search=sv;
+  const si=$('#_search'); if(si) si.value=filters.search||'';
+
+  const open = p.get('thread') || '', legacyFocus = p.get('focus') || '';
+  rows.forEach(r=>{ r._open=false; });          // the URL owns which thread is expanded
+  urlThread = open || null;
+  render();
+  const tgt = open || legacyFocus;
+  if(tgt){
+    const i = view().findIndex(r => r.thread_root === tgt);
+    if(i>=0){ focus=i;
+      if(open) toggleThread(i);                 // expand it (syncURL is a no-op — URL already matches)
+      setTimeout(()=>{const el=document.querySelector('.row.on');if(el)el.scrollIntoView({block:'center'});},0);
+    }
+  }
+  if(legacyFocus && !open){ urlThread=null; syncURL(); }   // canonicalize ?focus= out of the address bar
+}
+window.addEventListener('popstate', applyURLState);
+applyURLState();
 """
 
 _BODY_HTML = """
@@ -226,9 +402,10 @@ _BODY_HTML = """
   <div class="bar">
     <span id="_risk" class="risk" aria-live="polite" style="font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;border-radius:20px;padding:3px 12px;border:1px solid"></span>
     <span id="_count"></span>
-    <span id="_fchip" class="hidden" style="display:inline-flex;align-items:center;gap:6px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:20px;padding:2px 10px;font-weight:600;cursor:pointer;font-size:12px"></span>
+    <input id="_search" type="text" placeholder="filtrar…" autocomplete="off" aria-label="Filtrar threads"/>
     <span class="cmdk"><kbd>⌘K</kbd> comandos</span>
   </div>
+  <div id="_fbar" class="fbar hidden" aria-label="Filtros activos"></div>
   <div id="_list" class="list" role="list" aria-label="Fila de resposta"></div>
   <div id="_zero" class="zero hidden">✓ Tudo tratado<span class="s">nada está a cair · 0 em risco</span></div>
   <div class="hint"><b>J/K</b> mover · <b>Enter</b> abrir · <b>E</b> tratado · <b>A</b> dono · <b>Z</b> desfazer · <b>⌘K</b> comandos · <b>?</b> ajuda</div>
@@ -252,6 +429,14 @@ _EXTRA_CSS = """
   .pchip.new:hover{border-color:var(--int);color:var(--int);background:#effbf7}
   .rpchip{font-size:10.5px;font-weight:650;border:1px solid #cdd7ff;background:#eef2ff;color:var(--ac);border-radius:6px;padding:1px 7px;cursor:pointer}
   .rpchip:hover{background:#e0e8ff}
+  /* search input */
+  #_search{border:1px solid var(--bd);border-radius:8px;padding:4px 10px;font-size:12.5px;color:var(--tx);background:var(--card);outline:none;width:160px;transition:width .15s,border-color .12s}
+  #_search:focus{border-color:var(--ac);width:210px}
+  #_search::placeholder{color:var(--mut2)}
+  /* active filter chips */
+  .fbar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+  .fchip{display:inline-flex;align-items:center;gap:5px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:20px;padding:3px 10px;font-weight:600;cursor:pointer;font-size:12px}
+  .fchip:hover{background:#dfe8ff}
 """
 
 

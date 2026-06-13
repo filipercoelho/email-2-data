@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from email.message import Message
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 
 OUR_DOMAIN = "lindoservico.pt"
 
@@ -64,6 +64,18 @@ def _h(msg: Message, name: str) -> str:
     return str(msg.get(name) or "").strip()
 
 
+def _has_external_recipient(msg: Message) -> bool:
+    """True when any To:/Cc: address belongs to a domain outside lindoservico.pt."""
+    to_cc = ", ".join(filter(None, [_h(msg, "To"), _h(msg, "Cc")]))
+    for _, addr in getaddresses([to_cc]):
+        if "@" not in addr:
+            continue
+        dom = addr.rsplit("@", 1)[-1].lower()
+        if dom and dom != OUR_DOMAIN and not dom.endswith("." + OUR_DOMAIN):
+            return True
+    return False
+
+
 def header_signals(msg: Message) -> Signals:
     source_mailbox = _h(msg, "X-Email2Data-Source")
     _, frm = parseaddr(_h(msg, "From"))
@@ -71,7 +83,9 @@ def header_signals(msg: Message) -> Signals:
     if is_sent_folder(source_mailbox):
         direction = "outbound"
     elif domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN):
-        direction = "internal"
+        # A reply FROM a colleague TO an external client (e.g. CC'd to orcamentos) is outbound —
+        # it should flip the response clock. A pure colleague-to-colleague forward stays internal.
+        direction = "outbound" if _has_external_recipient(msg) else "internal"
     else:
         direction = "inbound"
 

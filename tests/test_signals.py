@@ -9,6 +9,19 @@ BULK = (b"From: news@shop.com\r\nSubject: promo\r\nList-Unsubscribe: <https://x/
 AUTO = b"From: noreply@bank.pt\r\nSubject: aviso\r\nAuto-Submitted: auto-generated\r\n\r\nx\r\n"
 SENT = b"X-Email2Data-Source: Enviados\r\nFrom: Pedro <pedro.ferreira@lindoservico.pt>\r\nTo: joao@cliente.pt\r\nSubject: RE: orcamento\r\n\r\nSegue o orcamento.\r\n"
 SENT_PLAIN = b"X-Email2Data-Source: Sent\r\nFrom: Pedro <pedro.ferreira@lindoservico.pt>\r\nTo: supplier@acme.pt\r\nSubject: Pedido\r\n\r\nBoa tarde.\r\n"
+# Colleague reply CC'd to orcamentos — FROM our domain, To: external client (no Sent folder header)
+COLLEAGUE_REPLY_TO_CLIENT = (
+    b"From: Ana Matos <ana.matos@lindoservico.pt>\r\n"
+    b"To: comunicacao@genesisdentalclinics.pt\r\n"
+    b"Cc: orcamentos@lindoservico.pt\r\n"
+    b"Subject: Re: pedido de cotacao para producao de mascote\r\n\r\nBoa tarde.\r\n"
+)
+# Internal forward — FROM our domain, To: also our domain only
+INTERNAL_FORWARD = (
+    b"From: Ana Matos <ana.matos@lindoservico.pt>\r\n"
+    b"To: pedro.ferreira@lindoservico.pt\r\n"
+    b"Subject: Fwd: pedido de cotacao\r\n\r\nVe isto.\r\n"
+)
 
 
 def _sig(raw):
@@ -41,8 +54,19 @@ def test_schema_direction_constant_covers_every_emitted_value():
     assert emitted <= set(DIRECTION), f"signals emits {emitted - set(DIRECTION)} not in DIRECTION"
 
 
+def test_our_domain_reply_to_external_client_is_outbound():
+    # A colleague's reply CC'd to orcamentos — FROM @lindoservico.pt, To: external → outbound.
+    # This is the "ana.matos replied to the client" case; the thread clock must flip to AWAITING.
+    assert _sig(COLLEAGUE_REPLY_TO_CLIENT).direction == "outbound"
+
+
+def test_our_domain_forward_to_internal_only_stays_internal():
+    # A purely internal forward (To: @lindoservico.pt only) must stay internal, not outbound.
+    assert _sig(INTERNAL_FORWARD).direction == "internal"
+
+
 def test_internal_without_source_header_stays_internal():
-    # Emails FROM our domain that arrived in INBOX (forwarded internally) stay "internal"
+    # Emails FROM our domain with no To: at all (edge case) stay "internal"
     assert _sig(INTERNAL).direction == "internal"
     assert _sig(INTERNAL).source_mailbox == ""
 

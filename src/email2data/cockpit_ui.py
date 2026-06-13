@@ -206,8 +206,9 @@ _HEAD = """<!doctype html>
   .tdate{color:var(--mut2);margin-left:auto}
   .tatts{flex-basis:100%;margin-top:3px}
   .tbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
-  .qtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0}
-  .qtoggle:hover{color:var(--ac)}
+  .qtoggle,.rawtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0;display:block}
+  .qtoggle:hover,.rawtoggle:hover{color:var(--ac)}
+  .rawbody{margin-top:4px;border-top:1px dashed var(--bd);padding-top:6px}
   .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
   .tatt{display:inline-block;font-size:11px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
   .tatt:hover{background:#dfe8ff}
@@ -373,16 +374,25 @@ function msgHTML(m, opts){
   const atts=(m.attachments||[]).map((a,idx)=>
     '<a class="tatt" href="/api/attachment/'+encodeURIComponent(m.message_id)+'/'+idx
     +'" target="_blank" rel="noopener">📎 '+esc(a.name)+'</a>').join('');
-  const sp=msgSplitQuote(m.body||'');
-  // If nothing is left after trimming quotes (whole body is a forward/reply chain), show the
-  // quoted block directly rather than a blank card — the user needs to read the content.
-  const noVisible=!sp.visible;
-  const vis=noVisible?sp.quoted:(sp.visible||'');
+  // Use the cleaned body by default; fall back to raw if no clean version available.
+  const cleanBody = (m.body_clean !== undefined ? m.body_clean : m.body) || '';
+  const rawBody   = m.body || '';
+  const sp=msgSplitQuote(cleanBody);
+  // If nothing remains after cleaning + splitting, try the raw body as fallback.
+  const spRaw=msgSplitQuote(rawBody);
+  const noVisible=!sp.visible && !sp.quoted;
+  const vis=noVisible?(spRaw.visible||spRaw.quoted):(sp.visible||sp.quoted||'');
   const visHTML=vis?'<div class="tbody">'+esc(vis.slice(0,2000))+(vis.length>2000?'\n…':'')+'</div>':'';
-  const quoteHTML=(!noVisible&&sp.quoted)
+  const quoteHTML=(sp.quoted&&!noVisible)
     ?'<button class="qtoggle">▸ mensagem citada</button>'
      +'<div class="tquote hidden">'+esc(sp.quoted.slice(0,3000))+'</div>'
     :'';
+  // "ver original" toggle — only show when clean differs from raw
+  const hasNoise = rawBody.length > cleanBody.length + 60;
+  const rawToggle = hasNoise
+    ? '<button class="rawtoggle">ver original</button>'
+      +'<div class="rawbody hidden"><div class="tbody">'+esc(rawBody.slice(0,2000))+'</div></div>'
+    : '';
   // field provenance: which spec fields did this message supply?
   // Uses fieldLabels() if a FIELDS registry is available (injected by Projetos lens).
   const prov=opts.provenance||{};
@@ -412,7 +422,7 @@ function msgHTML(m, opts){
     +(atts?'<span class="tatts">'+atts+'</span>':'')
     +'</div>'
     +provBadges
-    +visHTML+quoteHTML
+    +visHTML+quoteHTML+rawToggle
     +'</div>';
 }
 /* Render a full thread panel (summary line + all messages). */
@@ -420,16 +430,27 @@ function msgThreadHTML(msgs, opts){
   const head='<div class="thead"><span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
   return '<div class="texp">'+head+msgs.map(m=>msgHTML(m,opts)).join('')+'</div>';
 }
-/* Quote-toggle wiring — attach once to a container, handles all .qtoggle clicks inside it. */
+/* Quote + raw-toggle wiring — attach once to a container. */
 function msgWireQuoteToggles(container){
   container.addEventListener('click',function(e){
-    const qt=e.target.closest('.qtoggle'); if(!qt) return;
-    const q=qt.nextElementSibling;
-    if(q&&q.classList.contains('tquote')){
-      const hid=q.classList.toggle('hidden');
-      qt.textContent=(hid?'▸':'▾')+' mensagem citada';
+    const qt=e.target.closest('.qtoggle');
+    if(qt){
+      const q=qt.nextElementSibling;
+      if(q&&q.classList.contains('tquote')){
+        const hid=q.classList.toggle('hidden');
+        qt.textContent=(hid?'▸':'▾')+' mensagem citada';
+      }
+      e.stopPropagation(); return;
     }
-    e.stopPropagation();
+    const rt=e.target.closest('.rawtoggle');
+    if(rt){
+      const rb=rt.nextElementSibling;
+      if(rb&&rb.classList.contains('rawbody')){
+        const hid=rb.classList.toggle('hidden');
+        rt.textContent=hid?'ver original':'ver limpo';
+      }
+      e.stopPropagation();
+    }
   });
 }
 let _pi=[],_pf=0;

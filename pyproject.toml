@@ -17,6 +17,12 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+# Opt-in browser acceptance tests (tests/test_cockpit_urls_e2e.py). Drives a real Chrome via
+# Playwright to assert the cockpit URLs change on click — the one thing TestClient can't verify.
+# Uses the system Chrome (channel="chrome"); the suite skips these when this extra isn't installed.
+e2e = [
+    "playwright>=1.40",
+]
 vertex = [
     "google-genai>=0.3",
 ]

@@ -64,7 +64,17 @@ of a client PO is counterparty **CLIENT**, not INTERNAL.
 
 `PO_FROM_CLIENT` · `ESTIMATE_REQUEST_FROM_CLIENT` · `OUTBOUND_INVOICE` (an invoice WE issue to a
 client) · `OUR_ORDER_TO_SUPPLIER` · `SUPPLIER_REPLY_OR_CONFIRMATION` · `INVOICE_OR_ACCOUNTING` ·
-`FOLLOW_UP` · `PUBLICITY` · `INTERNAL_OPS` · `OTHER`.
+`FOLLOW_UP` · `OWN_REJECTION` · `CLIENT_REJECTION` · `PUBLICITY` · `INTERNAL_OPS` · `OTHER`.
+
+**`OWN_REJECTION`** — use ONLY for outbound messages where Lindo explicitly declines a job or enquiry:
+"infelizmente não conseguimos produzir", "fora do âmbito do que fazemos", "não temos capacidade".
+Counterparty is still CLIENT or LEAD (the recipient). Urgency 0–19. Do NOT use for a quote
+or a follow-up with conditions — only for a clear, definitive refusal.
+
+**`CLIENT_REJECTION`** — use for inbound messages where the client closes the conversation after
+receiving our reply: "obrigado pela resposta", "ficou resolvido", "agradecemos a vossa atenção,
+boa semana". Urgency 0–10. Do NOT use when the client is asking follow-up questions or expressing
+disappointment while seeking alternatives — only for a courteous, definitive close.
 
 ## urgency — 0–100 (time pressure, independent of counterparty)
 
@@ -136,4 +146,22 @@ rules — be specific.
 ```json
 {"counterparty":"SUPPLIER","purpose":"OUR_ORDER_TO_SUPPLIER","urgency":40,"confidence":0.92,
  "reason":"Email da Sent box enviado pela Lindo a um fornecedor (Ramo Fabril) a pedir cotação de material. direction=outbound: contraparty = fornecedor destinatário, não INTERNAL.","entities":{"product_or_service":"perfil alumínio 40x40"}}
+```
+
+**Lindo declines a job (direction=outbound, we refused)**
+> `direction=outbound` · From: orcamentos@lindoservico.pt · To: comunicacao@genesisdentalclinics.pt
+> Assunto: RE: pedido de cotação para produção de mascote
+> "Olá boa tarde, infelizmente não conseguimos produzir o que solicitou. Recomendamos que contacte…"
+```json
+{"counterparty":"CLIENT","purpose":"OWN_REJECTION","urgency":5,"confidence":0.95,
+ "reason":"Lindo recusa explicitamente o pedido: 'não conseguimos produzir'. OWN_REJECTION — resposta definitiva da nossa parte.","entities":{}}
+```
+
+**Client closes conversation after our reply (inbound thank-you/closure)**
+> From: comunicacao@genesisdentalclinics.pt · To: orcamentos@lindoservico.pt
+> Assunto: RE: pedido de cotação para produção de mascote
+> "Bom dia, agradeço a vossa atenção ao pedido e resposta. E agradeço a sugestão. Continuação de boa semana!"
+```json
+{"counterparty":"CLIENT","purpose":"CLIENT_REJECTION","urgency":5,"confidence":0.93,
+ "reason":"Cliente agradece e encerra a conversa após a nossa recusa. Sem pedido novo, sem questão pendente — CLIENT_REJECTION.","entities":{}}
 ```

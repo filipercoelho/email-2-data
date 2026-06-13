@@ -27,7 +27,7 @@ def _client(tmp_path):
 
 
 def test_index_renders_the_live_report(tmp_path):
-    r = _client(tmp_path).get("/")
+    r = _client(tmp_path).get("/inbox")
     assert r.status_code == 200
     assert "const LIVE=true" in r.text          # served in live mode (editable panel)
     assert "Especificação" in r.text and "Pedido troféus" in r.text
@@ -37,7 +37,7 @@ def test_faceted_filter_panel_wired(tmp_path):
     """The generic, tab-aware facet engine + a filter container per tab must be present in the rendered
     HTML, so a template break (renamed function, dropped facet, missing container) is caught without a
     browser."""
-    html = _client(tmp_path).get("/").text
+    html = _client(tmp_path).get("/inbox").text
     assert "const TABFILTERS=" in html and "function renderFilters(" in html
     assert "function applyFacets(" in html and "function facetCounts(" in html
     # one filter container per tab
@@ -66,10 +66,10 @@ def test_sync_endpoint_refreshes_render_state(tmp_path, monkeypatch):
     app = webapp.create_app(settings, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
                             prepared=([EMAIL], [], {}))
     c = TestClient(app)
-    assert "Novo lead" not in c.get("/").text          # not yet present
+    assert "Novo lead" not in c.get("/inbox").text          # not yet present
     r = c.post("/api/sync", json={})
     assert r.status_code == 200 and r.json()["triaged_new"] == 1
-    assert "Novo lead" in c.get("/").text              # state rebuilt → new email rendered
+    assert "Novo lead" in c.get("/inbox").text              # state rebuilt → new email rendered
 
 
 def test_sync_endpoint_409_when_already_running(tmp_path):
@@ -164,6 +164,53 @@ def test_project_create_attach_field_and_export(tmp_path, monkeypatch):
     assert c.get("/api/projects/zzz").status_code == 404
 
 
+def test_projetos_detail_route_serves_page_and_404s(tmp_path):
+    """REST deep-link: GET /projetos/<pid> serves the lens for a real project (the page JS reads the
+    id from the path and opens that workbench) and 404s on an unknown id — so a stale/shared link
+    fails honestly, mirroring GET /contrapartes/<key>."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "Troféus", "from_message": "m1"}).json()["project_id"]
+    r = c.get(f"/projetos/{pid}")
+    assert r.status_code == 200 and "Projetos" in r.text
+    assert c.get("/projetos/p-9999").status_code == 404
+
+
+def test_projetos_page_wires_the_composer(tmp_path):
+    """GET /projetos renders and ships the composer JS (loadDraft + composerHTML + the draft
+    endpoints), and the old hard-coded clientEmailText() builder is gone — a template break
+    (renamed/dropped function) is caught without a browser."""
+    html = _client(tmp_path).get("/projetos").text
+    assert "function loadDraft(" in html and "function composerHTML(" in html
+    assert "/draft" in html and "Email para o cliente" in html
+    assert "clientEmailText" not in html          # the static JS builder was removed
+
+
+def test_client_email_draft_compose_and_rebuild(tmp_path):
+    """The Projetos composer: GET returns the selectable prompts + a body pre-built from the
+    missing-must defaults; POST re-assembles for a chosen subset (+ a custom question). The
+    internal 'process' prompt is flagged and excluded from the default body."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "Troféus", "from_message": "m1"}).json()["project_id"]
+
+    d = c.get(f"/api/projects/{pid}/draft").json()
+    assert d["subject"] == "Re: Troféus"
+    keys = {a["key"]: a for a in d["askables"]}
+    assert keys["thickness"]["default"] is True              # a missing must → pre-ticked
+    assert keys["process"]["internal"] is True               # internal note, surfaced...
+    # ...and the default body asks the musts but NOT the internal process note
+    assert "espessura" in d["body"].lower() and "(interno" not in d["body"]
+    assert d["body"].startswith("Bom dia,")
+
+    # rebuild for an explicit subset + a custom question
+    r = c.post(f"/api/projects/{pid}/draft",
+               json={"selected": ["thickness"], "custom": ["Têm logótipo em vetor?"]}).json()
+    assert "1. Que espessura?" in r["body"] and "2. Têm logótipo em vetor?" in r["body"]
+    assert "quantidade" not in r["body"].lower()             # quantity wasn't selected
+
+    assert c.get("/api/projects/zzz/draft").status_code == 404
+    assert c.post("/api/projects/zzz/draft", json={"selected": []}).status_code == 404
+
+
 _EML = (b"From: a@x.pt\r\nSubject: s\r\nMIME-Version: 1.0\r\n"
         b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
         b"--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
@@ -227,7 +274,7 @@ def test_projects_work_with_a_real_crm_store(tmp_path):
     # list endpoint must not 500 when a project owns a thread (the reported symptom)
     assert any(x["project_id"] == pid for x in c.get("/api/projects").json())
     view = c.get(f"/api/projects/{pid}").json()
-    assert view["threads"] == ["m1"]                       # attached by thread_root
+    assert view["threads"] == ["mid:m1"]                   # attached by canonical thread_root
     assert view["message_ids"] == ["m1", "m2"]             # CRM expanded the root to its siblings
     assert view["job_fields"]["deadline"]["value"] == "2026-07-01"   # merged in from the reply m2
 
@@ -274,4 +321,4 @@ def test_project_view_flags_dangling_threads(tmp_path):
     c.post(f"/api/projects/{pid}/attach", json={"ref": "ghost-root"})   # not in CRM
     v = c.get(f"/api/projects/{pid}").json()
     assert v["dangling_threads"] == ["ghost-root"]
-    assert "live" in v["threads"]
+    assert "mid:live" in v["threads"]

@@ -35,6 +35,7 @@ out/crm.db
    │  jobspec.py      JobSpec (14 vars + Gate-1 readiness)
    │  specdraft.py    Phase-B tiered spec draft (LEAD/PO only)
    │  replydraft.py   Phase-C clarifying reply (never sends)
+   │  clientdraft.py  Phase-C client-email composer (deterministic, never sends)  ADR-013
    ▼
 project.py  cross-thread Projects → one canonical spec (workspace.db, precious)  ADR-010
    │  export.py       shell-only offload → JSON | materials-costing API  ADR-011
@@ -56,9 +57,10 @@ webapp.py   FastAPI workspace UI on 127.0.0.1:8042 (live) + static report.html
 | `classifier.py` | Tier-1 | the LLM triage call (via `llm.py`) |
 | `llm.py` | plumbing | provider dispatch (Gemini/Anthropic) + retry-on-empty, shared by all LLM stages |
 | `crm.py` | rollup | interactions (event log) + contacts (person rollup) from headers+verdicts |
-| `jobspec.py` | Phase A | JobSpec (14 vars + provenance + confirmed) + Gate-1 readiness |
+| `jobspec.py` | Phase A | JobSpec (14 vars + provenance + confirmed) + Gate-1 readiness + `askables` (selectable client-email prompts) |
 | `specdraft.py` | Phase B | tiered LLM spec draft for LEAD/PO/estimate only |
 | `replydraft.py` | Phase C | clarifying reply grounded in confirmed-vs-missing fields (never sends) |
+| `clientdraft.py` | Phase C | deterministic client-email composer: splices selected prompts into `config/client_email_template.md` (no LLM, never sends) — ADR-013 |
 | `workspace.py` | write | human decisions (SQLite) overlaying job specs; survive re-runs |
 | `project.py` | entity | cross-thread Projects: many threads → one canonical spec + lifecycle |
 | `export.py` | offload | shell-only export to JSON (dry-run) or materials-costing API |
@@ -81,3 +83,18 @@ free path can never silently bin a client.
 `127.0.0.1:8042`; it runs an incremental `sync` on boot and on **Sincronizar**. Project actions
 hit the API, so they are inert in the static `out/report.html`. UI/UX spec:
 [../05-reference/cockpit-design.md](../05-reference/cockpit-design.md).
+
+Every view is **deep-linkable** ([ADR-014](../03-decisions/adr-014-restful-deep-linkable-cockpit-urls.md)):
+a detail resource carries its id in the **path** — `/projetos/<pid>` and `/contrapartes/<key>`
+(both 404 on an unknown id) — while list filters and inline view-state ride in the **query string**
+— the Fila's `?counterparty=<CP>` filter and `?thread=<root>` expanded thread. So the address bar
+always names what's on screen, and a view can be refreshed, shared, or bookmarked.
+
+The **Contrapartes detail** (`/contrapartes/<key>`, served by `_contraparte_detail_data`) is a
+*navigation hub*: an insight strip (messages / conversations / received-vs-sent / attachments / last
+activity / response-debt) + a purpose breakdown, then every related record linked to where it lives —
+open threads → the Fila (`/?thread=`), pending decisions → Para ti, projects → the workbench
+(`/projetos/<pid>`), and a per-message timeline → the inbox report (`/inbox#tab=…&sel=…`). The same
+payload is exposed at `GET /api/contrapartes/<key>` (`{cluster, stats, timeline, projects, fila_rows,
+gates}`). The headline message count is the deduped timeline length, not the cluster's per-participant
+`msg_count`.

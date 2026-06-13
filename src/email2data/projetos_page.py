@@ -2,9 +2,12 @@
 
 Thin wrapper over cockpit_ui.page(). Uses the existing /api/projects* endpoints.
 The detail view is a **job-spec workbench**: source emails (Origem) for context,
-every must/should variable as an editable+confirmable field (Especificação), and
-the missing must-haves as a copy/mailto client email (Perguntas). The field
-registry is embedded straight from ``jobspec.FIELDS`` so the UI never drifts.
+every must/should variable as an editable+confirmable field (Especificação), and a
+client-email **composer** (Email para o cliente) — pick which gaps to ask about, review
+the auto-assembled draft, edit it, then copy or open in the mail client. The field
+registry is embedded straight from ``jobspec.FIELDS`` so the UI never drifts; the draft
+itself is assembled server-side (``/api/projects/{id}/draft`` → ``clientdraft``) so the
+pt-PT skeleton lives in editable config, not hard-coded JS.
 """
 
 from __future__ import annotations
@@ -69,8 +72,35 @@ _BODY = """
   .dwarn{background:#fff7ed;border:1px solid #fed7aa;color:#b45309;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
   /* perguntas / ask */
   .qs li{margin-bottom:6px;font-size:13px;color:#3a4150}
-  .qmail{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .qmail{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
   .ready{color:var(--green);font-size:12.5px;font-weight:600}
+  /* ── client-email composer ──────────────────────────────────────────── */
+  .cmp .hdr{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+  .cmp .to{font-size:12.5px;color:var(--mut)}
+  .cmp .to b{color:var(--tx);font-weight:600}
+  .cmp .subj{display:flex;align-items:center;gap:8px}
+  .cmp .subj label{flex:0 0 auto;font-size:12px;color:var(--mut)}
+  .cmp .subj input{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx)}
+  .cmp .subj input:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .askgrp{margin:10px 0}
+  .askgrp .gl{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--mut2);margin-bottom:5px}
+  .askgrp.must .gl{color:var(--red)}
+  .ask-opt{display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-size:13px;color:#3a4150;cursor:pointer}
+  .ask-opt input{margin-top:2px;accent-color:var(--ac);cursor:pointer}
+  .ask-opt.intern{color:var(--mut2);cursor:default}
+  .custq{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;color:#3a4150}
+  .custq .rm{cursor:pointer;color:var(--mut2);border:none;background:none;font-size:15px;line-height:1;padding:0}
+  .custq .rm:hover{color:var(--red)}
+  .addq{border:1px dashed var(--bd);background:#fff;border-radius:8px;padding:5px 11px;cursor:pointer;font-size:12px;color:var(--mut);font-weight:600;margin-top:4px}
+  .addq:hover{border-color:var(--ac);color:var(--ac);background:#f6f8ff}
+  .draftbox{margin-top:14px}
+  .draftbox .dl{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;min-height:22px}
+  .draftbox .dl h4{margin:0;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);font-weight:700}
+  .draftbox .dirty{font-size:11px;color:#b45309;display:flex;align-items:center;gap:8px}
+  .draftbox .dirty .regen{border:1px solid #fed7aa;background:#fff7ed;color:#b45309;border-radius:7px;padding:2px 9px;cursor:pointer;font-size:11px;font-weight:600}
+  .draftbox .dirty .regen:hover{background:#ffedd5}
+  .draftbox textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
+  .draftbox textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
 </style>
 """
 
@@ -99,6 +129,10 @@ function ringHTML(cov, estimable){
 
 /* ── list ─────────────────────────────────────────────────────────────── */
 function renderList(){
+  // restore list visibility — the back button / Escape route here via render() and the detail
+  // panel is left showing otherwise (the list owns this toggle; renderDetail owns the inverse).
+  $('#_detail').classList.add('hidden');
+  $('#_list').classList.remove('hidden');
   const cnt=$('#_count'); if(cnt) cnt.textContent=projects.length?projects.length+' projeto'+(projects.length===1?'':'s'):'';
   const zero=$('#_zero'); if(zero) zero.classList.toggle('hidden',projects.length>0);
   if(focus>=projects.length) focus=Math.max(0,projects.length-1);
@@ -114,11 +148,32 @@ function renderList(){
   }).join('');
 }
 
-async function loadDetail(pid){
+/* ── REST deep-linking ────────────────────────────────────────────────────
+   /projetos/<pid> is the detail *resource* URL (mirrors /contrapartes/<key>);
+   /projetos is the list. Opening a project pushes its id onto history, so the
+   address bar always names what's on screen and the browser back/forward buttons
+   move between list and detail (popstate). `push=false` reflects an existing URL
+   (initial load / popstate) without stacking a duplicate history entry. */
+function _pidFromURL(){
+  const m=location.pathname.match(/^\/projetos\/(.+)$/);
+  if(m) return decodeURIComponent(m[1]);
+  return new URLSearchParams(location.search).get('p')||'';   // legacy ?p=<pid>
+}
+async function loadDetail(pid, push){
+  if(push===undefined) push=true;
   try{
-    const d=await (await fetch('/api/projects/'+pid)).json();
-    selected=d; renderDetail();
+    const d=await (await fetch('/api/projects/'+encodeURIComponent(pid))).json();
+    if(d&&d.error){ toast(S.revertido); return; }   // unknown id (e.g. stale link) → stay on list
+    selected=d;
+    if(push){ try{history.pushState(null,'','/projetos/'+encodeURIComponent(pid));}catch(_){} }
+    renderDetail();
   }catch(e){toast(S.revertido);}
+}
+/* Return to the list. Pushes /projetos so Back from the list leaves the lens cleanly. */
+function closeDetail(push){
+  selected=null;
+  if(push!==false){ try{history.pushState(null,'','/projetos');}catch(_){} }
+  render();
 }
 
 /* ── one editable field row ───────────────────────────────────────────── */
@@ -134,15 +189,68 @@ function fieldRow(f, addr, fobj){
     +'</div>';
 }
 
-/* ── the client email built from the missing must-haves ───────────────── */
-function clientEmailText(){
-  const rd=selected.readiness||{};
-  // internal-only questions (e.g. "(interno) processo de fabrico") never go to the client
-  const qs=(rd.questions||[]).filter(q=>!q.startsWith('(interno'));
-  const L=['Bom dia,','','Para conseguirmos avançar com o orçamento, precisávamos de confirmar:',''];
-  qs.forEach((q,i)=>L.push((i+1)+'. '+q));
-  L.push('','Obrigado.');
-  return L.join('\n');
+/* ── client-email composer ──────────────────────────────────────────────
+   State for the open project's draft. The selectable prompts + the assembled
+   body both come from the server (/api/projects/{id}/draft) so the pt-PT
+   skeleton lives in config, not here. `dirty` = the user hand-edited the
+   textarea, so toggling a prompt no longer auto-rewrites it (offer Regenerar). */
+let draft = null;
+
+async function loadDraft(){
+  const box=$('#_ask'); if(!box||!selected) return;
+  try{
+    const d=await (await fetch('/api/projects/'+selected.project_id+'/draft')).json();
+    const asks=d.askables||[];
+    draft={to:d.to||'', subject:d.subject||'', askables:asks,
+           selected:new Set(asks.filter(a=>a.default).map(a=>a.key)),
+           custom:[], body:d.body||'', dirty:false};
+    renderComposer();
+  }catch(e){ box.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao preparar o email</div>'; }
+}
+
+function composerHTML(){
+  const d=draft;
+  if(!d.askables.length)
+    return '<div class="psec"><span class="ready">✓ Todos os obrigatórios estão preenchidos.</span></div>';
+  const must=d.askables.filter(a=>a.tier==='must'&&!a.internal);
+  const should=d.askables.filter(a=>a.tier==='should'&&!a.internal);
+  const intern=d.askables.filter(a=>a.internal);
+  const opt=a=>'<label class="ask-opt'+(a.internal?' intern':'')+'">'
+    +'<input type="checkbox" data-key="'+esc(a.key)+'"'+(d.selected.has(a.key)?' checked':'')+(a.internal?' disabled':'')+'/>'
+    +'<span>'+esc(a.question)+(a.internal?' · interno, não vai para o cliente':'')+'</span></label>';
+  const grp=(cls,title,arr)=>arr.length?'<div class="askgrp '+cls+'"><div class="gl">'+title+'</div>'+arr.map(opt).join('')+'</div>':'';
+  const custom=d.custom.length?'<div class="askgrp"><div class="gl">As tuas perguntas</div>'
+    +d.custom.map((c,i)=>'<div class="custq"><input type="checkbox" checked disabled/><span>'+esc(c)
+      +'</span><button class="rm" data-ci="'+i+'" title="remover">×</button></div>').join('')+'</div>':'';
+  const dirty=d.dirty?'<span class="dirty">✎ editado <button class="regen" id="_regenq">Regenerar</button></span>':'';
+  return '<div class="psec"><h3>Email para o cliente <span class="c">escolhe o que perguntar, revê e copia</span></h3>'
+    +'<div class="cmp">'
+    +'<div class="hdr"><div class="to">Para: <b>'+esc(d.to||'sem email')+'</b></div>'
+    +'<div class="subj"><label>Assunto</label><input id="_subj" value="'+esc(d.subject)+'" autocomplete="off" spellcheck="false"/></div></div>'
+    +grp('must','Em falta',must)
+    +grp('should','Opcionais',should)
+    +custom
+    +grp('intern','Internos',intern)
+    +'<button class="addq" id="_addq">+ pergunta personalizada</button>'
+    +'<div class="draftbox"><div class="dl"><h4>Rascunho</h4>'+dirty+'</div>'
+    +'<textarea id="_draftbody" spellcheck="false">'+esc(d.body)+'</textarea></div>'
+    +'<div class="qmail"><button class="act-btn" id="_copyq">Copiar email</button>'
+    +'<button class="act-btn" id="_openq">Abrir no email</button></div>'
+    +'</div></div>';
+}
+
+function renderComposer(){ const box=$('#_ask'); if(box) box.innerHTML=composerHTML(); }
+
+/* Rebuild the generated body from the current selection. While dirty we keep the
+   user's manual edits and just re-render (the Regenerar button is their way back). */
+async function resyncDraft(){
+  if(!draft||!selected) return;
+  if(draft.dirty){ renderComposer(); return; }
+  try{
+    const r=await post('/api/projects/'+selected.project_id+'/draft',
+      {selected:[...draft.selected], custom:draft.custom});
+    draft.body=r.body; renderComposer();
+  }catch(e){ toast(S.revertido); }
 }
 
 function detailHTML(){
@@ -170,19 +278,7 @@ function detailHTML(){
     +itemCards
     +'<button class="addbtn" id="_additem">+ adicionar peça</button></div>';
 
-  /* Perguntas — the client email (copy / mailto), only while there are gaps */
-  const qs=(rd.questions||[]);
-  const qlist=qs.length?'<ol class="qs">'+qs.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ol>':'';
-  const mailto='mailto:'+encodeURIComponent(p.client_email||'')
-    +'?subject='+encodeURIComponent('Re: '+(p.title||''))
-    +'&body='+encodeURIComponent(clientEmailText());
-  const ask=qs.length
-    ? '<div class="psec"><h3>Perguntas para o cliente <span class="c">o que ainda falta perguntar</span></h3>'
-      +qlist
-      +'<div class="qmail"><button class="act-btn" id="_copyq">Copiar email</button>'
-      +'<a class="act-btn" href="'+mailto+'">Abrir no email</a></div></div>'
-    : '<div class="psec"><span class="ready">✓ Todos os obrigatórios estão preenchidos.</span></div>';
-
+  /* Email para o cliente — the composer, lazy-filled by loadDraft() */
   const exp=rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'';
 
   return '<button class="hbtn" id="_backbtn" style="margin-bottom:14px">← Projetos</button>'
@@ -191,7 +287,8 @@ function detailHTML(){
     +'<span id="_ring">'+ringHTML(rd.coverage||0,rd.estimable||false)+'</span>'
     +'<div class="pstage">'+stages+'</div>'
     +'<span style="color:var(--mut);font-size:12.5px">'+client+'</span></div>'
-    +origem+espec+'<div id="_ask">'+ask+'</div><div id="_exportwrap">'+exp+'</div>';
+    +origem+espec+'<div id="_ask"><div class="hint2">a preparar email…</div></div>'
+    +'<div id="_exportwrap">'+exp+'</div>';
 }
 
 function renderDetail(){
@@ -200,22 +297,16 @@ function renderDetail(){
   $('#_detail').classList.remove('hidden');
   $('#_detail').innerHTML=detailHTML();
   loadSource();
+  loadDraft();
 }
 
 /* ── refresh only the summary bits after a field save (keep input focus) ─ */
 function refreshSummary(){
   const rd=selected.readiness||{};
   const ring=$('#_ring'); if(ring) ring.innerHTML=ringHTML(rd.coverage||0,rd.estimable||false);
-  const p=selected.project;
-  const qs=rd.questions||[];
-  const qlist=qs.length?'<ol class="qs">'+qs.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ol>':'';
-  const mailto='mailto:'+encodeURIComponent(p.client_email||'')+'?subject='+encodeURIComponent('Re: '+(p.title||''))+'&body='+encodeURIComponent(clientEmailText());
-  const ask=$('#_ask');
-  if(ask) ask.innerHTML=qs.length
-    ? '<div class="psec"><h3>Perguntas para o cliente <span class="c">o que ainda falta perguntar</span></h3>'+qlist
-      +'<div class="qmail"><button class="act-btn" id="_copyq">Copiar email</button>'
-      +'<a class="act-btn" href="'+mailto+'">Abrir no email</a></div></div>'
-    : '<div class="psec"><span class="ready">✓ Todos os obrigatórios estão preenchidos.</span></div>';
+  // a field save changes the gaps → refresh the composer's prompt list, but only when the
+  // user hasn't started hand-editing the draft (we must not wipe their wording).
+  if(draft&&!draft.dirty) loadDraft();
   const ew=$('#_exportwrap');
   if(ew) ew.innerHTML=rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'';
 }
@@ -263,7 +354,7 @@ function render(){ if(selected) renderDetail(); else renderList(); }
 
 /* ── keyboard ─────────────────────────────────────────────────────────── */
 function onKey(e){
-  if(selected){ if(e.key==='Escape'){selected=null;render();} return; }
+  if(selected){ if(e.key==='Escape'){closeDetail();} return; }
   if(!projects.length) return;
   if(e.key==='j'||e.key==='ArrowDown'){focus=Math.min(projects.length-1,focus+1);renderList();const el=document.querySelectorAll('.row')[focus];if(el)el.scrollIntoView({block:'nearest'});e.preventDefault();}
   else if(e.key==='k'||e.key==='ArrowUp'){focus=Math.max(0,focus-1);renderList();const el=document.querySelectorAll('.row')[focus];if(el)el.scrollIntoView({block:'nearest'});e.preventDefault();}
@@ -299,6 +390,11 @@ $('#_list').addEventListener('click',e=>{
 
 /* ── detail: save a field on change (blur/Enter), keep the user's place ── */
 $('#_detail').addEventListener('change', async e=>{
+  // composer: a prompt checkbox toggled → update selection + re-assemble the draft
+  const cb=e.target.closest('.ask-opt input[data-key]');
+  if(cb&&draft){ const k=cb.dataset.key;
+    if(cb.checked) draft.selected.add(k); else draft.selected.delete(k);
+    resyncDraft(); return; }
   const inp=e.target.closest('.finput'); if(!inp||!selected) return;
   const addr=inp.dataset.addr, value=inp.value.trim();
   try{
@@ -307,10 +403,23 @@ $('#_detail').addEventListener('change', async e=>{
   }catch(err){ toast(S.revertido); }
 });
 
+/* composer: hand-editing the draft marks it dirty (keep edits; offer Regenerar). We mutate the
+   DOM in place rather than re-render, so the textarea keeps focus while typing. */
+$('#_detail').addEventListener('input', e=>{
+  if(e.target.id!=='_draftbody'||!draft) return;
+  draft.body=e.target.value;
+  if(!draft.dirty){
+    draft.dirty=true;
+    const dl=$('#_detail').querySelector('.draftbox .dl');
+    if(dl&&!dl.querySelector('.dirty'))
+      dl.insertAdjacentHTML('beforeend','<span class="dirty">✎ editado <button class="regen" id="_regenq">Regenerar</button></span>');
+  }
+});
+
 /* ── detail: all click actions via delegation (survive partial re-renders) */
 $('#_detail').addEventListener('click', async e=>{
   if(!selected) return;
-  if(e.target.closest('#_backbtn')){selected=null;render();return;}
+  if(e.target.closest('#_backbtn')){closeDetail();return;}
   const st=e.target.closest('.pstage .st');
   if(st){ try{await post('/api/projects/'+selected.project_id+'/stage',{stage:st.dataset.stage});
     selected=await (await fetch('/api/projects/'+selected.project_id)).json(); renderDetail();}
@@ -326,20 +435,45 @@ $('#_detail').addEventListener('click', async e=>{
   const rm=e.target.closest('.item-rm');
   if(rm){ try{ selected=await post('/api/projects/'+selected.project_id+'/item/remove',{index:parseInt(rm.dataset.idx,10)}); renderDetail();}
     catch(err){toast(S.revertido);} return; }
+  /* ── composer actions ─────────────────────────────────────────────── */
+  if(e.target.closest('#_addq')&&draft){
+    const q=prompt('Pergunta para o cliente:'); if(!q||!q.trim()) return;
+    draft.custom.push(q.trim()); resyncDraft(); return; }
+  const crm=e.target.closest('.custq .rm');
+  if(crm&&draft){ draft.custom.splice(parseInt(crm.dataset.ci,10),1); resyncDraft(); return; }
+  if(e.target.closest('#_regenq')&&draft){
+    draft.dirty=false;
+    try{ const r=await post('/api/projects/'+selected.project_id+'/draft',
+      {selected:[...draft.selected], custom:draft.custom});
+      draft.body=r.body; renderComposer(); }
+    catch(err){ toast(S.revertido); } return; }
   if(e.target.closest('#_copyq')){
-    const txt=clientEmailText();
+    const txt=(($('#_draftbody')||{}).value)||'';
     try{ await navigator.clipboard.writeText(txt); toast('email copiado'); }
     catch(err){ toast('copia manual: '+txt.slice(0,40)+'…'); } return; }
+  if(e.target.closest('#_openq')&&draft){
+    const subj=(($('#_subj')||{}).value)||draft.subject||'';
+    const body=(($('#_draftbody')||{}).value)||'';
+    location.href='mailto:'+encodeURIComponent(draft.to||'')
+      +'?subject='+encodeURIComponent(subj)+'&body='+encodeURIComponent(body); return; }
   if(e.target.closest('#_exportbtn')){ try{
     const r=await post('/api/projects/'+selected.project_id+'/export',{adapter:'json'});
     toast(r.ok?'exportado: '+(r.external_id||'ok'):S.revertido);}
     catch(err){toast(S.revertido);} return; }
 });
 
-/* deep-link: /projetos?p=<pid> opens that project's detail directly (from the Fila chip) */
+/* deep-link + history: open the project named in the URL on load, and let the browser
+   back/forward buttons move between list and detail. */
+window.addEventListener('popstate',()=>{
+  const pid=_pidFromURL();
+  if(pid) loadDetail(pid,false); else closeDetail(false);
+});
 (function(){
-  const pid=new URLSearchParams(location.search).get('p');
-  if(pid){ history.replaceState(null,'','/projetos'); loadDetail(pid); }
+  const pid=_pidFromURL();
+  if(!pid) return;
+  // Canonicalize a legacy /projetos?p=<pid> link (Fila chip) to the path form, no history entry.
+  if(location.search){ try{history.replaceState(null,'','/projetos/'+encodeURIComponent(pid));}catch(_){} }
+  loadDetail(pid,false);
 })();
 """
 

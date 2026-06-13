@@ -1,6 +1,6 @@
 """Phase A: deterministic JobSpec assembly + Gate-1 readiness (multi-item)."""
 
-from email2data.jobspec import (ITEM_MUST, JOB_MUST, JobSpec, address, build_jobspec,
+from email2data.jobspec import (ITEM_MUST, JOB_MUST, JobSpec, address, askables, build_jobspec,
                                 confirm, readiness, score_drafts)
 
 RESULT = {"message_id": "m1", "subject": "Pedido de orçamento", "counterparty": "CLIENT",
@@ -103,3 +103,30 @@ def test_score_drafts_presence_agreement_base_field_level():
     assert out["per_field_agreement"]["material"] == 1.0   # drafted on some item & labeled
     assert out["per_field_agreement"]["delivery"] == 1.0   # both blank
     assert out["n"] == 1
+
+
+def test_askables_groups_gaps_by_tier_and_default_ticks_only_musts():
+    """The composer's selectable prompts: must-gaps pre-ticked, should-gaps offered but off,
+    the internal process note flagged + never default. Present fields drop out."""
+    s = build_jobspec(RESULT, ENV_NOATT)               # one seeded item, most musts missing
+    confirm(s, address("material", 0), "acrílico")     # fill one item-must → it leaves the list
+    asks = {a["key"]: a for a in askables(s)}
+
+    assert "material" not in asks                       # filled → not asked
+    assert asks["thickness"]["tier"] == "must" and asks["thickness"]["default"] is True
+    assert asks["colour_finish"]["tier"] == "should" and asks["colour_finish"]["default"] is False
+    # the process field is internal — flagged, and never sent to the client by default
+    assert asks["process"]["internal"] is True and asks["process"]["default"] is False
+    # registry order preserved
+    keys = [a["key"] for a in askables(s)]
+    assert keys.index("dimensions") < keys.index("thickness") < keys.index("quantity")
+
+
+def test_askables_item_gap_when_any_line_item_missing_it():
+    draft = {"line_items": [
+        {"item": "placas", "material": "acrílico", "thickness": "3mm", "quantity": "20"},
+        {"item": "stickers", "material": "vinil", "quantity": "100"},   # no thickness on item 2
+    ]}
+    s = build_jobspec(RESULT, ENV_NOATT, draft=draft)
+    keys = [a["key"] for a in askables(s)]
+    assert "thickness" in keys      # asked once even though only item 2 lacks it (deduped)

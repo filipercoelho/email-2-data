@@ -113,7 +113,16 @@ def participants(env: dict[str, Any]) -> list[tuple[str, str, str]]:
 
 def _thread_root(env: dict[str, Any]) -> str:
     refs = env.get("references") or []
-    return refs[0] if refs else (env.get("in_reply_to") or env.get("message_id") or "")
+    raw = refs[0] if refs else (env.get("in_reply_to") or env.get("message_id") or "")
+    if not raw:
+        return ""
+    # message_id is already canonical (canonical_id() output). References/In-Reply-To are raw
+    # header values with angle brackets — normalize to the same "mid:<stripped-lower>" form so
+    # replies join their root rather than landing in a separate thread_root bucket.
+    if raw.startswith("mid:") or raw.startswith("sha256:"):
+        return raw
+    norm = raw.strip().strip("<>").strip().lower()
+    return ("mid:" + norm) if norm else ""
 
 
 def _bump(tally_json: Optional[str], key: str) -> str:
@@ -443,8 +452,10 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
     connection currently reading the old crm.db can finish without a "disk I/O error" (this matters on
     Docker Desktop macOS volumes, where unlinking an open SQLite file causes I/O errors on the reader)."""
     import os
+    from email import message_from_bytes as _msg_from_bytes
     from .config import paths as _paths
     from .envelope import parse_eml
+    from .signals import header_signals as _header_signals
 
     p = _paths(settings, settings["__settings_path__"])
     results_path = p["out_dir"] / "results.jsonl"
@@ -460,7 +471,8 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
     recorded = skipped = 0
     for eml in sorted(p["corpus_dir"].glob("*.eml")):
         try:
-            env = parse_eml(eml.read_bytes())
+            raw = eml.read_bytes()
+            env = parse_eml(raw)
         except Exception:  # noqa: BLE001 — isolate per-email parse failures
             skipped += 1
             continue
@@ -468,6 +480,10 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
         if not v:
             skipped += 1
             continue
+        # Re-derive direction from the current signals logic (not the stale verdict).
+        # The .eml already carries X-Email2Data-Source injected at fetch time, so
+        # header_signals() has everything it needs to apply the up-to-date rule.
+        v = {**v, "direction": _header_signals(_msg_from_bytes(raw)).direction}
         store.record(env, v)
         recorded += 1
     rollup = store.top_contacts(limit=10_000, external_only=False)

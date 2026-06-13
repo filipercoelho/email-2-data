@@ -20,7 +20,7 @@ from typing import Optional
 
 # Bump whenever the playbook OR this schema changes verdicts, so re-runs are comparable and the
 # verdict cache (Phase 4) invalidates correctly.
-EXTRACTOR_VERSION = "counterparty.2026-05-29.v3"
+EXTRACTOR_VERSION = "counterparty.2026-06-11.v4"
 
 # Counterparty is ALWAYS from Lindo's point of view.
 #   CLIENT = buys from us (revenue).  LEAD = prospective client, not yet buying.
@@ -35,6 +35,8 @@ PURPOSE = [
     "SUPPLIER_REPLY_OR_CONFIRMATION",
     "INVOICE_OR_ACCOUNTING",
     "FOLLOW_UP",
+    "OWN_REJECTION",     # Lindo declined: we told the client we can't/won't do this job
+    "CLIENT_REJECTION",  # client closed: thank-you / acceptance-of-refusal after our reply
     "PUBLICITY",
     "INTERNAL_OPS",
     "OTHER",
@@ -48,7 +50,9 @@ IGNORABLE_COUNTERPARTIES = {"BULK", "OTHER"}
 HIGH_VALUE_COUNTERPARTIES = {"CLIENT", "LEAD"}
 HIGH_VALUE_PURPOSES = {"PO_FROM_CLIENT", "ESTIMATE_REQUEST_FROM_CLIENT"}
 # Awaited-outbound purposes start LOW and escalate with days-without-reply (dynamic part = Phase 4).
-AWAITED_OUTBOUND_PURPOSES = {"FOLLOW_UP", "OUR_ORDER_TO_SUPPLIER"}
+AWAITED_OUTBOUND_PURPOSES = {"FOLLOW_UP", "OUR_ORDER_TO_SUPPLIER", "OWN_REJECTION"}
+# A client message with one of these purposes self-closes the thread — no human action needed.
+CLOSING_PURPOSES = {"CLIENT_REJECTION"}
 
 
 def derive_priority(counterparty: str, purpose: str, urgency: int, is_bulk: bool) -> str:
@@ -61,7 +65,7 @@ def derive_priority(counterparty: str, purpose: str, urgency: int, is_bulk: bool
         return "IGNORE"
     if counterparty in HIGH_VALUE_COUNTERPARTIES or purpose in HIGH_VALUE_PURPOSES:
         return "HIGH"
-    if purpose in AWAITED_OUTBOUND_PURPOSES:
+    if purpose in AWAITED_OUTBOUND_PURPOSES or purpose in CLOSING_PURPOSES:
         return "LOW"
     return "HIGH" if urgency >= 70 else "MEDIUM"
 

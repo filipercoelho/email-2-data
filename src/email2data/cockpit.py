@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Iterable, Optional
 
-from .schema import AWAITED_OUTBOUND_PURPOSES, HIGH_VALUE_COUNTERPARTIES
+from .schema import AWAITED_OUTBOUND_PURPOSES, CLOSING_PURPOSES, HIGH_VALUE_COUNTERPARTIES
 
 # Response states (string constants, like the rest of the codebase's enums).
 WE_OWE = "WE_OWE"
@@ -136,6 +136,9 @@ class ThreadSummary:
     confidence: float = 0.0
     decided_by: str = ""
     reason: str = ""
+    # All message_ids in the thread (date-ascending). Used as a fallback when dominant_mid shifts
+    # to a new message that has no reclassification — the correction on an older message survives.
+    all_message_ids: list[str] = field(default_factory=list)
 
 
 def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
@@ -185,6 +188,7 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
             confidence=float(dom.get("confidence") or 0.0),
             decided_by=dom.get("decided_by") or "",
             reason=dom.get("reason") or "",
+            all_message_ids=[r.get("message_id", "") for r in rows_asc if r.get("message_id")],
         ))
     return summaries
 
@@ -205,6 +209,10 @@ def thread_clock(s: ThreadSummary, now: datetime,
     elif s.last_outbound_date and (not s.last_inbound_date or s.last_outbound_date >= s.last_inbound_date):
         # We replied last (Sent observed) → ball is in their court.
         state, since = AWAITING, s.last_outbound_date
+    elif s.last_purpose in CLOSING_PURPOSES:
+        # Client sent a closure (thank-you after our rejection, or explicit decline) — auto-resolve.
+        # No human action needed; a new inbound with a different purpose will reopen the thread.
+        state, since = HANDLED, s.last_inbound_date or s.last_date
     elif s.last_direction == "inbound" or reopened:
         state, since = WE_OWE, s.last_inbound_date
     elif s.last_purpose in AWAITED_OUTBOUND_PURPOSES:
@@ -279,6 +287,14 @@ def build_fila(interactions: Iterable[dict[str, Any]],
     rows: list[dict[str, Any]] = []
     for s in fold_threads(interactions):
         rc = recl.get(s.dominant_mid) or {}
+        if not rc:
+            # dominant_mid may have shifted to a newer message that has no reclassification yet —
+            # search the rest of the thread so a correction on an older message isn't silently lost.
+            for mid in s.all_message_ids:
+                if mid != s.dominant_mid:
+                    rc = recl.get(mid) or {}
+                    if rc:
+                        break
         committed = bool(rc)
         if rc.get("counterparty"):
             s.counterparty = rc["counterparty"]

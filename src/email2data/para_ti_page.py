@@ -129,6 +129,10 @@ async function acceptItem(i){
       dismissed.add(items.indexOf(item)); render(); toast('feito');
       if(acc.nav) setTimeout(()=>{ location.href=acc.nav; }, 700);
     } catch(e){ toast(S.revertido); }
+  } else if(acc.href||acc.nav){
+    // navigation-only accept (e.g. "Ver na Fila") — the mouse path is a native <a>, but the
+    // keyboard 'y' accept routes here, so honour it too instead of silently doing nothing.
+    location.href=acc.href||acc.nav;
   }
 }
 function dismissItem(i){

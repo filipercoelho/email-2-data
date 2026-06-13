@@ -67,6 +67,42 @@ def test_awaited_outbound_purpose_is_awaiting():
     assert c["state"] == AWAITING
 
 
+def test_own_rejection_outbound_is_awaiting():
+    # We sent a definitive refusal → ball is in their court, but we owe nothing more.
+    rows = [_row("t1", "m1", ago(10)),
+            _row("t1", "m2", ago(2), direction="outbound", purpose="OWN_REJECTION",
+                 from_email="orcamentos@lindoservico.pt")]
+    _, c = _clock_for(rows)
+    assert c["state"] == AWAITING
+
+
+def test_client_rejection_after_own_rejection_auto_closes():
+    # Full closure: we refused → client thanked us and closed → thread auto-HANDLED, off the Fila.
+    rows = [_row("t1", "m1", ago(20)),
+            _row("t1", "m2", ago(10), direction="outbound", purpose="OWN_REJECTION",
+                 from_email="orcamentos@lindoservico.pt"),
+            _row("t1", "m3", ago(2), purpose="CLIENT_REJECTION")]
+    assert build_fila(rows, now=NOW) == []          # auto-resolved → out of the active queue
+    [r] = build_fila(rows, now=NOW, include_resolved=True)
+    assert r["clock"]["state"] == HANDLED
+
+
+def test_client_rejection_standalone_auto_closes():
+    # Client closes without a prior OWN_REJECTION (e.g. they changed mind after our quote).
+    rows = [_row("t1", "m1", ago(20)),
+            _row("t1", "m2", ago(2), purpose="CLIENT_REJECTION")]
+    assert build_fila(rows, now=NOW) == []
+
+
+def test_new_inbound_after_client_rejection_reopens():
+    # A new real request after a closure should put the thread back in WE_OWE.
+    rows = [_row("t1", "m1", ago(30)),
+            _row("t1", "m2", ago(20), purpose="CLIENT_REJECTION"),
+            _row("t1", "m3", ago(1), purpose="ESTIMATE_REQUEST_FROM_CLIENT")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["state"] == WE_OWE
+
+
 def test_internal_forward_of_client_mail_still_we_owe():
     # A colleague forwarded a client request internally, but no external reply was sent — still our move.
     rows = [_row("t1", "m1", ago(10), counterparty="CLIENT"),
@@ -168,6 +204,22 @@ def test_reclassification_to_other_leaves_queue():
     out = build_fila([_row("t1", "m1", ago(3), counterparty="CLIENT")],
                      now=NOW, reclassified={"m1": {"counterparty": "OTHER"}})
     assert out == []                               # corrected to a non-counterparty → out of the queue
+
+
+def test_reclassification_survives_dominant_mid_shift():
+    """After a sync, a new message in the same thread may become dominant_mid.  The correction stored
+    against the old dominant_mid must still be applied — not silently dropped.
+
+    Scenario: m1 AI-classified as SUPPLIER (wrong). Human corrects to CLIENT. m2 arrives later in the
+    same thread; AI also says SUPPLIER → m2 becomes the new dominant_mid.  Without the fallback search
+    recl.get("m2") returns {} and the thread reverts to SUPPLIER.  With the fix it finds the correction
+    on m1 via all_message_ids and applies it."""
+    rows = [_row("t1", "m1", ago(10), counterparty="SUPPLIER"),
+            _row("t1", "m2", ago(2),  counterparty="SUPPLIER")]
+    out = build_fila(rows, now=NOW, reclassified={"m1": {"counterparty": "CLIENT"}})
+    assert len(out) == 1
+    assert out[0]["counterparty"] == "CLIENT"
+    assert out[0]["trust"]["committed"] is True
 
 
 # ── technical edges ──────────────────────────────────────────────────────────────────────────────

@@ -152,7 +152,7 @@ def test_thread_returns_all_messages_in_thread(store: CrmStore) -> None:
     store.record(make_env("<r2@example.com>", subject="Re: Original", date="2026-01-03T10:00:00",
                           references=[root_id, "<r1@example.com>"]), make_verdict())
 
-    result = store.thread(root_id)
+    result = store.thread("mid:root@example.com")   # canonical form of root_id
     assert len(result) == 3
     # ordered oldest-first
     assert result[0]["message_id"] == root_id
@@ -162,7 +162,7 @@ def test_thread_returns_all_messages_in_thread(store: CrmStore) -> None:
 def test_thread_root_message_only(store: CrmStore) -> None:
     """A standalone message (no replies) returns just itself."""
     store.record(make_env("<solo@example.com>"), make_verdict())
-    result = store.thread("<solo@example.com>")
+    result = store.thread("mid:solo@example.com")   # canonical form
     assert len(result) == 1
     assert result[0]["message_id"] == "<solo@example.com>"
 
@@ -382,7 +382,7 @@ def test_connection_is_usable_from_a_worker_thread(store):
 
     store.record(make_env("root@x"), make_verdict())
     with ThreadPoolExecutor(max_workers=1) as ex:
-        rows = ex.submit(store.thread, "root@x").result()
+        rows = ex.submit(store.thread, "mid:root@x").result()   # canonical form
         rel = ex.submit(store.related, "root@x").result()
     assert [r["message_id"] for r in rows] == ["root@x"]
     assert rel == {"thread": [], "by_contact": [], "by_entity": []}

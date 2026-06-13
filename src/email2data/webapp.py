@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (accounts as _accounts, classifier, cockpit, contrapartes_page, crm as _crm,
-               export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
+from . import (accounts as _accounts, classifier, clientdraft, cockpit, contrapartes_page,
+               crm as _crm, export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
                project as _project, projetos_page, replydraft, report)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
@@ -301,19 +301,29 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
     @app.get("/api/thread/{thread_root:path}")
     def api_thread(thread_root: str):
-        """Return the messages of one email thread with body text, for the Fila inline preview.
+        """Return the messages of one email thread with body text.
 
-        Uses the CRM thread index + the corpus .eml files. Each message carries:
-        subject, from_email, date, direction, counterparty, body (capped at 3000 chars),
-        has_attachment, and attachment names.  Returns 503 when CRM is unavailable.
+        Merges two sources:
+        1. IMAP messages in the CRM thread index (directly received or sent).
+        2. Embedded messages extracted from forwarded/reply chains — emails that were never
+           separate IMAP messages but are only available as quoted blocks inside a received
+           message (e.g. the original client inquiry inside an internal forward).
+
+        Both are returned in chronological order. Embedded messages carry ``"embedded": true``
+        so the UI can render them with a subtle visual distinction.
         """
+        from .envelope import clean_email_body as _clean_body
+        from .envelope import extract_embedded_messages as _extract_embedded
         from .envelope import parse_eml as _parse_eml
+        from .signals import OUR_DOMAIN
         if _crmdb is None:
             return JSONResponse({"error": "CRM not available"}, status_code=503)
         interactions = _crmdb.thread(thread_root)
         if not interactions:
             return JSONResponse({"error": "thread not found"}, status_code=404)
         messages = []
+        # Track (from_email, date_prefix) of real messages so we don't duplicate as embedded.
+        real_keys: set[tuple[str, str]] = set()
         for row in interactions:
             mid = row.get("message_id", "")
             msg: dict = {
@@ -327,6 +337,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 "to": [],
                 "has_attachment": bool(row.get("has_attach")),
                 "attachments": [],
+                "embedded": False,
             }
             f = _file_for(mid)
             if f:
@@ -334,17 +345,139 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                     env = _parse_eml(Path(f).read_bytes())
                     body = env.get("body_text") or ""
                     msg["body"] = body[:3000]
+                    msg["body_clean"] = _clean_body(body)[:3000]
                     msg["body_truncated"] = len(body) > 3000
-                    # recipients so the UI can show "sent to whom", not just "→ enviado"
-                    msg["to"] = [a.get("email") for a in (env.get("to") or []) if a.get("email")]
                     msg["attachments"] = [
                         {"name": a.get("filename") or "(sem nome)", "type": a.get("content_type", "")}
                         for a in (env.get("attachments") or [])
                     ]
+                    # MIME To: header
+                    msg["to"] = [a.get("email") for a in (env.get("to") or []) if a.get("email")]
+                    # Recover from_email/date when Outlook strips headers (e.g. Trash messages).
+                    if not msg["from_email"]:
+                        msg["from_email"] = (env.get("from") or {}).get("email") or ""
+                    if not msg["date"]:
+                        msg["date"] = env.get("date") or ""
+                    # Recover missing To: from Outlook inline header in the body (Trash messages
+                    # often have no MIME To: but the forwarded header block has Para:/To: lines).
+                    if not msg["to"] and body:
+                        import re as _re
+                        to_m = _re.findall(
+                            r"(?:^|\n)(?:To|Para)\s*:[^\n]*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})",
+                            body[:800], _re.I)
+                        if to_m:
+                            msg["to"] = list(dict.fromkeys(to_m))[:3]
+                    # Re-derive direction from the recovered from_email when the CRM stored
+                    # 'inbound' because the From: header was blank at triage time. A message
+                    # FROM our own domain is never inbound — it's internal (same-domain) or
+                    # outbound (reply to an external address).
+                    if msg["direction"] == "inbound" and msg["from_email"]:
+                        from_domain = msg["from_email"].rsplit("@", 1)[-1].lower() if "@" in msg["from_email"] else ""
+                        is_ours = from_domain == OUR_DOMAIN or from_domain.endswith("." + OUR_DOMAIN)
+                        if is_ours:
+                            has_external_to = any(
+                                (e.rsplit("@", 1)[-1].lower() if "@" in e else "") not in (OUR_DOMAIN, "")
+                                and not (e.rsplit("@", 1)[-1].lower()).endswith("." + OUR_DOMAIN)
+                                for e in msg["to"]
+                            )
+                            msg["direction"] = "outbound" if has_external_to else "internal"
                 except Exception:  # noqa: BLE001
                     pass
+            real_keys.add((msg["from_email"].lower(), (msg["date"] or "")[:10]))
             messages.append(msg)
-        return JSONResponse({"thread_root": thread_root, "messages": messages})
+
+        import re as _re
+
+        # ── Step 1: extract embedded from ALL IMAP messages before any dedup ─
+        # Must run first — dedup may suppress the container message that holds the embedded email.
+        embedded_seen: set[tuple[str, str]] = set(real_keys)
+        embedded_msgs: list[dict] = []
+        anchor_date = next(
+            (m["date"][:10] for m in messages if m.get("date") and "T" in m.get("date", "")), "")
+        for msg in messages:
+            if not msg["body"]:
+                continue
+            for em in _extract_embedded(msg["body"]):
+                key = (em["from_email"].lower(), em["date_raw"].lower()[:10])
+                if key in embedded_seen or not em.get("body"):
+                    continue
+                embedded_seen.add(key)
+                domain = em["from_email"].rsplit("@", 1)[-1].lower() if "@" in em["from_email"] else ""
+                direction = ("internal" if domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN)
+                             else "inbound")
+                time_m = _re.search(r"(\d{1,2}:\d{2})", em["date_raw"])
+                iso_date = (f"{anchor_date}T{time_m.group(1)}"
+                            if anchor_date and time_m else em["date_raw"])
+                embedded_msgs.append({
+                    "message_id": f"embedded:{em['from_email']}:{em['date_raw'][:16]}",
+                    "subject": em.get("subject") or "",
+                    "from_email": em["from_email"],
+                    "date": iso_date,
+                    "direction": direction,
+                    "counterparty": "",
+                    "body": em["body"][:3000],
+                    "body_clean": _clean_body(em["body"])[:3000],
+                    "to": em.get("to_emails") or [],
+                    "has_attachment": False,
+                    "attachments": [],
+                    "embedded": True,
+                })
+
+        # ── Step 2: dedup IMAP messages ───────────────────────────────────────
+        # Outlook saves multiple Trash copies of the same forward. Keep the richest copy per
+        # visible-body fingerprint (most attachments); suppress empty-body messages whose
+        # attachments are already covered by another card.
+
+        def _body_fingerprint(body: str) -> str:
+            """First 120 chars of visible text (before any quoted block)."""
+            pats = [r'(?m)^>.*', r'(?im)^No dia .+', r'(?im)^Em .+escreveu:',
+                    r'(?ims)^\s*De:\s.+', r'(?ims)^\s*From:\s.+']
+            best = -1
+            for p in pats:
+                mm = _re.search(p, body)
+                if mm and (best < 0 or mm.start() < best):
+                    best = mm.start()
+            visible = body[:best].strip() if best >= 0 else body.strip()
+            return visible[:120].lower()
+
+        by_fp: dict[str, list[dict]] = {}
+        no_fp: list[dict] = []
+        for m in messages:
+            fp = _body_fingerprint(m.get("body") or "")
+            if fp:
+                by_fp.setdefault(fp, []).append(m)
+            else:
+                no_fp.append(m)
+
+        deduped: list[dict] = []
+        for group in by_fp.values():
+            deduped.append(max(group, key=lambda x: len(x.get("attachments") or [])))
+
+        # Keep empty-body messages only if they carry attachments not seen elsewhere
+        all_att_names = {a["name"] for m in deduped for a in (m.get("attachments") or [])}
+        for m in no_fp:
+            unique = {a["name"] for a in (m.get("attachments") or [])} - all_att_names
+            if unique:
+                deduped.append(m)
+                all_att_names |= unique
+
+        messages = deduped
+
+        # Merge: real messages first, then embedded sorted by date string (best-effort).
+        # Since embedded date_raw is a human string ("3 de junho de 2026 14:33"), sort by the
+        # time part (HH:MM) which is locale-independent and appears at the end.
+        all_msgs = messages + sorted(embedded_msgs,
+                                     key=lambda m: (m["date"] or "")[-5:])
+        # Re-sort the full list: real messages already have ISO dates; use ISO date when present,
+        # fall back to time suffix for embedded. Simple stable sort keeps relative order of same-date.
+        def _sort_key(m: dict) -> str:
+            d = m.get("date") or ""
+            if "T" in d:
+                return d[:16]           # ISO: "2026-06-03T14:33"
+            return "2026-06-03T" + d[-5:]  # embedded raw: best-effort time-of-day sort
+
+        all_msgs.sort(key=_sort_key)
+        return JSONResponse({"thread_root": thread_root, "messages": all_msgs})
 
     @app.get("/api/relations/{message_id}")
     def get_relations(message_id: str):
@@ -546,6 +679,54 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         result = _export.export_project(pstore, ws, jspecs, adapter, pid, crm_store=_crmdb, force=force)
         return JSONResponse({"ok": result.ok, "external_id": result.external_id, "detail": result.detail})
 
+    def _client_email_template() -> str:
+        """The editable email skeleton (config/client_email_template.md), re-read per request so a
+        playbook edit takes effect without a restart. Falls back to the built-in default."""
+        sp = settings.get("__settings_path__")
+        if not sp:
+            return clientdraft.DEFAULT_TEMPLATE
+        return clientdraft.load_template(Path(sp).parents[1] / "config" / "client_email_template.md")
+
+    def _questions_for(keys: list[str]) -> list[str]:
+        """Map selected base keys → their pt-PT clarifying questions, in registry order (so the
+        rendered list matches the on-screen checklist regardless of click order). Unknown keys
+        and keys without a question are dropped."""
+        wanted = set(keys)
+        return [q for k, _l, _t, q, _s in js.FIELDS if k in wanted and q]
+
+    @app.get("/api/projects/{pid}/draft")
+    def project_draft(pid: str):
+        """The client-email composer state: recipient, default subject, the selectable prompts
+        (jobspec.askables), and the body pre-assembled from the default-ticked (missing must) set —
+        i.e. the historical auto-email, now a starting point the user can edit."""
+        proj = pstore.get(pid)
+        if proj is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        spec, _rd, _p, _c = _project.build_canonical(pstore, ws, jspecs, pid, _crmdb)
+        asks = js.askables(spec)
+        default_keys = [a["key"] for a in asks if a["default"]]
+        body = clientdraft.build_draft(_questions_for(default_keys), _client_email_template())
+        return JSONResponse({
+            "to": proj.get("client_email") or "",
+            "subject": "Re: " + (proj.get("title") or ""),
+            "askables": asks,
+            "body": body,
+        })
+
+    @app.post("/api/projects/{pid}/draft")
+    async def project_draft_build(pid: str, request: Request):
+        """Re-assemble the body for a given selection. Body: ``{selected: [keys], custom: [str]}``.
+        Deterministic — splices the selected questions (+ any free-text custom ones) into the
+        template. The user's manual edits live only in the browser textarea; this just rebuilds the
+        generated baseline when they toggle a prompt or hit Regenerar."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        body = await request.json()
+        selected = [str(k) for k in (body.get("selected") or [])]
+        custom = [str(c).strip() for c in (body.get("custom") or []) if str(c).strip()]
+        questions = _questions_for(selected) + custom
+        return JSONResponse({"body": clientdraft.build_draft(questions, _client_email_template())})
+
     @app.get("/api/attachment/{message_id}/{index}")
     def get_attachment(message_id: str, index: int):
         """Serve one attachment's raw bytes for view/download. Read-only, local, NO parsing.
@@ -692,58 +873,96 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def api_contrapartes():
         return JSONResponse(_clusters_as_dicts(_clusters()))
 
-    @app.get("/contrapartes/{key:path}", response_class=HTMLResponse)
-    def contrapartes_detail(key: str):
-        cls = _clusters()
+    def _contraparte_detail_data(key: str) -> dict[str, Any] | None:
+        """Everything the Contrapartes detail hub needs: the cluster, a navigable timeline (each row
+        carries its ``thread_root`` + direction so the UI can link into the Fila / inbox), server-side
+        rollup ``stats``, the cluster's open Fila threads + projects, and the Para-ti decisions that
+        belong to this contraparte. Returns ``None`` when the key is unknown."""
+        from collections import Counter
         cluster_dict: dict[str, Any] | None = None
-        for c in _clusters_as_dicts(cls):
+        for c in _clusters_as_dicts(_clusters()):
             if c["key"] == key:
                 cluster_dict = c
                 break
         if cluster_dict is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        # Build timeline: all interactions for any email in cluster, sorted oldest-first.
+            return None
+        emails = set(cluster_dict["emails"])
+        # Timeline: every interaction touching any cluster email, deduped, oldest-first. Carries the
+        # navigation handles (thread_root → Fila/inbox, message_id → inbox) + the insight fields.
         timeline: list[dict[str, Any]] = []
+        from_counts: Counter = Counter()
         if _crmdb is not None:
             seen: set[str] = set()
             for email in cluster_dict["emails"]:
                 for row in _crmdb.by_contact(email):
                     mid = row["message_id"]
-                    if mid not in seen:
-                        seen.add(mid)
-                        timeline.append({
-                            "type": "interaction",
-                            "date": row.get("date", ""),
-                            "subject": row.get("subject", ""),
-                            "purpose": row.get("purpose", ""),
-                            "message_id": mid,
-                        })
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    fe = row.get("from_email") or ""
+                    if fe in emails:
+                        from_counts[fe] += 1
+                    timeline.append({
+                        "type": "interaction", "date": row.get("date", ""),
+                        "subject": row.get("subject", ""), "purpose": row.get("purpose", ""),
+                        "message_id": mid, "thread_root": row.get("thread_root") or mid,
+                        "direction": row.get("direction") or "", "priority": row.get("priority") or "",
+                        "has_attachment": bool(row.get("has_attach")), "from_email": fe,
+                    })
             timeline.sort(key=lambda r: r.get("date") or "")
+        thread_set = {t["thread_root"] for t in timeline if t["thread_root"]}
+        dir_counts: Counter = Counter(t["direction"] for t in timeline)
+        purpose_counts: Counter = Counter(t["purpose"] for t in timeline if t["purpose"])
         # Projects whose client_email matches a cluster email.
-        cluster_projects = [
-            p for p in pstore.list()
-            if (p.get("client_email") or "") in cluster_dict["emails"]
+        cluster_projects = [p for p in pstore.list() if (p.get("client_email") or "") in emails]
+        # Fila rows for this cluster (the still-open response queue).
+        cluster_frows = [r for r in _fila_rows() if (r.get("contact") or "") in emails]
+        # Para-ti decisions belonging to this contraparte (by thread, contact, or proposed cluster).
+        gates = [
+            it for it in _para_ti_items()
+            if (it.get("thread_root") in thread_set
+                or (it.get("context") or {}).get("contact") in emails
+                or it.get("email") in emails
+                or (it.get("context") or {}).get("proposed_cluster") == key)
         ]
-        # Fila rows for this cluster
-        cluster_frows = [
-            r for r in _fila_rows()
-            if (r.get("contact") or "") in cluster_dict["emails"]
-        ]
+        # Primary email = the cluster address we've heard from most (best target for the inbox jump).
+        primary = (max(cluster_dict["emails"], key=lambda e: from_counts.get(e, 0))
+                   if cluster_dict["emails"] else "")
+        stats = {
+            # Distinct messages actually on record with this contraparte — matches the timeline the
+            # user sees. (The cluster's ``msg_count`` counts per-participant, so it over-counts any
+            # message addressed to several people in the same domain; we don't surface that here.)
+            "messages": len(timeline),
+            "threads": len(thread_set),
+            "inbound": dir_counts.get("inbound", 0), "outbound": dir_counts.get("outbound", 0),
+            "internal": dir_counts.get("internal", 0),
+            "with_attachments": sum(1 for t in timeline if t["has_attachment"]),
+            "purposes": purpose_counts.most_common(6),
+            "we_owe": cluster_dict.get("we_owe_count", 0),
+            "response_risk": cluster_dict.get("response_risk", "none"),
+            "open_projects": cluster_dict.get("open_projects", 0),
+            "first_seen": timeline[0]["date"] if timeline else "",
+            "last_seen": cluster_dict.get("last_seen") or (timeline[-1]["date"] if timeline else ""),
+            "primary_email": primary,
+        }
+        return {"cluster": cluster_dict, "timeline": timeline, "projects": cluster_projects,
+                "fila_rows": cluster_frows, "gates": gates, "stats": stats}
+
+    @app.get("/contrapartes/{key:path}", response_class=HTMLResponse)
+    def contrapartes_detail(key: str):
+        data = _contraparte_detail_data(key)
+        if data is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
         return HTMLResponse(contrapartes_page.build_detail_html(
-            cluster_dict, timeline, cluster_projects, cluster_frows,
-            nav_counts=_nav_counts()))
+            data["cluster"], data["timeline"], data["projects"], data["fila_rows"],
+            stats=data["stats"], gates=data["gates"], nav_counts=_nav_counts()))
 
     @app.get("/api/contrapartes/{key:path}")
     def api_contrapartes_detail(key: str):
-        cls = _clusters()
-        cluster_dict: dict[str, Any] | None = None
-        for c in _clusters_as_dicts(cls):
-            if c["key"] == key:
-                cluster_dict = c
-                break
-        if cluster_dict is None:
+        data = _contraparte_detail_data(key)
+        if data is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse({"cluster": cluster_dict})
+        return JSONResponse(data)   # {cluster, stats, timeline, projects, fila_rows, gates}
 
     # -------------------------------------------------------------------------
     # C3 — Para ti decision inbox
@@ -774,8 +993,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # -------------------------------------------------------------------------
     # C4 — Projetos lens (sidesteps report.py WIP; reuses existing /api/projects*)
     # -------------------------------------------------------------------------
-    @app.get("/projetos", response_class=HTMLResponse)
-    def projetos_view():
+    def _projetos_html() -> str:
         # Build a trimmed summary list (avoid the O(projects×messages) build_canonical per row).
         projects_summary = []
         for p in pstore.list():
@@ -786,7 +1004,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                                          "n_threads": len(pstore.threads_for(p["project_id"]))})
             except Exception:  # noqa: BLE001 — degrade gracefully on a broken project
                 projects_summary.append({**p, "coverage": 0.0, "estimable": False, "n_threads": 0})
-        return HTMLResponse(projetos_page.build_html(projects_summary, nav_counts=_nav_counts()))
+        return projetos_page.build_html(projects_summary, nav_counts=_nav_counts())
+
+    @app.get("/projetos", response_class=HTMLResponse)
+    def projetos_view():
+        return HTMLResponse(_projetos_html())
+
+    @app.get("/projetos/{pid}", response_class=HTMLResponse)
+    def projetos_detail_view(pid: str):
+        # REST deep-link: ``/projetos/<pid>`` is the detail *resource* URL (mirrors
+        # ``/contrapartes/<key>``). The same lens HTML is served — the page JS reads the id from the
+        # path and opens that project's workbench. 404 on an unknown id so a stale/shared link fails
+        # honestly instead of opening an empty workbench.
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return HTMLResponse(_projetos_html())
 
     return app
 
