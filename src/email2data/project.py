@@ -165,20 +165,30 @@ class ProjectStore:
             return None
         return row["value"] if isinstance(row, sqlite3.Row) else row[0]
 
-    def _log_field(self, pid: str, addr: str, op: str, old: Optional[str],
-                   new: Optional[str], source_mid: str) -> None:
+    def _log_field(self, pid: str, addr: str, op: str, old: Optional[str], new: Optional[str],
+                   source_mid: str, *, channel: str = "", asserted_by: str = "",
+                   acquired_at: str = "") -> None:
         self._conn.execute(
-            "INSERT INTO project_field_history(project_id, field, op, old_value, new_value, source_mid, ts)"
-            " VALUES (?,?,?,?,?,?,?)", (pid, addr, op, old, new, source_mid, _now()))
+            "INSERT INTO project_field_history(project_id, field, op, old_value, new_value, source_mid,"
+            " ts, channel, asserted_by, acquired_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (pid, addr, op, old, new, source_mid, _now(), channel, asserted_by, acquired_at or _now()))
 
-    def set_field(self, pid: str, addr: str, value: str, source_mid: str = "") -> None:
+    def set_field(self, pid: str, addr: str, value: str, source_mid: str = "", *,
+                  channel: str = "", asserted_by: str = "", acquired_at: str = "") -> None:
+        """Set a canonical field value, carrying its provenance bundle (ADR-015): ``channel`` (how it
+        was acquired — email/call/meeting/…), ``asserted_by`` (who stated it), ``acquired_at`` (the
+        real-world acquisition time, distinct from the record ``ts``). Append-only history is kept."""
         old = self._field_value(pid, addr)
+        acq = acquired_at or _now()
         self._conn.execute(
-            "INSERT INTO project_fields(project_id, field, value, source_mid, ts) VALUES (?,?,?,?,?)"
+            "INSERT INTO project_fields(project_id, field, value, source_mid, ts, channel, asserted_by,"
+            " acquired_at) VALUES (?,?,?,?,?,?,?,?)"
             " ON CONFLICT(project_id, field) DO UPDATE SET"
-            "  value=excluded.value, source_mid=excluded.source_mid, ts=excluded.ts",
-            (pid, addr, value, source_mid, _now()))
-        self._log_field(pid, addr, "set", old, value, source_mid)
+            "  value=excluded.value, source_mid=excluded.source_mid, ts=excluded.ts,"
+            "  channel=excluded.channel, asserted_by=excluded.asserted_by, acquired_at=excluded.acquired_at",
+            (pid, addr, value, source_mid, _now(), channel, asserted_by, acq))
+        self._log_field(pid, addr, "set", old, value, source_mid,
+                        channel=channel, asserted_by=asserted_by, acquired_at=acq)
         self._touch(pid)
         self._conn.commit()
 
@@ -190,10 +200,26 @@ class ProjectStore:
         self._touch(pid)
         self._conn.commit()
 
+    def add_event(self, pid: str, kind: str, text: str, *, channel: str = "", asserted_by: str = "",
+                  acquired_at: str = "", source_mid: str = "") -> None:
+        """Append an off-email knowledge event — note/decision/opinion/todo (ADR-015). Stored as an
+        append-only ``op='event'`` row in project_field_history under the reserved ``__kind__`` field;
+        it is NEVER a current value in project_fields (it is a log entry, not a spec field)."""
+        from . import workspace as _ws
+        if kind not in _ws.EVENT_KINDS:
+            raise ValueError(f"unknown event kind: {kind!r}")
+        self._conn.execute(
+            "INSERT INTO project_field_history(project_id, field, op, old_value, new_value, source_mid,"
+            " ts, channel, asserted_by, acquired_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (pid, _ws.event_field(kind), _ws.EVENT_OP, None, text, source_mid, _now(),
+             channel, asserted_by, acquired_at or _now()))
+        self._touch(pid)
+        self._conn.commit()
+
     def field_history(self, pid: str, addr: Optional[str] = None) -> list[dict[str, Any]]:
         """Append-only audit of canonical edits, oldest-first. Filter to one address with ``addr``."""
-        sql = ("SELECT field, op, old_value, new_value, source_mid, ts FROM project_field_history"
-               " WHERE project_id=?")
+        sql = ("SELECT field, op, old_value, new_value, source_mid, ts, channel, asserted_by,"
+               " acquired_at FROM project_field_history WHERE project_id=?")
         params: list[Any] = [pid]
         if addr is not None:
             sql += " AND field=?"
@@ -201,11 +227,44 @@ class ProjectStore:
         sql += " ORDER BY ts ASC, rowid ASC"
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
+    def timeline(self, pid: str) -> list[dict[str, Any]]:
+        """The project's full history — field edits (set/clear) AND events — newest-first by
+        ``acquired_at`` (fallback ts). One indexed SELECT over project_field_history (ADR-015): this
+        IS the audit view ("auditing = reading, never reconstructing")."""
+        rows = self._conn.execute(
+            "SELECT field, op, old_value, new_value, source_mid, ts, channel, asserted_by, acquired_at"
+            " FROM project_field_history WHERE project_id=?"
+            " ORDER BY COALESCE(acquired_at, ts) DESC, rowid DESC", (pid,)).fetchall()
+        return [dict(r) for r in rows]
+
     def fields_for(self, pid: str) -> dict[str, tuple[str, str]]:
-        """{address: (value, source_mid)} for this project's canonical decisions."""
+        """{address: (value, source_mid)} for this project's canonical decisions (merge input)."""
         rows = self._conn.execute(
             "SELECT field, value, source_mid FROM project_fields WHERE project_id=?", (pid,)).fetchall()
         return {r["field"]: (r["value"], r["source_mid"] or "") for r in rows}
+
+    def field_provenance(self, pid: str) -> dict[str, dict[str, str]]:
+        """{address: {source_mid, channel, asserted_by, acquired_at}} — full provenance of each
+        current field value, for the workbench provenance chips (ADR-015)."""
+        rows = self._conn.execute(
+            "SELECT field, source_mid, channel, asserted_by, acquired_at"
+            " FROM project_fields WHERE project_id=?", (pid,)).fetchall()
+        return {r["field"]: {"source_mid": r["source_mid"] or "", "channel": r["channel"] or "",
+                             "asserted_by": r["asserted_by"] or "", "acquired_at": r["acquired_at"] or ""}
+                for r in rows}
+
+    def set_summary(self, pid: str, coverage: float, estimable: bool) -> None:
+        """Persist the denormalized Gate-1 summary on the project row so the LIST view never has to
+        recompute build_canonical per row (F3). Recomputed on every write; invalidated on sync."""
+        self._conn.execute("UPDATE projects SET coverage=?, estimable=? WHERE project_id=?",
+                           (float(coverage), int(bool(estimable)), pid))
+        self._conn.commit()
+
+    def invalidate_summaries(self) -> None:
+        """Mark every project's denormalized coverage/estimable stale (NULL) so the next list view
+        lazily recomputes it. Cheap single UPDATE — called after a sync changes the underlying jobspecs."""
+        self._conn.execute("UPDATE projects SET coverage=NULL, estimable=NULL")
+        self._conn.commit()
 
     def has_item_fields(self, pid: str) -> bool:
         for addr in self.fields_for(pid):
@@ -242,34 +301,42 @@ class ProjectStore:
 # -----------------------------------------------------------------------------
 
 def merge_job_fields(specs: list[js.JobSpec]) -> tuple[dict[str, js.SpecField], dict[str, str],
-                                                       dict[str, list[tuple[str, str]]]]:
+                                                       dict[str, list[dict[str, str]]]]:
     """Auto-merge job-level fields across per-message specs (ordered oldest→newest).
 
     Returns (job_fields, provenance, conflicts):
       * job_fields — winning SpecField per JOB_KEY (preserves the winner's source/confirmed).
       * provenance — {key: message_id that supplied the winning value}.
-      * conflicts  — {key: [(value, message_id), …]} when ≥2 DISTINCT non-empty values tie at the
-        winning precedence rank (surfaced, never silently dropped).
+      * conflicts  — {key: [{"value", "source", "ref"}, …]} ONLY for a genuine **contradiction**:
+        ≥2 DISTINCT non-empty values that TIE at the WINNING precedence rank (equal-authority
+        sources disagree). A value cleanly superseded by a higher-rank source — e.g. a user
+        override of a stale ``offline`` value, or any normal refinement across messages — is NOT
+        a conflict, because precedence resolves it. (Per ADR-015: contradiction vs supersession;
+        a single source revising its own value over time is supersession, shown in the timeline,
+        never flagged here.) Only the tied top-rank candidates are surfaced.
     """
     job: dict[str, js.SpecField] = {k: js.SpecField() for k in js.JOB_KEYS}
     provenance: dict[str, str] = {}
     best_rank: dict[str, int] = {k: 0 for k in js.JOB_KEYS}
-    candidates: dict[str, list[tuple[str, str]]] = {k: [] for k in js.JOB_KEYS}
+    candidates: dict[str, list[dict[str, Any]]] = {k: [] for k in js.JOB_KEYS}
     for spec in specs:  # oldest→newest: later message wins ties (>=)
         for k in js.JOB_KEYS:
             fld = spec.job_fields.get(k)
             if not (fld and fld.value):
                 continue
             rank = _SOURCE_RANK.get(fld.source, 0)
-            candidates[k].append((fld.value, spec.message_id))
+            candidates[k].append({"value": fld.value, "source": fld.source,
+                                  "ref": spec.message_id, "rank": rank})
             if rank >= best_rank[k]:
                 best_rank[k] = rank
                 job[k] = js.SpecField(fld.value, fld.source, fld.confirmed)
                 provenance[k] = spec.message_id
-    conflicts = {
-        k: cands for k, cands in candidates.items()
-        if len({v for v, _ in cands}) > 1
-    }
+    conflicts: dict[str, list[dict[str, str]]] = {}
+    for k, cands in candidates.items():
+        top = [c for c in cands if c["rank"] == best_rank[k]]  # only equal-authority candidates
+        if len({c["value"] for c in top}) > 1:
+            conflicts[k] = [{"value": c["value"], "source": c["source"], "ref": c["ref"]}
+                            for c in top]
     return job, provenance, conflicts
 
 
@@ -294,8 +361,13 @@ def canonical_spec(pid: str, title: str, client_name: str, n_items: int,
         job_fields=job, items=items,
     )
     # Authoritative overlay: project-level human decisions win over the auto-merge, for job AND items.
+    # Custom (non-registry) fields ride their OWN channel — confirm() would silently no-op them and
+    # readiness/askables iterate the static registry, so they render but never gate estimability (ADR-015).
     for addr, (value, source_mid) in project_fields.items():
-        js.confirm(spec, addr, value)
+        if js.is_custom_addr(addr):
+            spec.custom_fields[addr] = js.SpecField(value, "user", True)
+        else:
+            js.confirm(spec, addr, value)
         provenance[addr] = source_mid or "user"
     return spec, js.readiness(spec), provenance, conflicts
 

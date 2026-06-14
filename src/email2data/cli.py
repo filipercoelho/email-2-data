@@ -227,6 +227,8 @@ def cmd_jobspec(args: argparse.Namespace) -> int:
     print("  -> out/jobspecs.jsonl · gold-set scaffold -> out/spec_labelsheet.csv")
 
     if args.score:
+        from . import jobspec as js
+        base = Path(settings["__settings_path__"]).parents[1]
         lp = base / "labels" / "spec_labels.csv"
         if lp.exists():
             print("\n  draft-vs-label agreement:", json.dumps(js.score_drafts(specs, _read_spec_labels(lp))))
@@ -387,9 +389,10 @@ def cmd_project(args: argparse.Namespace) -> int:
                 if vals:
                     print(f"  item #{i}: " + "; ".join(f"{k}={v}" for k, v in vals.items()))
             if conflicts:
-                print("  ⚠ conflicts (differing values across threads):")
+                print("  ⚠ conflicts (equal-authority sources disagree):")
                 for k, cands in conflicts.items():
-                    print(f"    {k}: " + " | ".join(f"{v} ({m[:20]})" for v, m in cands))
+                    print(f"    {k}: " + " | ".join(
+                        f"{c['value']} ({c['source']})" for c in cands))
             return 0
 
         if args.action == "export":

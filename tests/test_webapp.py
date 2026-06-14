@@ -322,3 +322,76 @@ def test_project_view_flags_dangling_threads(tmp_path):
     v = c.get(f"/api/projects/{pid}").json()
     assert v["dangling_threads"] == ["ghost-root"]
     assert "mid:live" in v["threads"]
+
+
+# ── ADR-015: knowledge capture (custom fields, events, timeline, provenance) ───────────────────
+
+def test_custom_field_renders_but_never_gates_estimability(tmp_path):
+    """A custom field is stored + rendered (custom_fields channel) and carries provenance, but is
+    tier=context: it must NOT appear in readiness.missing nor flip estimable (ADR-015 G1 fix)."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "Custom"}).json()["project_id"]
+    r = c.post(f"/api/projects/{pid}/custom-field",
+               json={"name": "Acabamento especial", "value": "anodizado",
+                     "channel": "call", "asserted_by": "João", "acquired_at": "2026-06-13"})
+    assert r.status_code == 200
+    v = r.json()
+    addr = "custom:Acabamento especial"
+    assert v["custom_fields"][addr]["value"] == "anodizado"          # rendered, not dropped
+    assert addr not in v["readiness"]["missing"]                      # never a gate gap
+    assert v["readiness"]["estimable"] is False                       # didn't fabricate estimability
+    assert v["field_provenance"][addr]["channel"] == "call"
+    assert v["field_provenance"][addr]["asserted_by"] == "João"
+    # name+value required
+    assert c.post(f"/api/projects/{pid}/custom-field", json={"name": "", "value": "x"}).status_code == 400
+    # editing a custom field goes through /field (custom: address accepted); a non-registry,
+    # non-custom address is still rejected (the zero-hallucination guard on field addresses).
+    assert c.post(f"/api/projects/{pid}/field",
+                  json={"field": addr, "value": "polido"}).json()["custom_fields"][addr]["value"] == "polido"
+    assert c.post(f"/api/projects/{pid}/field", json={"field": "bogus", "value": "x"}).status_code == 400
+
+
+def test_field_write_carries_provenance_bundle(tmp_path):
+    """A normal field write threads the provenance bundle (channel/who/when) through to the store."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "Prov"}).json()["project_id"]
+    v = c.post(f"/api/projects/{pid}/field",
+               json={"field": "deadline", "value": "2026-08-15",
+                     "channel": "meeting", "asserted_by": "Cliente", "acquired_at": "2026-06-10"}).json()
+    assert v["job_fields"]["deadline"]["value"] == "2026-08-15"
+    assert v["field_provenance"]["deadline"] == {
+        "source_mid": "", "channel": "meeting", "asserted_by": "Cliente", "acquired_at": "2026-06-10"}
+
+
+def test_event_capture_and_timeline(tmp_path):
+    """Events (note/decision/opinion/todo) are captured verbatim (no LLM) and surface in the
+    timeline newest-first by acquired_at, alongside field edits — one read, no reconstruction."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "Cap"}).json()["project_id"]
+    c.post(f"/api/projects/{pid}/field", json={"field": "deadline", "value": "2026-07-01",
+                                               "channel": "email", "acquired_at": "2026-06-01"})
+    assert c.post(f"/api/projects/{pid}/event",
+                  json={"kind": "decision", "text": "avançar em inox",
+                        "channel": "call", "asserted_by": "Pedro", "acquired_at": "2026-06-13"}).status_code == 200
+    c.post(f"/api/projects/{pid}/event", json={"kind": "note", "text": "cliente sem pressa",
+                                               "channel": "meeting", "acquired_at": "2026-06-05"})
+    # bad kind / empty text rejected
+    assert c.post(f"/api/projects/{pid}/event", json={"kind": "bogus", "text": "x"}).status_code == 400
+    assert c.post(f"/api/projects/{pid}/event", json={"kind": "note", "text": ""}).status_code == 400
+    tl = c.get(f"/api/projects/{pid}/timeline").json()["timeline"]
+    # newest-first by acquired_at: decision(06-13) > note(06-05) > field set(06-01)
+    assert [r["new_value"] for r in tl] == ["avançar em inox", "cliente sem pressa", "2026-07-01"]
+    assert [r["op"] for r in tl] == ["event", "event", "set"]
+    assert tl[0]["field"] == "__decision__" and tl[0]["channel"] == "call" and tl[0]["asserted_by"] == "Pedro"
+    assert c.get("/api/projects/zzz/timeline").status_code == 404
+
+
+def test_projetos_page_ships_capture_ui(tmp_path):
+    """The Projetos lens ships the ADR-015 capture UI (TestClient can't run JS, but it can assert
+    the wiring is shipped): tab strip, capture surface, timeline, conflict banner, and the new
+    project-scoped endpoints the JS calls."""
+    html = _client(tmp_path).get("/projetos").text
+    for marker in ('class="ptabs"', "function captureHTML", "function timelineHTML", "function showTab",
+                   "function contestedBanner", "_registarFromURL", "/custom-field", "/event",
+                   "/timeline", 'data-tab="registar"'):
+        assert marker in html, marker

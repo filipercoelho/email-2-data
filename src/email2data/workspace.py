@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS projects (
     created_ts   TEXT,
     updated_ts   TEXT,
     external_id  TEXT,               -- external system id (e.g. materials-costing PRJ-xxxx); NULL until exported
-    external_ts  TEXT
+    external_ts  TEXT,
+    coverage     REAL,               -- denormalized Gate-1 coverage (0-1), recomputed on write/sync (v3)
+    estimable    INTEGER             -- denormalized Gate-1 estimable flag, recomputed on write/sync (v3)
 );
 CREATE TABLE IF NOT EXISTS project_threads (
     project_id  TEXT NOT NULL,
@@ -56,24 +58,30 @@ CREATE TABLE IF NOT EXISTS project_threads (
 -- The canonical, cross-thread merge target. Mirrors `decisions` but keyed by project_id, and reuses
 -- the SAME wire address scheme (jobspec.address): "deadline" (job-level) or "material#0" (per item).
 CREATE TABLE IF NOT EXISTS project_fields (
-    project_id TEXT NOT NULL,
-    field      TEXT NOT NULL,
-    value      TEXT NOT NULL,
-    source_mid TEXT,                 -- provenance: message the value came from ("" if hand-typed)
-    ts         TEXT,
+    project_id  TEXT NOT NULL,
+    field       TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    source_mid  TEXT,                -- provenance: message the value came from ("" if hand-typed)
+    ts          TEXT,
+    channel     TEXT,                -- provenance: how it was acquired (email|call|meeting|whatsapp|sms|manual) (v3)
+    asserted_by TEXT,                -- provenance: who stated it (the counterparty contact) (v3)
+    acquired_at TEXT,                -- when the knowledge was acquired in the real world (!= ts/recorded) (v3)
     PRIMARY KEY (project_id, field)
 );
 -- Append-only audit of canonical-field edits. project_fields overwrites in place; this keeps the
 -- prior value/source so a hand-curated decision is never silently lost (mirrors why
 -- reclassifications keeps value_auto alongside value_human). op ∈ set | clear.
 CREATE TABLE IF NOT EXISTS project_field_history (
-    project_id TEXT NOT NULL,
-    field      TEXT NOT NULL,
-    op         TEXT NOT NULL,        -- "set" | "clear"
-    old_value  TEXT,                 -- value before this edit (NULL if none)
-    new_value  TEXT,                 -- value after this edit (NULL on clear)
-    source_mid TEXT,
-    ts         TEXT
+    project_id  TEXT NOT NULL,
+    field       TEXT NOT NULL,       -- a spec field address, OR a reserved __kind__ for an event (v3)
+    op          TEXT NOT NULL,       -- "set" | "clear" | "event" (note/decision/opinion/todo) (v3)
+    old_value   TEXT,                -- value before this edit (NULL if none / for events)
+    new_value   TEXT,                -- value after this edit (NULL on clear); the event text for events
+    source_mid  TEXT,
+    ts          TEXT,
+    channel     TEXT,                -- provenance: how it was acquired (v3)
+    asserted_by TEXT,                -- provenance: who stated it (v3)
+    acquired_at TEXT                 -- when the knowledge was acquired (timeline sort key; v3)
 );
 CREATE INDEX IF NOT EXISTS ix_pfh_project ON project_field_history(project_id, field);
 -- Thread-level response state (the cockpit Fila): one owner + a handled flag per email thread, keyed
@@ -97,13 +105,25 @@ CREATE TABLE IF NOT EXISTS identity_links (
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
 # PRAGMA user_version and runs any pending migrations (see `_migrate`). Unlike crm.db, this database
-# is never rebuilt, so it must evolve in place.
-SCHEMA_VERSION = 2
+# is never rebuilt, so it must evolve in place. v3 (2026-06-14): provenance columns + denormalized
+# coverage/estimable + reserved __kind__ events in project_field_history (ADR-015).
+SCHEMA_VERSION = 3
 
 RECLASSIFY_FIELDS = frozenset({"counterparty", "purpose", "priority"})
 # Reserved decision field: how many line items this job has (human override of the LLM's item count).
 # Stored in the same decisions table; it is structural, not a spec field, so it is never confirmed back.
 ITEM_COUNT_FIELD = "__n_items__"
+
+# Off-email knowledge (ADR-015): NOTE/DECISION/OPINION/TODO are append-only rows in
+# project_field_history under a reserved field namespace (op="event"), mirroring ITEM_COUNT_FIELD.
+# A single table → the timeline is one indexed SELECT, no second store, no UNION.
+EVENT_KINDS = ("note", "decision", "opinion", "todo")
+EVENT_OP = "event"
+
+
+def event_field(kind: str) -> str:
+    """The reserved project_field_history.field address for an event of ``kind`` (e.g. ``__note__``)."""
+    return f"__{kind}__"
 
 
 class Workspace:
@@ -121,20 +141,49 @@ class Workspace:
         self._migrate()
         return self
 
+    def _add_column(self, table: str, col: str, decl: str) -> None:
+        """Idempotently add a column to an existing table. ``CREATE TABLE IF NOT EXISTS`` cannot add
+        columns to a table that already exists, so a new column on the never-rebuilt precious DB MUST
+        go through an explicit ALTER here. Guarded by ``PRAGMA table_info`` so it is a no-op on a fresh
+        DB (which already has the column from ``SCHEMA``) and safe to re-run."""
+        assert self._conn is not None
+        cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
     def _migrate(self) -> None:
         """Bring the precious DB up to ``SCHEMA_VERSION`` in place. This DB is never rebuilt (unlike
         crm.db), so it must evolve via migrations rather than a drop-and-recreate.
 
-        ``SCHEMA`` (all ``CREATE TABLE IF NOT EXISTS``) has already additively brought a v0 /
-        pre-versioning DB up to the current table shape, so the baseline step just stamps the version.
-        Future *breaking* changes (column drops/renames, backfills) get a numbered block here:
-        ``if version < 2: <ALTER …>; version = 2`` — then bump ``SCHEMA_VERSION``.
+        ``SCHEMA`` (all ``CREATE TABLE IF NOT EXISTS``) additively delivers NEW TABLES and brings a
+        fresh DB to the latest shape. But it CANNOT add a new COLUMN to a table that already exists —
+        so every column added in a new version needs an explicit, guarded ``ALTER TABLE ADD COLUMN``
+        in a numbered ``if version < N:`` block here, BEFORE the version stamp. A forgotten ALTER
+        silently ships a column-less DB that throws "no such column" on first write (ADR-010/-015).
         """
         assert self._conn is not None
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             return
-        # (no breaking migrations yet — additive schema is handled by CREATE TABLE IF NOT EXISTS)
+        if version < 3:
+            # Provenance bundle on the canonical field tables + the audit/event log.
+            for table in ("project_fields", "project_field_history"):
+                self._add_column(table, "channel", "TEXT")
+                self._add_column(table, "asserted_by", "TEXT")
+                self._add_column(table, "acquired_at", "TEXT")
+            # Denormalized Gate-1 summary on the project row (read by the cheap list view).
+            self._add_column("projects", "coverage", "REAL")
+            self._add_column("projects", "estimable", "INTEGER")
+            # Backfill provenance for existing rows: a real source_mid came from an email; the
+            # ''/sentinel hand-typed rows are manual. acquired_at falls back to the record time.
+            self._conn.execute(
+                "UPDATE project_fields SET channel = CASE WHEN source_mid IS NOT NULL "
+                "AND source_mid NOT IN ('', 'user') THEN 'email' ELSE 'manual' END, "
+                "acquired_at = ts WHERE channel IS NULL")
+            self._conn.execute(
+                "UPDATE project_field_history SET channel = CASE WHEN source_mid IS NOT NULL "
+                "AND source_mid NOT IN ('', 'user') THEN 'email' ELSE 'manual' END, "
+                "acquired_at = ts WHERE channel IS NULL")
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 

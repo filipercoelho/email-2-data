@@ -108,6 +108,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 _crmdb.close()
             _db = _outdir() / "crm.db"
             _crmdb = _crm.CrmStore(_db).connect() if _db.exists() else None
+        # New mail can change a project's coverage/estimable → mark the denormalized summaries stale
+        # so the next list view recomputes them lazily (F3). Cheap single UPDATE.
+        try:
+            pstore.invalidate_summaries()
+        except Exception:  # noqa: BLE001 — summary upkeep must never break a sync
+            pass
 
     def _run_sync(full: bool = False) -> dict:
         """Fetch new mail + triage new emails, then rebuild render state. Returns counts, a
@@ -239,9 +245,17 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if mid not in jspecs:
             return JSONResponse({"error": "not found"}, status_code=404)
         spec, rd = ws.merge(jspecs[mid])
-        if app.state.client is None:
-            app.state.client = classifier.make_client(settings)
-        return JSONResponse({"reply": replydraft.draft_reply(spec.to_dict(), rd, rpb, app.state.client, settings)})
+        # The Gemini round-trip is BLOCKING — dispatch it OFF the event loop (mirror /api/sync,
+        # NOT a bare in-loop call) so a multi-second LLM call can't freeze the single worker for
+        # every other request (nav badges, list fetches). Any future LLM endpoint must do the same.
+        import anyio
+
+        def _draft():
+            if app.state.client is None:
+                app.state.client = classifier.make_client(settings)
+            return replydraft.draft_reply(spec.to_dict(), rd, rpb, app.state.client, settings)
+
+        return JSONResponse({"reply": await anyio.to_thread.run_sync(_draft)})
 
     @app.post("/api/reply/stream")
     async def reply_stream(request: Request):
@@ -256,10 +270,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if mid not in jspecs:
             return JSONResponse({"error": "not found"}, status_code=404)
         spec, rd = ws.merge(jspecs[mid])
-        if app.state.client is None:
-            app.state.client = classifier.make_client(settings)
 
         def gen():
+            # Runs in Starlette's threadpool (sync generator), so the blocking client init +
+            # token generation stay off the event loop — keep make_client INSIDE the generator.
+            if app.state.client is None:
+                app.state.client = classifier.make_client(settings)
             yield from replydraft.draft_reply_stream(spec.to_dict(), rd, rpb, app.state.client, settings)
 
         return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
@@ -512,20 +528,44 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     pstore = _project.ProjectStore(ws._conn)
 
     def _project_view(pid: str) -> dict:
-        """Canonical spec + readiness + provenance + conflicts + threads/messages for one project."""
+        """Canonical spec + readiness + provenance + conflicts + custom fields + threads for one
+        project. (Timeline is a SEPARATE, lazily-fetched endpoint — keep this default payload light.)"""
         proj = pstore.get(pid)
         mids = _project.message_ids_for(pstore, pid, _crmdb)
         # reuse mids so build_canonical doesn't re-run the CRM thread-expansion (perf: one pass, not two)
         spec, rd, prov, conflicts = _project.build_canonical(pstore, ws, jspecs, pid, _crmdb, mids=mids)
+        # keep the denormalized list summary fresh off the same compute we just did (F3)
+        pstore.set_summary(pid, rd.get("coverage", 0.0), rd.get("estimable", False))
         d = spec.to_dict()
         return {
             "project_id": pid, "project": proj,
             "job_fields": d["job_fields"], "items": d["items"], "readiness": rd,
+            "custom_fields": d["custom_fields"], "field_provenance": pstore.field_provenance(pid),
             "provenance": prov, "conflicts": conflicts,
             "threads": pstore.threads_for(pid),
             "message_ids": mids,
             "dangling_threads": _project.dangling_threads(pstore, pid, _crmdb),
         }
+
+    def _provenance(body: dict) -> dict:
+        """Extract the optional provenance bundle (channel/asserted_by/acquired_at) from a write body."""
+        return {"channel": str(body.get("channel", "") or ""),
+                "asserted_by": str(body.get("asserted_by", "") or ""),
+                "acquired_at": str(body.get("acquired_at", "") or "")}
+
+    def _summary_for(pr: dict) -> tuple[float, bool]:
+        """Cheap (coverage, estimable) for the LIST view: read the denormalized columns; only fall
+        back to a full build_canonical when they're stale/NULL (post-migration or post-sync), then
+        persist so subsequent list renders stay O(1) per row (F3)."""
+        cov, est = pr.get("coverage"), pr.get("estimable")
+        if cov is None or est is None:
+            try:
+                _s, rd, _p, _c = _project.build_canonical(pstore, ws, jspecs, pr["project_id"], _crmdb)
+                cov, est = rd.get("coverage", 0.0), rd.get("estimable", False)
+                pstore.set_summary(pr["project_id"], cov, est)
+            except Exception:  # noqa: BLE001 — a broken project must not break the list
+                cov, est = 0.0, False
+        return float(cov or 0.0), bool(est)
 
     def _resolve_ref(ref: str) -> tuple[str, str, list[dict]]:
         """Resolve a project source reference → (thread_root, seed_message_id, thread_rows).
@@ -545,9 +585,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def list_projects(archived: bool = False):
         out = []
         for pr in pstore.list(include_archived=archived):
-            _spec, rd, _p, _c = _project.build_canonical(pstore, ws, jspecs, pr["project_id"], _crmdb)
+            cov, est = _summary_for(pr)   # denormalized read (F3); no per-row build_canonical
             out.append({**pr, "n_threads": len(pstore.threads_for(pr["project_id"])),
-                        "coverage": rd.get("coverage", 0.0), "estimable": rd.get("estimable", False)})
+                        "coverage": cov, "estimable": est})
         return JSONResponse(out)
 
     @app.post("/api/projects")
@@ -626,10 +666,52 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         field = str(body.get("field", ""))
         value = str(body.get("value", "")).strip()
         base, _i = js.parse_address(field)
-        if base not in {k for k, _, _, _, _ in js.FIELDS}:
+        # a registry address (the 14 fields, incl per-item #i) OR a custom:<label> field (ADR-015).
+        if not (base in _keys or js.is_custom_addr(field)):
             return JSONResponse({"error": "bad field"}, status_code=400)
-        pstore.set_field(pid, field, value) if value else pstore.clear_field(pid, field)
+        if value:
+            pstore.set_field(pid, field, value, **_provenance(body))
+        else:
+            pstore.clear_field(pid, field)
         return JSONResponse(_project_view(pid))
+
+    @app.post("/api/projects/{pid}/custom-field")
+    async def project_custom_field(pid: str, request: Request):
+        """Add a per-project custom field (ADR-015): tier=context, rendered + audited but never part
+        of the estimable gate. Stored at ``custom:<name>``; subsequent edits go through /field."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        value = str(body.get("value", "")).strip()
+        if not name or not value:
+            return JSONResponse({"error": "name and value required"}, status_code=400)
+        pstore.set_field(pid, js.CUSTOM_PREFIX + name, value, **_provenance(body))
+        return JSONResponse(_project_view(pid))
+
+    @app.post("/api/projects/{pid}/event")
+    async def project_event(pid: str, request: Request):
+        """Capture an off-email knowledge event — note/decision/opinion/todo (ADR-015). Deterministic,
+        no LLM: the text is stored verbatim with its provenance, append-only, in the timeline."""
+        from .workspace import EVENT_KINDS
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        body = await request.json()
+        kind = str(body.get("kind", "")).strip().lower()
+        text = str(body.get("text", "")).strip()
+        if kind not in EVENT_KINDS or not text:
+            return JSONResponse(
+                {"error": "kind (note/decision/opinion/todo) and text required"}, status_code=400)
+        pstore.add_event(pid, kind, text, **_provenance(body))
+        return JSONResponse({"ok": True, "kind": kind})
+
+    @app.get("/api/projects/{pid}/timeline")
+    def project_timeline(pid: str):
+        """The project's audit timeline — field edits (set/clear) + events, newest-first by
+        acquired_at (ADR-015). Separate from the detail payload so the workbench stays light."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"timeline": pstore.timeline(pid)})
 
     @app.post("/api/projects/{pid}/item/add")
     async def project_item_add(pid: str):
@@ -778,9 +860,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             identity_links=ws.identity_links(),
         )
 
-    def _clusters_as_dicts(cls: list[_accounts.AccountCluster]) -> list[dict[str, Any]]:
-        """Serialize clusters + enrich with Fila response-risk for the UI."""
-        frows = _fila_rows()
+    def _clusters_as_dicts(cls: list[_accounts.AccountCluster],
+                           frows: list | None = None) -> list[dict[str, Any]]:
+        """Serialize clusters + enrich with Fila response-risk for the UI. Accepts a prebuilt
+        ``frows`` so the caller's Fila build is reused, not recomputed (F3)."""
+        frows = _fila_rows() if frows is None else frows
         # Index fila rows by each email that appears in them
         risk_by_email: dict[str, str] = {}
         owe_by_email: dict[str, int] = {}
@@ -819,12 +903,16 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             })
         return out
 
-    def _nav_counts() -> dict[str, int]:
-        """Live counts for the nav badges (C5). Only shows non-zero."""
-        frows = _fila_rows()
+    def _nav_counts(frows: list | None = None,
+                    clusters: list | None = None) -> dict[str, int]:
+        """Live counts for the nav badges (C5). Only shows non-zero. Accepts an already-built
+        ``frows``/``clusters`` so a page that also renders them doesn't rebuild the whole Fila +
+        cluster set a second time per request (F3)."""
+        frows = _fila_rows() if frows is None else frows
+        clusters = _clusters() if clusters is None else clusters
         active = len(frows)
         para_ti_count = len(para_ti.all_items(
-            frows, _clusters(),
+            frows, clusters,
             {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])},
         ))
         return {k: v for k, v in {"fila": active, "para-ti": para_ti_count}.items() if v}
@@ -832,10 +920,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     @app.get("/", response_class=HTMLResponse)
     @app.get("/fila", response_class=HTMLResponse)
     def fila():
+        frows = _fila_rows()  # build once, share with the nav badges (F3)
         return HTMLResponse(fila_page.build_fila_html(
-            _fila_rows(), _team,
+            frows, _team,
             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            nav_counts=_nav_counts()))
+            nav_counts=_nav_counts(frows=frows)))
 
     @app.get("/api/fila")
     def api_fila():
@@ -866,8 +955,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     @app.get("/contrapartes", response_class=HTMLResponse)
     def contrapartes_list():
         cls = _clusters()
+        frows = _fila_rows()  # build Fila + clusters once, reuse for both the list and the badges (F3)
         return HTMLResponse(contrapartes_page.build_list_html(
-            _clusters_as_dicts(cls), nav_counts=_nav_counts()))
+            _clusters_as_dicts(cls, frows=frows), nav_counts=_nav_counts(frows=frows, clusters=cls)))
 
     @app.get("/api/contrapartes")
     def api_contrapartes():
@@ -967,14 +1057,19 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # -------------------------------------------------------------------------
     # C3 — Para ti decision inbox
     # -------------------------------------------------------------------------
-    def _para_ti_items() -> list[dict[str, Any]]:
-        frows = _fila_rows()
+    def _para_ti_items(frows: list | None = None,
+                       clusters: list | None = None) -> list[dict[str, Any]]:
+        frows = _fila_rows() if frows is None else frows
+        clusters = _clusters() if clusters is None else clusters
         all_threads = {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])}
-        return para_ti.all_items(frows, _clusters(), all_threads)
+        return para_ti.all_items(frows, clusters, all_threads)
 
     @app.get("/para-ti", response_class=HTMLResponse)
     def para_ti_view():
-        return HTMLResponse(para_ti_page.build_html(_para_ti_items(), nav_counts=_nav_counts()))
+        frows = _fila_rows()  # build once, reuse for items + badges (F3)
+        clusters = _clusters()
+        return HTMLResponse(para_ti_page.build_html(
+            _para_ti_items(frows, clusters), nav_counts=_nav_counts(frows=frows, clusters=clusters)))
 
     @app.get("/api/para-ti")
     def api_para_ti():
@@ -994,16 +1089,14 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # C4 — Projetos lens (sidesteps report.py WIP; reuses existing /api/projects*)
     # -------------------------------------------------------------------------
     def _projetos_html() -> str:
-        # Build a trimmed summary list (avoid the O(projects×messages) build_canonical per row).
+        # Cheap list: read the denormalized coverage/estimable off each project row (F3). Only a
+        # stale/NULL summary (post-migration / post-sync) triggers a single build_canonical that then
+        # persists — so this is no longer an O(projects×messages) recompute on every render.
         projects_summary = []
         for p in pstore.list():
-            try:
-                _, rd, _, _ = _project.build_canonical(pstore, ws, jspecs, p["project_id"], _crmdb)
-                projects_summary.append({**p, "coverage": rd.get("coverage", 0.0),
-                                         "estimable": rd.get("estimable", False),
-                                         "n_threads": len(pstore.threads_for(p["project_id"]))})
-            except Exception:  # noqa: BLE001 — degrade gracefully on a broken project
-                projects_summary.append({**p, "coverage": 0.0, "estimable": False, "n_threads": 0})
+            cov, est = _summary_for(p)
+            projects_summary.append({**p, "coverage": cov, "estimable": est,
+                                     "n_threads": len(pstore.threads_for(p["project_id"]))})
         return projetos_page.build_html(projects_summary, nav_counts=_nav_counts())
 
     @app.get("/projetos", response_class=HTMLResponse)

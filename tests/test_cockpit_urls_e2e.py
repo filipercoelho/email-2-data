@@ -165,6 +165,26 @@ def test_contrapartes_detail_navigates_to_related_data(live_app, browser):
         page.close()
 
 
+def test_registar_capture_deep_links_and_writes_timeline(live_app, browser):
+    """ADR-015 capture: /projetos/<pid>?registar=nota deep-links straight into the Registar tab, and
+    capturing a note (deterministic, no LLM) appends it to the timeline — proving the off-email
+    knowledge path works end-to-end in a real browser, and that ?registar view-state survives load."""
+    base, pid = live_app
+    page = browser.new_page()
+    try:
+        page.goto(f"{base}/projetos/{pid}?registar=nota")
+        page.wait_for_selector("#_captext", timeout=5000)
+        assert page.is_visible("#_captext")                                   # capture surface shown
+        assert "on" in (page.get_attribute('.ptab-btn[data-tab="registar"]', "class") or "")
+        page.fill("#_captext", "Cliente confirmou inox 304 por telefone")
+        page.click("#_capsave")
+        page.wait_for_selector("#_timeline .tl-row", timeout=5000)            # save -> timeline tab
+        assert "inox 304" in page.inner_text("#_timeline")
+        page.wait_for_function("!location.search.includes('registar=')", timeout=5000)
+    finally:
+        page.close()
+
+
 def test_fila_counterparty_filter_is_deep_linkable(live_app, browser):
     """Loading /?counterparty=CLIENT applies the filter from the URL (the row survives); an unknown
     counterparty filters everything out — proving the query param actually drives the view."""

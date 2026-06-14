@@ -1320,7 +1320,7 @@ async function renderProjectDetail(pid){
     <div style="font-weight:700;font-size:12px;margin-bottom:4px">Peça #${i}</div>
     ${ITEM_KEYS.map(k=>projFieldRow(pid,k+'#'+i,JOBlabels[k]||k,it[k],prov)).join('')}
   </div>`).join('');
-  const conf=(d.conflicts&&Object.keys(d.conflicts).length)?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:9px;padding:8px;margin:8px 0;font-size:12px">⚠ Valores divergentes entre threads:<br>${Object.entries(d.conflicts).map(([k,c])=>`<b>${esc(k)}</b>: `+c.map(x=>esc(x[0])+' ('+esc((x[1]||'').slice(0,18))+')').join(' | ')).join('<br>')}</div>`:'';
+  const conf=(d.conflicts&&Object.keys(d.conflicts).length)?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:9px;padding:8px;margin:8px 0;font-size:12px">⚠ Valores divergentes entre threads:<br>${Object.entries(d.conflicts).map(([k,c])=>`<b>${esc(k)}</b>: `+c.map(x=>esc(x.value)+' ('+esc((x.source||x.ref||'').slice(0,18))+')').join(' | ')).join('<br>')}</div>`:'';
   const dang=(d.dangling_threads&&d.dangling_threads.length)?`<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:9px;padding:8px;margin:8px 0;font-size:12px">⚠ Thread(s) anexada(s) sem correspondência no CRM atual (sem mensagens carregadas — reconstrua o CRM ou remova): ${d.dangling_threads.map(t=>esc(t)).join(', ')}</div>`:'';
   const cov=Math.round((rd.coverage||0)*100);
   const sc=STAGEcol[p.stage]||'#9aa1ab';

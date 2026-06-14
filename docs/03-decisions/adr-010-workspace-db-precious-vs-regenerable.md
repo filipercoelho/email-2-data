@@ -28,6 +28,12 @@ Project never silently loses messages.
 
 ## Consequences
 
-- Breaking migrations to `workspace.db` go through `_migrate`; additive changes via
-  `CREATE TABLE IF NOT EXISTS`. Never drop-and-recreate it.
+- Migrations to `workspace.db` go through `_migrate` (keyed on `user_version`). **New tables**
+  are safe via `CREATE TABLE IF NOT EXISTS`; **new columns on an existing table are NOT** — that
+  statement is a no-op on a table that already exists, so an added column needs an explicit
+  guarded `ALTER TABLE … ADD COLUMN` inside a versioned `if version < N:` block in `_migrate`
+  (the precious DB is never rebuilt, so a forgotten ALTER silently ships a column-less DB that
+  crashes on first write). Pin the upgrade path with a test on a prior-version DB **with rows**,
+  not just a fresh in-memory one. Never drop-and-recreate it. See
+  [ADR-015](adr-015-knowledge-capture-claim-ledger.md) for the v2→v3 example.
 - Trace: `src/email2data/workspace.py`, `project.py`, `crm.py`; README §"Stores & schema".

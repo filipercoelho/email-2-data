@@ -75,6 +75,17 @@ def test_job_field_precedence_user_beats_llm():
     job, prov, conflicts = p.merge_job_fields(specs)
     assert job["deadline"].value == "2026-08-15" and job["deadline"].source == "user"
     assert prov["deadline"] == "m2"
+    # A clean precedence win is NOT a conflict (supersession, not contradiction) — ADR-015.
+    assert "deadline" not in conflicts
+
+
+def test_cross_rank_supersession_is_not_a_conflict():
+    # A user value (rank 3) cleanly supersedes a stale offline value (rank 1): precedence
+    # resolves it, so it must NOT be flagged as a conflict — the live over-firing bug we fixed.
+    specs = [_spec("m1", job={"deadline": ("2026-07-01", "offline")}),
+             _spec("m2", job={"deadline": ("2026-08-15", "user")})]
+    _job, _prov, conflicts = p.merge_job_fields(specs)
+    assert conflicts == {}
 
 
 def test_job_field_recency_breaks_ties():
@@ -83,7 +94,11 @@ def test_job_field_recency_breaks_ties():
              _spec("m2", job={"budget": ("200", "llm")})]
     job, prov, conflicts = p.merge_job_fields(specs)
     assert job["budget"].value == "200" and prov["budget"] == "m2"
-    assert "budget" in conflicts and {v for v, _ in conflicts["budget"]} == {"100", "200"}
+    # Genuine contradiction: two equal-authority (llm vs llm) values disagree -> conflict,
+    # enriched with value + source (ADR-015 conflict shape).
+    assert "budget" in conflicts
+    assert {c["value"] for c in conflicts["budget"]} == {"100", "200"}
+    assert all(c["source"] == "llm" for c in conflicts["budget"])
 
 
 def test_project_field_overrides_auto_merge():

@@ -4,7 +4,7 @@
 | --- | --- |
 | Type | Architecture |
 | Status | Active |
-| Last reviewed | 2026-06-10 |
+| Last reviewed | 2026-06-14 |
 
 How the pipeline is structured and why. The deeper engineering rationale is in
 [approach.md](approach.md) (right-sized v1) and
@@ -57,12 +57,12 @@ webapp.py   FastAPI workspace UI on 127.0.0.1:8042 (live) + static report.html
 | `classifier.py` | Tier-1 | the LLM triage call (via `llm.py`) |
 | `llm.py` | plumbing | provider dispatch (Gemini/Anthropic) + retry-on-empty, shared by all LLM stages |
 | `crm.py` | rollup | interactions (event log) + contacts (person rollup) from headers+verdicts |
-| `jobspec.py` | Phase A | JobSpec (14 vars + provenance + confirmed) + Gate-1 readiness + `askables` (selectable client-email prompts) |
+| `jobspec.py` | Phase A | JobSpec (14 vars + custom fields + provenance + confirmed) + Gate-1 readiness + `askables` (selectable client-email prompts) |
 | `specdraft.py` | Phase B | tiered LLM spec draft for LEAD/PO/estimate only |
 | `replydraft.py` | Phase C | clarifying reply grounded in confirmed-vs-missing fields (never sends) |
 | `clientdraft.py` | Phase C | deterministic client-email composer: splices selected prompts into `config/client_email_template.md` (no LLM, never sends) — ADR-013 |
 | `workspace.py` | write | human decisions (SQLite) overlaying job specs; survive re-runs |
-| `project.py` | entity | cross-thread Projects: many threads → one canonical spec + lifecycle |
+| `project.py` | entity | cross-thread Projects: many threads → one canonical spec + lifecycle + provenance-rich append-only field/event timeline + contradiction detection (ADR-015) |
 | `export.py` | offload | shell-only export to JSON (dry-run) or materials-costing API |
 | `webapp.py` | UI | FastAPI workspace (localhost; never sends; copy/paste) |
 | `schema.py` | contract | `TriageResult` + structured-output schemas + priority derivation |
@@ -98,3 +98,16 @@ open threads → the Fila (`/?thread=`), pending decisions → Para ti, projects
 payload is exposed at `GET /api/contrapartes/<key>` (`{cluster, stats, timeline, projects, fila_rows,
 gates}`). The headline message count is the deduped timeline length, not the cluster's per-participant
 `msg_count`.
+
+The **Projetos workbench** (`/projetos/<pid>`) is a tab strip — *Especificação · Origem · Linha do
+tempo · Registar* — so the page is never one long scroll; only the active panel renders, contradictions
+sit in a banner above the tabs ([ADR-015](../03-decisions/adr-015-knowledge-capture-claim-ledger.md)).
+**Registar** captures off-email knowledge deterministically (no LLM): channel + who + when + a
+`note/decision/opinion/todo` text → `POST /api/projects/<pid>/event`, append-only. **Linha do tempo**
+(`GET /api/projects/<pid>/timeline`) is the audit view — field edits and events newest-first by
+`acquired_at`, with a *removed* state for clears. Custom fields (`POST …/custom-field`,
+`custom:<label>`) render in Especificação as tier=context — never gating estimability. The capture tab
+is deep-linkable as `?registar=nota` view-state (query, not path — it's inline state, not a resource).
+All capture writes land in the precious `workspace.db` (`project_field_history`, provenance columns);
+the projects **list** reads denormalized `coverage`/`estimable` off the project row instead of
+recomputing `build_canonical` per row.

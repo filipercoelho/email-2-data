@@ -97,11 +97,11 @@ ruff check src tests                   # lint
 email2data serve --port 8042           # local workspace UI on http://127.0.0.1:8042
 ```
 
-All tests must pass before handing a change back. **Baseline pin (2026-06-10, `feat/cockpit`):
-244 passed, 3 failed** — the 3 failures are in [tests/test_webapp.py](tests/test_webapp.py)
-(`test_index_renders_the_live_report`, `test_faceted_filter_panel_wired`,
-`test_sync_endpoint_refreshes_render_state`) and reflect in-progress cockpit UI work on this
-branch, not a regression in your change. Re-confirm against this pin; if your change moves the
+All tests must pass before handing a change back. **Baseline pin (2026-06-14, `feat/knowledge-capture`):
+288 passed, 0 failed** (the cockpit work landed on `main`; the knowledge-capture feature — ADR-015 —
+added the precious-DB v3 migration, provenance/events/timeline, custom fields, and the conflict-semantics
+fix). The 6 browser e2e checks in [tests/test_cockpit_urls_e2e.py](tests/test_cockpit_urls_e2e.py) need
+the `e2e` extra + Chrome; they self-skip otherwise. Re-confirm against this pin; if your change moves the
 count, say why explicitly. "Tests pass" is a claim that must be backed by shown output.
 
 ## Conventions

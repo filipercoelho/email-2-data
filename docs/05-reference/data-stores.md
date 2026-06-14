@@ -29,10 +29,16 @@ see [ADR-010](../03-decisions/adr-010-workspace-db-precious-vs-regenerable.md).
 
 ## workspace.db migration discipline
 
-`Workspace.connect` runs `_migrate`, which stamps `user_version` and is where future **breaking**
-migrations go; additive table changes are handled by `CREATE TABLE IF NOT EXISTS`. Never
-drop-and-recreate `workspace.db`. Hand edits live in `project_fields` (always win) and every edit
-is recorded append-only in `project_field_history`.
+`Workspace.connect` runs `_migrate`, which stamps `user_version` and is where migrations go.
+A **new table** is delivered additively by `CREATE TABLE IF NOT EXISTS`; a **new column on an
+existing table is not** (that statement no-ops on an existing table), so it requires a guarded
+`ALTER TABLE … ADD COLUMN` inside an `if version < N:` block in `_migrate`, gated by the version
+check so re-runs are safe. Because this DB is never rebuilt, a missing ALTER silently ships a
+column-less DB that crashes on first write — pin the upgrade with a test on a prior-version DB that
+contains rows (see `tests/test_workspace_migration.py`). Never drop-and-recreate `workspace.db`.
+Hand edits live in `project_fields` (always win) and every edit — plus off-email `__kind__` events
+([ADR-015](../03-decisions/adr-015-knowledge-capture-claim-ledger.md)) — is recorded append-only in
+`project_field_history`.
 
 ## Dangling references
 

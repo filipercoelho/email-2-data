@@ -65,6 +65,23 @@ def parse_address(addr: str) -> tuple[str, Optional[int]]:
     return addr, None
 
 
+# Custom fields (ADR-015): per-project, user-added knowledge that is NOT one of the 14 registry
+# FIELDS. Addressed ``custom:<label>`` so it never collides with a registry key or item address, and
+# carried on its OWN ``JobSpec.custom_fields`` channel — because ``confirm`` no-ops non-registry
+# addresses and ``readiness``/``askables`` iterate the static registry. Custom fields are
+# tier=context: they render in the workbench/timeline but NEVER affect the estimable gate.
+CUSTOM_PREFIX = "custom:"
+
+
+def is_custom_addr(addr: str) -> bool:
+    return addr.startswith(CUSTOM_PREFIX)
+
+
+def custom_label(addr: str) -> str:
+    """The display label of a custom address (``custom:Acabamento`` -> ``Acabamento``)."""
+    return addr[len(CUSTOM_PREFIX):] if is_custom_addr(addr) else addr
+
+
 @dataclass
 class SpecField:
     value: Optional[str] = None
@@ -89,6 +106,9 @@ class JobSpec:
     attachment_names: list[str] = field(default_factory=list)
     job_fields: dict[str, SpecField] = field(default_factory=dict)
     items: list[dict[str, SpecField]] = field(default_factory=list)
+    # Per-project user-added knowledge outside the 14-field registry (ADR-015). Keyed by the full
+    # ``custom:<label>`` address. tier=context — rendered but never part of Gate-1 readiness.
+    custom_fields: dict[str, SpecField] = field(default_factory=dict)
 
     def field_at(self, addr: str) -> Optional[SpecField]:
         """Resolve a wire address to its SpecField (or None if out of range / unknown)."""
@@ -104,6 +124,7 @@ class JobSpec:
             "has_attachment": self.has_attachment, "attachment_names": self.attachment_names,
             "job_fields": {k: f.to_dict() for k, f in self.job_fields.items()},
             "items": [{k: f.to_dict() for k, f in it.items()} for it in self.items],
+            "custom_fields": {k: f.to_dict() for k, f in self.custom_fields.items()},
         }
 
     @classmethod
@@ -124,11 +145,13 @@ class JobSpec:
                 it.setdefault(k, SpecField())
         if not items:
             items = [_empty_item()]
+        custom = {k: SpecField(**v) for k, v in (d.get("custom_fields") or {}).items()}
         return cls(
             message_id=d.get("message_id", ""), subject=d.get("subject", ""),
             counterparty=d.get("counterparty", ""), purpose=d.get("purpose", ""),
             has_attachment=bool(d.get("has_attachment")),
             attachment_names=list(d.get("attachment_names") or []), job_fields=job, items=items,
+            custom_fields=custom,
         )
 
 

@@ -101,6 +101,55 @@ _BODY = """
   .draftbox .dirty .regen:hover{background:#ffedd5}
   .draftbox textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
   .draftbox textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  /* ── tab strip (ADR-015 — only the active panel shows; keeps the page from being one long wall) ── */
+  .ptabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--bd);margin:14px 0 0}
+  .ptab-btn{border:none;background:none;padding:8px 12px;font-size:12.5px;font-weight:600;color:var(--mut);
+    cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .ptab-btn:hover{color:var(--tx)}
+  .ptab-btn.on{color:var(--ac);border-bottom-color:var(--ac)}
+  .ptab-btn .bdg{display:inline-block;min-width:16px;padding:0 5px;margin-left:5px;border-radius:9px;
+    background:var(--bd);color:var(--mut);font-size:10px;font-weight:700;text-align:center}
+  .ptab-btn .bdg.warn{background:#fff7ed;color:#b45309}
+  .ppanel{padding-top:6px}
+  .ppanel.hidden{display:none}
+  /* provenance + conflict chips on a field row */
+  .pchan{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:6px;background:#eef4ff;color:var(--ac);
+    flex:0 0 auto;cursor:default}
+  .frow.conflict .finput{border-color:#fed7aa;background:#fff7ed}
+  .cwarn{font-size:11px;flex:0 0 auto;cursor:help}
+  /* contested-on-top banner */
+  .contested{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:9px 12px;margin:10px 0;font-size:12.5px;color:#92400e}
+  .contested b{color:#7c2d12}
+  .contested .cv{display:inline-block;margin:2px 6px 0 0;padding:1px 7px;border-radius:6px;background:#fff;border:1px solid #fed7aa;font-size:11px}
+  /* custom fields */
+  .custf{display:flex;align-items:center;gap:8px;padding:4px 0}
+  .custf label{flex:0 0 158px;font-size:12.5px;color:var(--mut);text-align:right;font-style:italic}
+  .addcust{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .addcust input{border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit}
+  .addcust .cn{flex:0 0 158px} .addcust .cv2{flex:1;min-width:0}
+  /* ── Registar (capture) surface ─────────────────────────────────────── */
+  .cap{max-width:620px}
+  .cap .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .chip{border:1px solid var(--bd);background:#fff;border-radius:20px;padding:4px 12px;font-size:12px;
+    cursor:pointer;color:var(--mut);font-weight:600}
+  .chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+  .cap .meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .cap .meta input{border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit}
+  .cap textarea{width:100%;box-sizing:border-box;min-height:90px;border:1px solid var(--bd);border-radius:10px;
+    padding:10px 12px;font-size:13px;line-height:1.5;font-family:inherit;resize:vertical}
+  .cap textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .cap .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--mut2);margin:8px 0 4px}
+  /* ── timeline (Linha do tempo) ──────────────────────────────────────── */
+  .tl{border-left:2px solid var(--bd);margin-left:6px;padding-left:14px}
+  .tl-row{position:relative;padding:8px 0;border-bottom:1px solid var(--bd2)}
+  .tl-row:last-child{border-bottom:none}
+  .tl-row::before{content:'';position:absolute;left:-21px;top:13px;width:9px;height:9px;border-radius:50%;background:var(--ac)}
+  .tl-row.removed::before{background:var(--red)}
+  .tl-row.event::before{background:var(--green)}
+  .tl-h{font-size:13px;color:var(--tx)}
+  .tl-h b{font-weight:700}
+  .tl-m{font-size:11px;color:var(--mut2);margin-top:2px}
+  .tl-old{color:var(--mut2);text-decoration:line-through;margin-right:6px}
 </style>
 """
 
@@ -117,6 +166,17 @@ const byKey = {}; FIELDS.forEach(f=>byKey[f.key]=f);
 const JOB_F  = FIELDS.filter(f=>f.scope==='job'  && f.tier!=='context');
 const ITEM_F = FIELDS.filter(f=>f.scope==='item' && f.tier!=='context');
 function srcLabel(s){return s==='user'?'tu':s==='llm'?'IA':s==='offline'?'auto':'';}
+
+/* ── ADR-015: provenance/conflict chips + Registar (capture) state ─────── */
+const CHAN_ICON={call:'📞',meeting:'🤝',whatsapp:'💬',sms:'✉',email:'',manual:''};
+let capChan='call', capKind='note';
+function chanChip(addr){
+  const p=(selected&&selected.field_provenance&&selected.field_provenance[addr])||null;
+  if(!p||!p.channel||!CHAN_ICON[p.channel]) return '';
+  const who=p.asserted_by?(' · '+p.asserted_by):'', when=p.acquired_at?(' · '+p.acquired_at):'';
+  return '<span class="pchan" title="'+esc(p.channel+who+when)+'">'+CHAN_ICON[p.channel]+'</span>';
+}
+function _registarFromURL(){return new URLSearchParams(location.search).get('registar')==='nota';}
 
 /* ── readiness ring ───────────────────────────────────────────────────── */
 function ringHTML(cov, estimable){
@@ -181,11 +241,14 @@ function fieldRow(f, addr, fobj){
   const val=(fobj&&fobj.value)||'';
   const src=(fobj&&fobj.source)||'';
   const miss=!val;
+  const base=addr.split('#')[0];
+  const conflicted=!!(selected&&selected.conflicts&&selected.conflicts[base]);
   const badge=src?'<span class="fsrc s-'+esc(src)+'" title="origem do valor">'+srcLabel(src)+'</span>':'';
-  return '<div class="frow'+(miss?' miss':'')+(f.tier==='should'?' should':'')+'" data-addr="'+esc(addr)+'">'
+  const cw=conflicted?'<span class="cwarn" title="fontes de igual autoridade divergem — ver Linha do tempo">⚠</span>':'';
+  return '<div class="frow'+(miss?' miss':'')+(conflicted?' conflict':'')+(f.tier==='should'?' should':'')+'" data-addr="'+esc(addr)+'">'
     +'<label>'+esc(f.label)+'</label>'
     +'<div class="fctl"><input class="finput" data-addr="'+esc(addr)+'" value="'+esc(val)+'" '
-    +'placeholder="'+esc(f.q||'…')+'" autocomplete="off" spellcheck="false"/>'+badge+'</div>'
+    +'placeholder="'+esc(f.q||'…')+'" autocomplete="off" spellcheck="false"/>'+chanChip(addr)+badge+cw+'</div>'
     +'</div>';
 }
 
@@ -253,33 +316,72 @@ async function resyncDraft(){
   }catch(e){ toast(S.revertido); }
 }
 
+/* contested-on-top: genuine contradictions (equal-authority sources disagree) sit ABOVE the tabs
+   so they're never buried (ADR-015). merge_job_fields only flags real ties now, so this is signal. */
+function contestedBanner(){
+  const cf=selected.conflicts||{}, keys=Object.keys(cf);
+  if(!keys.length) return '';
+  const rows=keys.map(k=>{
+    const lbl=(byKey[k]&&byKey[k].label)||k;
+    const vals=cf[k].map(c=>'<span class="cv">'+esc(c.value)+' · '+esc(srcLabel(c.source)||c.source)+'</span>').join('');
+    return '<div><b>'+esc(lbl)+'</b>: '+vals+'</div>';
+  }).join('');
+  return '<div class="contested">⚠ Valores em conflito (fontes de igual autoridade divergem) — confirma o correto na Especificação:'+rows+'</div>';
+}
+
+/* Registar — deterministic capture of off-email knowledge (no LLM, stored verbatim) */
+function captureHTML(){
+  const chans=[['call','📞 Chamada'],['meeting','🤝 Reunião'],['whatsapp','💬 WhatsApp'],['sms','✉ SMS'],['email','✉ Email'],['manual','✎ Outro']];
+  const kinds=[['note','Nota'],['decision','Decisão'],['opinion','Opinião'],['todo','To-do']];
+  return '<div class="cap">'
+    +'<div class="lbl">Canal</div><div class="chips" id="_capchans">'
+    +chans.map(c=>'<span class="chip'+(c[0]===capChan?' on':'')+'" data-chan="'+c[0]+'">'+c[1]+'</span>').join('')+'</div>'
+    +'<div class="meta"><input id="_capwho" placeholder="quem disse (opcional)" autocomplete="off"/>'
+    +'<input id="_capwhen" type="date" title="quando foi adquirido"/></div>'
+    +'<div class="lbl">Tipo</div><div class="chips" id="_capkinds">'
+    +kinds.map(k=>'<span class="chip'+(k[0]===capKind?' on':'')+'" data-kind="'+k[0]+'">'+k[1]+'</span>').join('')+'</div>'
+    +'<textarea id="_captext" placeholder="O que aconteceu? Conclusão da chamada, decisão, opinião… (guardado tal e qual, sem IA)" spellcheck="false"></textarea>'
+    +'<div style="margin-top:8px"><button class="act-btn accept" id="_capsave">Registar</button></div>'
+    +'</div>';
+}
+
 function detailHTML(){
   const p=selected.project, rd=selected.readiness||{};
-  const job=selected.job_fields||{}, items=selected.items||[];
+  const job=selected.job_fields||{}, items=selected.items||[], customs=selected.custom_fields||{};
   const stages=STAGES.map(s=>'<span class="st'+(p.stage===s?' on':'')+(TERMINAL.has(s)&&p.stage===s?' terminal':'')+'" data-stage="'+s+'">'+s+'</span>').join('');
   const client=esc(p.client_name||p.client_email||'sem cliente');
 
-  /* Origem — source emails (lazy-filled by loadSource) + dangling warning */
+  /* Origem panel — source emails (lazy-filled by loadSource) + dangling warning */
   const dangling=(selected.dangling_threads||[]).length;
   const dwarn=dangling?'<div class="dwarn">⚠ '+dangling+' thread'+(dangling===1?'':'s')+' sem contexto no CRM — reconstrói o crm ou volta a ligar o email.</div>':'';
   const nthreads=(selected.threads||[]).length;
-  const origem='<div class="psec"><h3>Origem <span class="c">'+nthreads+' email'+(nthreads===1?'':'s')+'</span>'
-    +'<button class="item-rm" id="_attachbtn" style="margin-left:auto">+ ligar email</button></h3>'
-    +'<div id="_origem" class="origem"><div class="hint2">a carregar contexto…</div></div>'+dwarn+'</div>';
+  const origem='<div style="display:flex;justify-content:flex-end;margin-bottom:6px">'
+    +'<button class="item-rm" id="_attachbtn">+ ligar email</button></div>'
+    +'<div id="_origem" class="origem"><div class="hint2">a carregar contexto…</div></div>'+dwarn;
 
-  /* Especificação — job-level + per-item editable fields */
+  /* Especificação panel — job-level + per-item editable fields + custom fields + composer */
   const jobRows=JOB_F.map(f=>fieldRow(f,f.key,job[f.key])).join('');
   const itemCards=items.map((it,i)=>
     '<div class="item-card"><div class="ih"><b>peça '+(i+1)+'</b>'
     +(items.length>1?'<button class="item-rm" data-idx="'+i+'">remover</button>':'')+'</div>'
     +ITEM_F.map(f=>fieldRow(f,f.key+'#'+i,it[f.key])).join('')+'</div>').join('');
-  const espec='<div class="psec"><h3>Especificação <span class="c">os campos a vermelho faltam · escreve para preencher</span></h3>'
-    +'<div style="margin-bottom:6px">'+jobRows+'</div>'
-    +itemCards
-    +'<button class="addbtn" id="_additem">+ adicionar peça</button></div>';
+  const custRows=Object.keys(customs).map(addr=>
+    '<div class="frow" data-addr="'+esc(addr)+'"><label style="font-style:italic">'+esc(addr.replace(/^custom:/,''))+'</label>'
+    +'<div class="fctl"><input class="finput" data-addr="'+esc(addr)+'" value="'+esc((customs[addr]||{}).value||'')+'" autocomplete="off" spellcheck="false"/>'
+    +chanChip(addr)+'<span class="fsrc s-user">tu</span></div></div>').join('');
+  const addCust='<div class="addcust"><input class="cn" id="_cfname" placeholder="campo personalizado" autocomplete="off"/>'
+    +'<input class="cv2" id="_cfval" placeholder="valor" autocomplete="off"/><button class="addbtn" id="_cfadd">+ adicionar</button></div>';
+  const custSec='<div class="psec"><h3>Campos personalizados <span class="c">contexto — não contam para o orçamento</span></h3>'+custRows+addCust+'</div>';
+  const espec='<div style="margin-bottom:6px">'+jobRows+'</div>'+itemCards
+    +'<button class="addbtn" id="_additem">+ adicionar peça</button>'+custSec
+    +'<div id="_ask"><div class="hint2">a preparar email…</div></div>'
+    +'<div id="_exportwrap">'+(rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'')+'</div>';
 
-  /* Email para o cliente — the composer, lazy-filled by loadDraft() */
-  const exp=rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'';
+  const tabs='<div class="ptabs">'
+    +'<button class="ptab-btn on" data-tab="espec">Especificação</button>'
+    +'<button class="ptab-btn" data-tab="origem">Origem'+(nthreads?' <span class="bdg">'+nthreads+'</span>':'')+'</button>'
+    +'<button class="ptab-btn" data-tab="timeline">Linha do tempo</button>'
+    +'<button class="ptab-btn" data-tab="registar">Registar</button></div>';
 
   return '<button class="hbtn" id="_backbtn" style="margin-bottom:14px">← Projetos</button>'
     +'<h2 style="margin:0 0 8px;font-size:20px;letter-spacing:-.01em">'+esc(p.title)+'</h2>'
@@ -287,8 +389,52 @@ function detailHTML(){
     +'<span id="_ring">'+ringHTML(rd.coverage||0,rd.estimable||false)+'</span>'
     +'<div class="pstage">'+stages+'</div>'
     +'<span style="color:var(--mut);font-size:12.5px">'+client+'</span></div>'
-    +origem+espec+'<div id="_ask"><div class="hint2">a preparar email…</div></div>'
-    +'<div id="_exportwrap">'+exp+'</div>';
+    +contestedBanner()+tabs
+    +'<div class="ppanel" data-panel="espec">'+espec+'</div>'
+    +'<div class="ppanel hidden" data-panel="origem">'+origem+'</div>'
+    +'<div class="ppanel hidden" data-panel="timeline"><div id="_timeline"><div class="hint2">a carregar histórico…</div></div></div>'
+    +'<div class="ppanel hidden" data-panel="registar">'+captureHTML()+'</div>';
+}
+
+/* ── tab strip (show/hide; lazy-load the timeline; reflect Registar in the URL) ─────────── */
+function showTab(name){
+  const root=$('#_detail'); if(!root) return;
+  root.querySelectorAll('.ptab-btn').forEach(b=>b.classList.toggle('on', b.dataset.tab===name));
+  root.querySelectorAll('.ppanel').forEach(pl=>pl.classList.toggle('hidden', pl.dataset.panel!==name));
+  if(name==='timeline') loadTimeline();
+  try{
+    const want=name==='registar'?(location.pathname+'?registar=nota'):location.pathname;
+    if(location.pathname+location.search!==want) history.replaceState(null,'',want);
+  }catch(_){}
+}
+
+let _tlSeq=0;
+async function loadTimeline(){
+  const box=$('#_timeline'); if(!box||!selected) return;
+  const pid=selected.project_id, seq=++_tlSeq;
+  try{
+    const d=await (await fetch('/api/projects/'+encodeURIComponent(pid)+'/timeline')).json();
+    if(seq!==_tlSeq) return;                       // a newer load superseded this one
+    box.innerHTML=timelineHTML(d.timeline||[]);
+  }catch(e){ box.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao carregar histórico</div>'; }
+}
+
+function timelineHTML(rows){
+  if(!rows.length) return '<div class="hint2">Sem histórico ainda — usa <b>Registar</b> para anotar uma chamada, reunião ou decisão.</div>';
+  const KIND={note:'Nota',decision:'Decisão',opinion:'Opinião',todo:'To-do'};
+  return '<div class="tl">'+rows.map(r=>{
+    const isEvent=r.op==='event', isClear=r.op==='clear', base=(r.field||'').split('#')[0];
+    let head;
+    if(isEvent){ const k=(r.field||'').replace(/^__|__$/g,''); head='<b>'+esc(KIND[k]||k)+'</b> '+esc(r.new_value||''); }
+    else { const lbl=(byKey[base]&&byKey[base].label)||r.field;
+      head=isClear ? '<b>'+esc(lbl)+'</b> removido <span class="tl-old">'+esc(r.old_value||'')+'</span>'
+                   : '<b>'+esc(lbl)+'</b> '+(r.old_value?'<span class="tl-old">'+esc(r.old_value)+'</span>':'')+esc(r.new_value||''); }
+    const chan=(r.channel&&CHAN_ICON[r.channel])?(CHAN_ICON[r.channel]+' '):'';
+    const who=r.asserted_by?(' · '+esc(r.asserted_by)):'';
+    const when=esc((r.acquired_at||r.ts||'').slice(0,10));
+    return '<div class="tl-row'+(isEvent?' event':'')+(isClear?' removed':'')+'">'
+      +'<div class="tl-h">'+head+'</div><div class="tl-m">'+chan+when+who+'</div></div>';
+  }).join('')+'</div>';
 }
 
 function renderDetail(){
@@ -296,8 +442,10 @@ function renderDetail(){
   $('#_list').classList.add('hidden');
   $('#_detail').classList.remove('hidden');
   $('#_detail').innerHTML=detailHTML();
+  const wd=$('#_capwhen'); if(wd&&!wd.value){ try{wd.value=new Date().toISOString().slice(0,10);}catch(_){} }
   loadSource();
   loadDraft();
+  if(_registarFromURL()) showTab('registar');   // deep-link straight into capture (?registar=nota)
 }
 
 /* ── refresh only the summary bits after a field save (keep input focus) ─ */
@@ -369,6 +517,7 @@ function paletteItems(q){
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Novo projeto',run:promptNew},
+    {kind:'ação',label:'Registar conhecimento',run:()=>{ if(selected) showTab('registar'); else toast('abre um projeto primeiro'); }},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
   projects.forEach(p=>base.push({kind:'projeto',label:p.title,sub:p.stage,run:()=>loadDetail(p.project_id)}));
@@ -462,6 +611,31 @@ $('#_detail').addEventListener('click', async e=>{
     catch(err){toast(S.revertido);} return; }
 });
 
+/* ── ADR-015 capture/tabs: a SEPARATE delegated listener so the existing handler is untouched.
+   #_detail persists across innerHTML swaps, so delegation survives re-renders. */
+$('#_detail').addEventListener('click', async e=>{
+  if(!selected) return;
+  const tab=e.target.closest('.ptab-btn');
+  if(tab){ showTab(tab.dataset.tab); return; }
+  const chc=e.target.closest('#_capchans .chip');
+  if(chc){ capChan=chc.dataset.chan; chc.parentElement.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===chc)); return; }
+  const kc=e.target.closest('#_capkinds .chip');
+  if(kc){ capKind=kc.dataset.kind; kc.parentElement.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===kc)); return; }
+  if(e.target.closest('#_capsave')){
+    const text=(($('#_captext')||{}).value||'').trim(); if(!text){ toast('escreve algo primeiro'); return; }
+    const who=(($('#_capwho')||{}).value||'').trim(), when=(($('#_capwhen')||{}).value||'').trim();
+    try{ await post('/api/projects/'+selected.project_id+'/event',
+        {kind:capKind, text:text, channel:capChan, asserted_by:who, acquired_at:when});
+      const t=$('#_captext'); if(t) t.value=''; toast('registado'); showTab('timeline'); }
+    catch(err){ toast(S.revertido); } return; }
+  if(e.target.closest('#_cfadd')){
+    const name=(($('#_cfname')||{}).value||'').trim(), val=(($('#_cfval')||{}).value||'').trim();
+    if(!name||!val){ toast('nome e valor'); return; }
+    try{ selected=await post('/api/projects/'+selected.project_id+'/custom-field',{name:name, value:val});
+      renderDetail(); toast('campo adicionado'); }
+    catch(err){ toast(S.revertido); } return; }
+});
+
 /* deep-link + history: open the project named in the URL on load, and let the browser
    back/forward buttons move between list and detail. */
 window.addEventListener('popstate',()=>{
@@ -471,8 +645,13 @@ window.addEventListener('popstate',()=>{
 (function(){
   const pid=_pidFromURL();
   if(!pid) return;
-  // Canonicalize a legacy /projetos?p=<pid> link (Fila chip) to the path form, no history entry.
-  if(location.search){ try{history.replaceState(null,'','/projetos/'+encodeURIComponent(pid));}catch(_){} }
+  // Canonicalize a legacy /projetos?p=<pid> link (Fila chip) to the path form, but PRESERVE the
+  // ?registar=nota view-state (the legacy canonicalizer used to strip ALL query params).
+  const params=new URLSearchParams(location.search);
+  if(params.has('p')){
+    const q=params.get('registar')==='nota'?'?registar=nota':'';
+    try{history.replaceState(null,'','/projetos/'+encodeURIComponent(pid)+q);}catch(_){}
+  }
   loadDetail(pid,false);
 })();
 """

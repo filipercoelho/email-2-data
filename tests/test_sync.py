@@ -9,8 +9,6 @@ No network — a fake IMAP connection models UIDVALIDITY + UID SEARCH/FETCH so w
 
 import json
 
-import pytest
-
 import email2data.fetch as fetch
 from email2data.sync import SyncStore
 
