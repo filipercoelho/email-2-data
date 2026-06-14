@@ -185,6 +185,34 @@ def test_registar_capture_deep_links_and_writes_timeline(live_app, browser):
         page.close()
 
 
+def test_projeto_ux_tabs_tiers_and_gapjump(live_app, browser):
+    """UX pass: the email composer lives in its OWN 'Email ao cliente' tab (not the spec scroll),
+    optional gaps are NOT styled as red blockers (only must-gaps are), and the section gap-count
+    jumps focus to the first missing required field — the page's 'what's next' affordance."""
+    base, pid = live_app
+    page = browser.new_page()
+    try:
+        page.goto(f"{base}/projetos/{pid}")
+        page.wait_for_selector(".ptabs", timeout=5000)
+        # composer moved OUT of Especificação and into the Email tab (one tab = one task)
+        assert page.locator('.ppanel[data-panel="espec"] #_ask').count() == 0
+        assert page.locator('.ppanel[data-panel="email"] #_ask').count() == 1
+        page.click('.ptab-btn[data-tab="email"]')
+        page.wait_for_selector('.ppanel[data-panel="email"]:not(.hidden) #_ask', timeout=5000)
+        # tier-aware color semantics: required-missing rows flagged, optional gaps stay calm
+        page.click('.ptab-btn[data-tab="espec"]')
+        assert page.locator(".frow.miss-must").count() >= 1
+        assert page.locator(".frow.miss-opt").count() >= 1
+        # gap-count jumps focus to the first missing REQUIRED field
+        page.click("#_gapjump")
+        page.wait_for_function(
+            "document.activeElement && document.activeElement.classList.contains('finput')", timeout=5000)
+        addr = page.evaluate("document.activeElement.dataset.addr")
+        assert page.locator(f'.frow.miss-must .finput[data-addr="{addr}"]').count() == 1
+    finally:
+        page.close()
+
+
 def test_fila_counterparty_filter_is_deep_linkable(live_app, browser):
     """Loading /?counterparty=CLIENT applies the filter from the URL (the row survives); an unknown
     counterparty filters everything out — proving the query param actually drives the view."""

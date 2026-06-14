@@ -46,13 +46,28 @@ _BODY = """
   /* editable fields */
   .frow{display:flex;align-items:center;gap:10px;padding:4px 0}
   .frow label{flex:0 0 158px;font-size:12.5px;color:var(--mut);text-align:right}
-  .frow.miss label{color:var(--red);font-weight:600}
-  .frow.should label::after{content:' · opc';color:var(--mut2);font-size:10px}
+  /* Tier-aware row state — red is RESERVED for a must-tier gap that blocks estimability (the page's
+     one scarce alarm signal; readiness.missing only ever holds must-gaps). Optional gaps recede
+     (calm dashed), filled values read quiet + committed. */
+  .frow.miss-must label{color:var(--red);font-weight:600}
+  .frow.miss-opt label{color:var(--mut2)}
+  .frow.filled label{color:var(--mut)}
   .fctl{flex:1;display:flex;align-items:center;gap:8px;min-width:0}
   .finput{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx)}
   .finput:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
-  .frow.miss .finput{border-color:#f3c9c9;background:#fffafa}
-  .finput::placeholder{color:var(--mut2)}
+  .frow.miss-must .finput{border-color:#f3c9c9;background:#fffafa}
+  .frow.miss-opt .finput{border-color:var(--bd);background:#fbfbfc;border-style:dashed}
+  .finput::placeholder{color:var(--mut2);font-style:italic}
+  /* brief confirmation that an inline edit committed (data-entry feedback) */
+  .frow.saved .finput{animation:savedflash .9s ease}
+  @keyframes savedflash{0%{box-shadow:0 0 0 3px #d1fae5}100%{box-shadow:none}}
+  /* required-vs-optional divider inside a field group */
+  .fopt-sep{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut2);font-weight:700;
+    margin:9px 0 3px;padding-top:7px;border-top:1px dashed var(--bd2)}
+  /* clickable gap-count in the section header → jumps to the first missing must field */
+  .gapjump{border:none;background:none;cursor:pointer;color:var(--red);font-weight:700;font-size:11px;
+    text-transform:none;letter-spacing:0;padding:0;text-decoration:underline dotted}
+  .gapjump.done{color:var(--green);cursor:default;text-decoration:none}
   .fsrc{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 6px;border-radius:6px;flex:0 0 auto}
   .fsrc.s-offline{background:#eef2f7;color:var(--ext)} .fsrc.s-llm{background:#efeafb;color:var(--purple)} .fsrc.s-user{background:#e7f6ee;color:var(--green)}
   /* line-item cards */
@@ -240,16 +255,26 @@ function closeDetail(push){
 function fieldRow(f, addr, fobj){
   const val=(fobj&&fobj.value)||'';
   const src=(fobj&&fobj.source)||'';
-  const miss=!val;
   const base=addr.split('#')[0];
   const conflicted=!!(selected&&selected.conflicts&&selected.conflicts[base]);
+  // Tier-aware state: red is RESERVED for a must-tier gap (a real blocker); optional gaps recede,
+  // filled values read quiet. Keeps the page's single alarm signal honest (ADR-015 UX).
+  const stcls = val ? 'filled' : (f.tier==='must' ? 'miss-must' : 'miss-opt');
   const badge=src?'<span class="fsrc s-'+esc(src)+'" title="origem do valor">'+srcLabel(src)+'</span>':'';
   const cw=conflicted?'<span class="cwarn" title="fontes de igual autoridade divergem — ver Linha do tempo">⚠</span>':'';
-  return '<div class="frow'+(miss?' miss':'')+(conflicted?' conflict':'')+(f.tier==='should'?' should':'')+'" data-addr="'+esc(addr)+'">'
+  return '<div class="frow '+stcls+(conflicted?' conflict':'')+'" data-addr="'+esc(addr)+'">'
     +'<label>'+esc(f.label)+'</label>'
     +'<div class="fctl"><input class="finput" data-addr="'+esc(addr)+'" value="'+esc(val)+'" '
     +'placeholder="'+esc(f.q||'…')+'" autocomplete="off" spellcheck="false"/>'+chanChip(addr)+badge+cw+'</div>'
     +'</div>';
+}
+
+/* Render a field group with required rows first, then an "opcionais" divider, then optional rows —
+   robust required/optional fencing that doesn't depend on registry order or :first-of-type. */
+function fieldGroup(fields, addrFn, valFn){
+  const must=fields.filter(f=>f.tier==='must'), should=fields.filter(f=>f.tier!=='must');
+  const rows=fs=>fs.map(f=>fieldRow(f,addrFn(f),valFn(f))).join('');
+  return rows(must)+(should.length?'<div class="fopt-sep">opcionais</div>'+rows(should):'');
 }
 
 /* ── client-email composer ──────────────────────────────────────────────
@@ -349,7 +374,16 @@ function detailHTML(){
   const p=selected.project, rd=selected.readiness||{};
   const job=selected.job_fields||{}, items=selected.items||[], customs=selected.custom_fields||{};
   const stages=STAGES.map(s=>'<span class="st'+(p.stage===s?' on':'')+(TERMINAL.has(s)&&p.stage===s?' terminal':'')+'" data-stage="'+s+'">'+s+'</span>').join('');
-  const client=esc(p.client_name||p.client_email||'sem cliente');
+  const nmiss=(rd.missing||[]).length;
+
+  /* Relationship axis (counterparty) — its own color-coded .cp badge from the real source
+     (job_fields.client_identity = the COUNTERPARTY enum), kept VISUALLY SEPARATE from the lifecycle
+     stage pills so neither reads as the other. A bare enum client_name is suppressed (no real name). */
+  const cpval=(job.client_identity&&job.client_identity.value)||'';
+  const CPSET={CLIENT:1,LEAD:1,SUPPLIER:1}, ENUMSET={CLIENT:1,LEAD:1,SUPPLIER:1,INTERNAL:1,BULK:1,OTHER:1};
+  const cpBadge=CPSET[cpval]?'<span class="cp '+cpval+'">'+cpval+'</span> ':'';
+  const clientNm=p.client_name||p.client_email||'';
+  const clientSpan=(clientNm&&!ENUMSET[clientNm])?'<span style="color:var(--mut);font-size:12.5px">'+esc(clientNm)+'</span>':'';
 
   /* Origem panel — source emails (lazy-filled by loadSource) + dangling warning */
   const dangling=(selected.dangling_threads||[]).length;
@@ -359,28 +393,35 @@ function detailHTML(){
     +'<button class="item-rm" id="_attachbtn">+ ligar email</button></div>'
     +'<div id="_origem" class="origem"><div class="hint2">a carregar contexto…</div></div>'+dwarn;
 
-  /* Especificação panel — job-level + per-item editable fields + custom fields + composer */
-  const jobRows=JOB_F.map(f=>fieldRow(f,f.key,job[f.key])).join('');
+  /* Especificação panel — named, bounded sections; required-first; composer lives in its own tab */
+  const gapTxt=nmiss?(nmiss+' obrigatório'+(nmiss===1?'':'s')+' em falta'):'✓ obrigatórios completos';
+  const gap='<button class="gapjump'+(nmiss?'':' done')+'" id="_gapjump">'+gapTxt+'</button>';
+  const jobRows=fieldGroup(JOB_F, f=>f.key, f=>job[f.key]);
   const itemCards=items.map((it,i)=>
     '<div class="item-card"><div class="ih"><b>peça '+(i+1)+'</b>'
     +(items.length>1?'<button class="item-rm" data-idx="'+i+'">remover</button>':'')+'</div>'
-    +ITEM_F.map(f=>fieldRow(f,f.key+'#'+i,it[f.key])).join('')+'</div>').join('');
+    +fieldGroup(ITEM_F, f=>f.key+'#'+i, f=>it[f.key])+'</div>').join('');
   const custRows=Object.keys(customs).map(addr=>
-    '<div class="frow" data-addr="'+esc(addr)+'"><label style="font-style:italic">'+esc(addr.replace(/^custom:/,''))+'</label>'
+    '<div class="frow filled" data-addr="'+esc(addr)+'"><label style="font-style:italic">'+esc(addr.replace(/^custom:/,''))+'</label>'
     +'<div class="fctl"><input class="finput" data-addr="'+esc(addr)+'" value="'+esc((customs[addr]||{}).value||'')+'" autocomplete="off" spellcheck="false"/>'
     +chanChip(addr)+'<span class="fsrc s-user">tu</span></div></div>').join('');
   const addCust='<div class="addcust"><input class="cn" id="_cfname" placeholder="campo personalizado" autocomplete="off"/>'
     +'<input class="cv2" id="_cfval" placeholder="valor" autocomplete="off"/><button class="addbtn" id="_cfadd">+ adicionar</button></div>';
   const custSec='<div class="psec"><h3>Campos personalizados <span class="c">contexto — não contam para o orçamento</span></h3>'+custRows+addCust+'</div>';
-  const espec='<div style="margin-bottom:6px">'+jobRows+'</div>'+itemCards
-    +'<button class="addbtn" id="_additem">+ adicionar peça</button>'+custSec
-    +'<div id="_ask"><div class="hint2">a preparar email…</div></div>'
+  const espec='<div class="psec"><h3>Especificação do trabalho '+gap+'</h3>'+jobRows+'</div>'
+    +'<div class="psec"><h3>Peças <span class="c">'+items.length+' peça'+(items.length===1?'':'s')+'</span></h3>'
+    +itemCards+'<button class="addbtn" id="_additem">+ adicionar peça</button></div>'
+    +custSec
     +'<div id="_exportwrap">'+(rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'')+'</div>';
+
+  /* Email ao cliente panel — the composer is a distinct OUTBOUND task; one tab = one task. */
+  const emailTab='<div class="ppanel hidden" data-panel="email"><div id="_ask"><div class="hint2">a preparar email…</div></div></div>';
 
   const tabs='<div class="ptabs">'
     +'<button class="ptab-btn on" data-tab="espec">Especificação</button>'
     +'<button class="ptab-btn" data-tab="origem">Origem'+(nthreads?' <span class="bdg">'+nthreads+'</span>':'')+'</button>'
     +'<button class="ptab-btn" data-tab="timeline">Linha do tempo</button>'
+    +'<button class="ptab-btn" data-tab="email">Email ao cliente'+(nmiss?' <span class="bdg warn">'+nmiss+'</span>':'')+'</button>'
     +'<button class="ptab-btn" data-tab="registar">Registar</button></div>';
 
   return '<button class="hbtn" id="_backbtn" style="margin-bottom:14px">← Projetos</button>'
@@ -388,11 +429,12 @@ function detailHTML(){
     +'<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px">'
     +'<span id="_ring">'+ringHTML(rd.coverage||0,rd.estimable||false)+'</span>'
     +'<div class="pstage">'+stages+'</div>'
-    +'<span style="color:var(--mut);font-size:12.5px">'+client+'</span></div>'
+    +'<span class="grow"></span>'+cpBadge+clientSpan+'</div>'
     +contestedBanner()+tabs
     +'<div class="ppanel" data-panel="espec">'+espec+'</div>'
     +'<div class="ppanel hidden" data-panel="origem">'+origem+'</div>'
     +'<div class="ppanel hidden" data-panel="timeline"><div id="_timeline"><div class="hint2">a carregar histórico…</div></div></div>'
+    +emailTab
     +'<div class="ppanel hidden" data-panel="registar">'+captureHTML()+'</div>';
 }
 
@@ -450,22 +492,32 @@ function renderDetail(){
 
 /* ── refresh only the summary bits after a field save (keep input focus) ─ */
 function refreshSummary(){
-  const rd=selected.readiness||{};
+  const rd=selected.readiness||{}, nmiss=(rd.missing||[]).length;
   const ring=$('#_ring'); if(ring) ring.innerHTML=ringHTML(rd.coverage||0,rd.estimable||false);
+  // live gap-count in the section header + the Email-tab badge (the page's "what's next" signal)
+  const gj=$('#_gapjump');
+  if(gj){ gj.textContent=nmiss?(nmiss+' obrigatório'+(nmiss===1?'':'s')+' em falta'):'✓ obrigatórios completos';
+    gj.classList.toggle('done', !nmiss); }
+  const et=$('#_detail').querySelector('.ptab-btn[data-tab="email"]');
+  if(et) et.innerHTML='Email ao cliente'+(nmiss?' <span class="bdg warn">'+nmiss+'</span>':'');
   // a field save changes the gaps → refresh the composer's prompt list, but only when the
   // user hasn't started hand-editing the draft (we must not wipe their wording).
   if(draft&&!draft.dirty) loadDraft();
   const ew=$('#_exportwrap');
   if(ew) ew.innerHTML=rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'';
+  announce(rd.estimable?'projeto estimável':(nmiss+' campos obrigatórios em falta'));
 }
 
-/* update one field row's visual state in place (no re-render → keep focus) */
+/* update one field row's visual state in place (no re-render → keep focus) + brief save-flash */
 function markRow(addr, value){
   const row=$('#_detail').querySelector('.frow[data-addr="'+addr+'"]'); if(!row) return;
-  row.classList.toggle('miss', !value);
+  const t=(byKey[addr.split('#')[0]]||{}).tier;   // custom: addrs → undefined tier → calm optional state
+  row.classList.remove('miss-must','miss-opt','filled');
+  row.classList.add(value?'filled':(t==='must'?'miss-must':'miss-opt'));
   let b=row.querySelector('.fsrc');
   if(value){ if(!b){b=document.createElement('span');row.querySelector('.fctl').appendChild(b);} b.className='fsrc s-user'; b.textContent='tu'; }
   else if(b){ b.remove(); }
+  row.classList.remove('saved'); void row.offsetWidth; row.classList.add('saved');  // commit confirmation
 }
 
 /* ── source emails (lazy, cached per project) ─────────────────────────── */
@@ -617,6 +669,11 @@ $('#_detail').addEventListener('click', async e=>{
   if(!selected) return;
   const tab=e.target.closest('.ptab-btn');
   if(tab){ showTab(tab.dataset.tab); return; }
+  // gap-count in the section header → jump to + focus the first missing required field ("what's next")
+  if(e.target.closest('#_gapjump')){
+    const el=$('#_detail').querySelector('.frow.miss-must .finput');
+    if(el){ showTab('espec'); el.scrollIntoView({block:'center'}); el.focus(); }
+    else toast('sem obrigatórios em falta'); return; }
   const chc=e.target.closest('#_capchans .chip');
   if(chc){ capChan=chc.dataset.chan; chc.parentElement.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===chc)); return; }
   const kc=e.target.closest('#_capkinds .chip');
