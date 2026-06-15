@@ -50,6 +50,34 @@ def _offline_ignore(env: dict[str, Any], signals: sig.Signals) -> TriageResult:
     )
 
 
+def _tier1_failed(raw: bytes, env: dict[str, Any], exc: Exception) -> TriageResult:
+    """Fallback verdict when Tier-1 classification raises (e.g. LLM/auth down, after llm.py already
+    exhausted its retries). The message is NOT dropped — it ESCALATES to NEEDS_REVIEW so it stays
+    visible in the human queue (VISION non-negotiable: an uncertain message escalates, never
+    disappears; a credential outage must never make client mail vanish from the Fila). Written as a
+    final row, so re-run ``triage --full`` once the LLM is back to reclassify it properly. Direction is
+    the one fact we still have offline (header signal); everything else is unknown."""
+    try:
+        direction = sig.header_signals(email.message_from_bytes(raw)).direction
+    except Exception:  # noqa: BLE001 — even the offline signal failed; default to the safe inbound bin
+        direction = "inbound"
+    return TriageResult(
+        message_id=env["message_id"],
+        counterparty="OTHER",
+        purpose="OTHER",
+        direction=direction,
+        priority="NEEDS_REVIEW",
+        urgency=50,
+        confidence=0.0,
+        reason=f"tier1 failed ({type(exc).__name__}) — escalated for human review",
+        entities=Entities(),
+        extractor_version=EXTRACTOR_VERSION,
+        subject=env.get("subject", ""),
+        from_addr=env.get("from", {}).get("email", ""),
+        decided_by="tier1:error",
+    )
+
+
 def triage(raw: bytes, playbook: str, store: KnowledgeStore, client: Any, settings: dict[str, Any]) -> TriageResult:
     env = parse_eml(raw)
     msg = email.message_from_bytes(raw)
@@ -92,7 +120,9 @@ def _processed_ids(out_path: Path) -> set[str]:
     """message_ids already in results.jsonl — the source of truth for what triage has classified.
 
     Keying off the result file (not a side cursor) is self-healing: delete a line and that email is
-    reprocessed next run; a previously-failed email was never written, so it retries automatically.
+    reprocessed next run. A message whose Tier-1 classification FAILED is written as a NEEDS_REVIEW
+    fallback (it escalates, it never disappears — see ``_tier1_failed``), so reclassify it with
+    ``triage --full`` once the LLM is back, or delete its line to retry just that one.
     """
     done: set[str] = set()
     if not out_path.exists():
@@ -114,7 +144,9 @@ def triage_corpus(settings: dict[str, Any], store: KnowledgeStore, client: Any |
     """Classify the corpus. Incremental by default: only emails whose message_id is not already in
     results.jsonl are processed (and appended), so Tier-1 LLM tokens are spent once per email. The
     offline Tier-0 path is unaffected — already-processed mail is simply skipped before either tier.
-    ``full=True`` overwrites results.jsonl and reclassifies everything (rebuild escape hatch)."""
+    A Tier-1 failure does not drop the message: it is written as a NEEDS_REVIEW fallback (escalate,
+    never disappear) and counted in ``failed``. ``full=True`` overwrites results.jsonl and
+    reclassifies everything (rebuild escape hatch — also the way to clear NEEDS_REVIEW fallbacks)."""
     p = paths(settings, settings["__settings_path__"])
     playbook = classifier.load_playbook(p["playbook"])
     client = client or classifier.make_client(settings)
@@ -129,24 +161,32 @@ def triage_corpus(settings: dict[str, Any], store: KnowledgeStore, client: Any |
 
     with out_path.open("w" if full else "a", encoding="utf-8") as out:
         for eml in eml_files:
+            # Parse FIRST — it gates already-classified mail AND gives us the message_id needed to
+            # escalate (not drop) a message whose Tier-1 classification later fails.
             try:
                 raw = eml.read_bytes()
-                if done:  # cheap, offline message_id parse to gate already-classified mail
-                    mid = parse_eml(raw).get("message_id")
-                    if mid in done:
-                        skipped += 1
-                        continue
+                env_min = parse_eml(raw)
+            except Exception as exc:  # noqa: BLE001 — unparseable .eml: nothing coherent to escalate
+                failed += 1
+                audit.log(p["audit_log"], "triage_failed", eml.name, {"error": type(exc).__name__})
+                continue
+            mid = env_min.get("message_id")
+            if mid in done:  # already classified, or a duplicate .eml within this run
+                skipped += 1
+                continue
+            try:
                 r = triage(raw, playbook, store, client, settings)
-                out.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
-                done.add(r.message_id)  # guard against duplicate .eml files within one run
-                new += 1
                 if r.decided_by.startswith("tier0"):
                     offline += 1
                 else:
                     llm += 1
-            except Exception as exc:  # noqa: BLE001 — isolate per-email failures
+            except Exception as exc:  # noqa: BLE001 — Tier-1 failed: escalate to NEEDS_REVIEW, never drop
+                r = _tier1_failed(raw, env_min, exc)
                 failed += 1
                 audit.log(p["audit_log"], "triage_failed", eml.name, {"error": type(exc).__name__})
+            out.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+            done.add(r.message_id)  # guard against duplicate .eml files within one run
+            new += 1
 
     counts = {"corpus": len(eml_files), "new": new, "skipped": skipped,
               "offline": offline, "llm": llm, "failed": failed}

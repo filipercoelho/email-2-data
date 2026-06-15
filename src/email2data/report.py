@@ -31,7 +31,11 @@ def _internal(em: str) -> bool:
 def prepare(settings: dict[str, Any], corpus_glob: str = "corpus/*.eml"):
     """Load + enrich emails (body/people/attachments/cost/jobspec) for the report. Returns (emails, contacts, cost)."""
     out = paths(settings, settings["__settings_path__"])["out_dir"]
-    emails = [json.loads(x) for x in (out / "results.jsonl").read_text().splitlines() if x.strip()]
+    # Guard like its siblings below: on a FRESH out/ (first run / empty Docker volume) results.jsonl
+    # does not exist yet — the boot-sync writes it. An unguarded read here crashed app construction
+    # (create_app runs prepare() BEFORE the lifespan boot-sync), bricking a clean `docker compose up`.
+    emails = ([json.loads(x) for x in (out / "results.jsonl").read_text().splitlines() if x.strip()]
+              if (out / "results.jsonl").exists() else [])
     contacts = ([json.loads(x) for x in (out / "contacts.jsonl").read_text().splitlines() if x.strip()]
                 if (out / "contacts.jsonl").exists() else [])
     cost = json.loads((out / "cost.json").read_text()) if (out / "cost.json").exists() else {}

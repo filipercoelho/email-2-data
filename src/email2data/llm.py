@@ -9,6 +9,7 @@ returns the **str**. Retry-on-empty covers the transient 200-with-empty-text the
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Optional
 
@@ -19,6 +20,49 @@ class LLMError(Exception):
 
 def _attempts(cfg: dict[str, Any]) -> int:
     return max(1, int(cfg.get("max_retries", 5)))
+
+
+# Vertex context-cache registry: (model, sha256(system_instruction)) -> CachedContent resource name.
+# The triage playbook is a large STABLE prefix (~2.4K tokens) re-sent as system_instruction on every
+# classification; without caching it is re-billed in full each call. Caching it once and reusing it
+# across a sync's batch bills the prefix at the discounted cache rate. Best-effort: ANY failure (no
+# caches API, prefix below the model's minimum, expired cache) falls back to the plain path, so a
+# classification NEVER depends on caching being available. (The dead Anthropic path already had the
+# cache_control:ephemeral hint; this brings the live Gemini path to parity.)
+_GEMINI_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _gemini_cache_key(cfg: dict[str, Any], system: str) -> tuple[str, str]:
+    return (cfg["model"], hashlib.sha256(system.encode("utf-8")).hexdigest())
+
+
+def _gemini_cached_name(client: Any, cfg: dict[str, Any], system: str) -> Optional[str]:
+    """Resource name of a Vertex CachedContent for this (model, system) prefix, or None to use the
+    plain system_instruction path. None when caching is disabled, the prefix is below the model's
+    minimum cacheable size, or the SDK/endpoint can't create a cache."""
+    if not cfg.get("context_cache", True) or not system:
+        return None
+    # Explicit caching has a per-model floor (~1024 tokens for gemini-2.5-flash); ~4 chars/token.
+    if len(system) < int(cfg.get("context_cache_min_chars", 4096)):
+        return None
+    key = _gemini_cache_key(cfg, system)
+    name = _GEMINI_CACHE.get(key)
+    if name:
+        return name
+    try:
+        from google.genai import types
+
+        cache = client.caches.create(
+            model=cfg["model"],
+            config=types.CreateCachedContentConfig(
+                system_instruction=system,
+                ttl=f"{int(cfg.get('context_cache_ttl_s', 3600))}s",
+            ),
+        )
+        _GEMINI_CACHE[key] = cache.name
+        return cache.name
+    except Exception:  # noqa: BLE001 — caching is an optimization, never a hard dependency
+        return None
 
 
 def call(client: Any, cfg: dict[str, Any], system: str, user: str, *,
@@ -83,14 +127,21 @@ def _gemini(client, cfg, system, user, schema, text, temperature, images=None) -
     if images:
         contents = [user] + [types.Part.from_bytes(data=im["data"], mime_type=im["mime"])
                              for im in images]
+    cache_name = _gemini_cached_name(client, cfg, system)
     last = None
     for _ in range(_attempts(cfg)):  # retry-on-empty: a 200 with empty text is transient
         try:
             kw: dict[str, Any] = dict(
-                system_instruction=system, temperature=temperature,
+                temperature=temperature,
                 max_output_tokens=int(cfg.get("max_tokens", 1024)),
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
+            # cached_content already carries the system_instruction — passing BOTH is an error, so
+            # it is one or the other.
+            if cache_name:
+                kw["cached_content"] = cache_name
+            else:
+                kw["system_instruction"] = system
             if not text:
                 kw.update(response_mime_type="application/json", response_schema=schema)
             resp = client.models.generate_content(
@@ -100,6 +151,11 @@ def _gemini(client, cfg, system, user, schema, text, temperature, images=None) -
             last = "empty text"
         except Exception as exc:  # noqa: BLE001 — retry transient, surface after attempts
             last = f"{type(exc).__name__}: {exc}"
+            if cache_name:
+                # The cache may have EXPIRED (TTL) or been evicted mid-run — drop it and retry on the
+                # plain path so a stale cache can never brick classification.
+                _GEMINI_CACHE.pop(_gemini_cache_key(cfg, system), None)
+                cache_name = None
     raise LLMError(f"gemini failed after retries ({last})")
 
 

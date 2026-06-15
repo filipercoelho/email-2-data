@@ -9,6 +9,7 @@ Note: no ``from __future__ import annotations`` here — FastAPI must see the re
 the route signatures (the future-import would make it an unresolved string -> 422).
 """
 
+import hashlib
 import json
 import threading
 from contextlib import asynccontextmanager
@@ -95,6 +96,16 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     _sync = {"running": False, "last_counts": None, "last_ts": None, "last_error": None}
     _sync_lock = threading.Lock()
 
+    # Reply-draft memo (regenerable, in-process): keyed by (message_id, hash of the EXACT reply
+    # prompt). A re-open / page-reload / second client for an UNCHANGED spec is served from here and
+    # costs 0 tokens; any spec/readiness change (sync, confirm, item edit) changes the prompt -> new
+    # key -> regenerate. Cold on restart by design — it caches LLM output, not precious state.
+    _reply_cache: dict[tuple[str, str], str] = {}
+
+    def _reply_key(mid: str, spec_d: dict, rd: dict) -> tuple[str, str]:
+        prompt = replydraft.build_reply_message(spec_d, rd)
+        return (mid, hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+
     def _rebuild_state() -> None:
         nonlocal emails, contacts, cost, jspecs, _crmdb
         emails, contacts, cost = report.prepare(settings)
@@ -171,6 +182,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         d = spec.to_dict()
         return {"readiness": rd, "job_fields": d["job_fields"], "items": d["items"]}
 
+    @app.get("/healthz")
+    def healthz():
+        """Liveness probe for the Docker HEALTHCHECK / orchestrators. Cheap — no DB/LLM/IMAP, just
+        proves the app constructed and is serving. A crash-looping boot (e.g. a missing volume) never
+        reaches this, so the container is marked unhealthy instead of silently restart-looping."""
+        return JSONResponse({"status": "ok"})
+
     @app.get("/inbox", response_class=HTMLResponse)
     def inbox():
         # The inbox report (was "/"; the Fila is now home — A3). overlay decisions onto each job's
@@ -245,6 +263,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if mid not in jspecs:
             return JSONResponse({"error": "not found"}, status_code=404)
         spec, rd = ws.merge(jspecs[mid])
+        spec_d = spec.to_dict()
+        ck = _reply_key(mid, spec_d, rd)
+        if ck in _reply_cache:  # unchanged spec since last draft — serve cached, spend 0 tokens
+            return JSONResponse({"reply": _reply_cache[ck], "cached": True})
         # The Gemini round-trip is BLOCKING — dispatch it OFF the event loop (mirror /api/sync,
         # NOT a bare in-loop call) so a multi-second LLM call can't freeze the single worker for
         # every other request (nav badges, list fetches). Any future LLM endpoint must do the same.
@@ -253,9 +275,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         def _draft():
             if app.state.client is None:
                 app.state.client = classifier.make_client(settings)
-            return replydraft.draft_reply(spec.to_dict(), rd, rpb, app.state.client, settings)
+            return replydraft.draft_reply(spec_d, rd, rpb, app.state.client, settings)
 
-        return JSONResponse({"reply": await anyio.to_thread.run_sync(_draft)})
+        text = await anyio.to_thread.run_sync(_draft)
+        _reply_cache[ck] = text
+        return JSONResponse({"reply": text})
 
     @app.post("/api/reply/stream")
     async def reply_stream(request: Request):
@@ -270,13 +294,22 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if mid not in jspecs:
             return JSONResponse({"error": "not found"}, status_code=404)
         spec, rd = ws.merge(jspecs[mid])
+        spec_d = spec.to_dict()
+        ck = _reply_key(mid, spec_d, rd)
 
         def gen():
             # Runs in Starlette's threadpool (sync generator), so the blocking client init +
             # token generation stay off the event loop — keep make_client INSIDE the generator.
+            if ck in _reply_cache:  # cached (e.g. a prior reload/non-stream draft) — replay, 0 tokens
+                yield _reply_cache[ck]
+                return
             if app.state.client is None:
                 app.state.client = classifier.make_client(settings)
-            yield from replydraft.draft_reply_stream(spec.to_dict(), rd, rpb, app.state.client, settings)
+            chunks: list[str] = []
+            for piece in replydraft.draft_reply_stream(spec_d, rd, rpb, app.state.client, settings):
+                chunks.append(piece)
+                yield piece
+            _reply_cache[ck] = "".join(chunks)  # populate so the next reload / non-stream call is free
 
         return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                                  headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})

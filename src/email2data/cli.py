@@ -438,6 +438,22 @@ def _free_port(preferred: int) -> int:
         return s.getsockname()[1]
 
 
+def _resolve_serve_port(preferred: int, host: str) -> tuple[int | None, str | None]:
+    """Decide the serve port. Returns ``(port, note)`` — or ``(None, error)`` when we must NOT rebind.
+
+    On localhost a busy port silently falls back to an OS-picked one (dev convenience). In CONTAINER
+    mode (``--host 0.0.0.0``/``::``) the published port is FIXED by compose (``8042:8042``); silently
+    serving on a different port would leave the published port with no listener (connection refused),
+    so a busy port is fatal — fail loudly instead of rebinding to a port nothing maps to."""
+    port = _free_port(preferred)
+    if port == preferred:
+        return port, None
+    if host in ("0.0.0.0", "::"):
+        return None, (f"Port {preferred} is unavailable and --host {host} (container mode) needs the "
+                      f"published port — refusing to rebind. Free {preferred} or change the mapping.")
+    return port, f"Port {preferred} is in use — using {port} instead."
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Run the local workspace (the 'confirm one lead' slice). Read-only IMAP; never sends."""
     try:
@@ -451,9 +467,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("Port 8000 is not allowed for this project. Pick another (default 8042).", file=sys.stderr)
         return 2
     host = args.host
-    port = _free_port(args.port)
-    if port != args.port:
-        print(f"Port {args.port} is in use — using {port} instead.", file=sys.stderr)
+    port, note = _resolve_serve_port(args.port, host)
+    if port is None:
+        print(note, file=sys.stderr)
+        return 1
+    if note:
+        print(note, file=sys.stderr)
     settings = _load_settings(args)
     app = webapp.from_settings(settings)
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
@@ -523,6 +542,14 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001
+        # A total fetch failure (every account down) surfaces as a tidy line, not a raw traceback.
+        # Anything that is NOT a FetchError is re-raised so real bugs keep their stack trace.
+        from .fetch import FetchError
+        if isinstance(exc, FetchError):
+            print(f"Fetch error: {exc}", file=sys.stderr)
+            return 1
+        raise
 
 
 if __name__ == "__main__":

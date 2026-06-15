@@ -25,7 +25,9 @@ Incremental + idempotent by default ([ADR-009](../03-decisions/adr-009-increment
 ## Configuration & secrets
 
 - `config/settings.json` — IMAP host/accounts + LLM provider (copy from `settings.example.json`).
-  Default provider `vertex_gemini` (project `materials-492723`); alternative `anthropic`.
+  Default provider `vertex_gemini` (project `materials-492723`); alternative `anthropic`. `llm.context_cache`
+  (Vertex) caches the large stable playbook prefix so it is billed once per batch, not per call (ADR-016);
+  best-effort, falls back to the plain path on any error.
 - `.env` (gitignored, loaded by `config.load_dotenv`) — `EMAIL2DATA_<ACCOUNT>_PASSWORD` (read-only
   IMAP) and LLM auth. **Never** committed or logged. A real exported env var overrides the file.
 
@@ -42,8 +44,13 @@ docker compose up --build                               # → http://127.0.0.1:8
   corrupt a secret containing `$`). `config/` (read-only), `corpus/`, and `out/` are bind-mounted so
   the UID watermark + results persist.
 - Binds `0.0.0.0:8042` **inside** the container but is published only to host loopback
-  `127.0.0.1:8042` — single-user, never public, never 8000.
-- On boot it runs one incremental `sync` automatically.
+  `127.0.0.1:8042` — single-user, never public, never 8000. In container mode `serve` **fails loud**
+  rather than silently rebinding off 8042 (the published port would otherwise have no listener).
+- On boot it runs one incremental `sync` automatically. A **fresh/empty `out/` volume boots cleanly**
+  (no pre-seed step) — the boot-sync populates it on first run; the UI just starts empty until then.
+- A `HEALTHCHECK` hits `/healthz`, so a crash-looping boot shows as **unhealthy** instead of a silent
+  restart loop. Runs as **root by design** (single-user loopback; `out/`+`corpus/` are host bind mounts
+  a non-root UID can't write) — see the Dockerfile for the non-root migration path (ADR-016).
 
 ## Vertex / Gemini auth (default provider)
 

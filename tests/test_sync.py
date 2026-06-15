@@ -181,3 +181,116 @@ def test_triage_corpus_skips_already_processed_and_appends(tmp_path, monkeypatch
     calls["n"] = 0
     counts = cascade.triage_corpus(settings, store=object(), full=True)
     assert counts["new"] == 2 and counts["skipped"] == 0 and calls["n"] == 2
+
+
+# ── multi-account isolation (fetch_all) ──────────────────────────────────────
+
+def _two_accounts(tmp_path, ids=("bad", "good")):
+    s = _settings(tmp_path)
+    s["imap"]["accounts"] = [
+        {"id": i, "username": "u", "password_env": "P", "mailboxes": ["INBOX"]} for i in ids]
+    return s
+
+
+def test_fetch_all_isolates_a_failing_account(tmp_path, monkeypatch):
+    """One bad/expired account must NOT starve the others: fetch_all audits the failure, keeps going,
+    and the healthy account still syncs + advances its watermark (the red-team starvation fix)."""
+    settings = _two_accounts(tmp_path)
+    good = FakeIMAP(uidvalidity=42, messages={1: _eml(1), 2: _eml(2)})
+
+    def fake_connect(s, account):
+        if account["id"] == "bad":
+            raise fetch.FetchError("IMAP error for account 'bad': [AUTHENTICATIONFAILED] auth failed")
+        return good
+    monkeypatch.setattr(fetch, "_connect", fake_connect)
+
+    counts = fetch.fetch_all(settings)
+    assert counts["bad"] == 0 and counts["good"] == 2          # good synced despite bad failing first
+
+    # good advanced its watermark; the failure was audited (not silent), with no credential leaked.
+    sync = SyncStore(tmp_path / "out" / "sync.db").connect()
+    assert sync.get_cursor("good", "INBOX") == (42, 2)
+    sync.close()
+    audit_txt = (tmp_path / "out" / "audit.jsonl").read_text()
+    assert "fetch_account_failed" in audit_txt and "bad" in audit_txt and "auth failed" in audit_txt
+
+
+def test_fetch_all_raises_when_every_account_fails(tmp_path, monkeypatch):
+    """A TOTAL outage (every account down) must surface loudly rather than report a misleading 0."""
+    import pytest
+    settings = _two_accounts(tmp_path, ids=("a", "b"))
+    monkeypatch.setattr(fetch, "_connect",
+                        lambda s, a: (_ for _ in ()).throw(fetch.FetchError(f"boom {a['id']}")))
+    with pytest.raises(fetch.FetchError):
+        fetch.fetch_all(settings)
+
+
+def test_cli_reports_total_fetch_failure_cleanly(tmp_path, monkeypatch, capsys):
+    """The CLI must surface a total fetch failure as a tidy 'Fetch error: …' line + rc 1, not a raw
+    traceback (only ConfigError was caught before)."""
+    from email2data import cli
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "settings.json").write_text(json.dumps({
+        "imap": {"host": "x", "accounts": [
+            {"id": "a", "username": "u", "password_env": "P", "mailboxes": ["INBOX"]}]},
+        "fetch": {"since_days": 30, "max_messages": 200},
+    }), encoding="utf-8")
+    monkeypatch.setattr(fetch, "fetch_all",
+                        lambda *a, **k: (_ for _ in ()).throw(fetch.FetchError("all accounts failed: a (boom)")))
+    rc = cli.main(["--settings", str(cfg / "settings.json"), "fetch"])
+    assert rc == 1
+    assert "Fetch error" in capsys.readouterr().err
+
+
+def test_triage_escalates_to_needs_review_when_tier1_fails(tmp_path, monkeypatch):
+    """A Tier-1 failure (e.g. LLM/auth down) must NOT drop the message — it escalates to NEEDS_REVIEW
+    so it stays visible in the human queue (VISION: uncertain escalates, never disappears)."""
+    from email2data import cascade
+    from email2data.config import paths
+    from email2data.llm import LLMError
+
+    settings = _settings(tmp_path)
+    p = paths(settings, settings["__settings_path__"])
+    (p["corpus_dir"] / "a.eml").write_bytes(_eml(1))
+
+    monkeypatch.setattr(cascade.classifier, "load_playbook", lambda _p: "pb")
+    monkeypatch.setattr(cascade.classifier, "make_client", lambda s: object())
+    monkeypatch.setattr(cascade, "triage",
+                        lambda *a, **k: (_ for _ in ()).throw(LLMError("vertex down")))
+
+    counts = cascade.triage_corpus(settings, store=object())
+    assert counts["failed"] == 1 and counts["new"] == 1        # written, not dropped
+    rows = [json.loads(x) for x in (p["out_dir"] / "results.jsonl").read_text().splitlines() if x]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["message_id"] == "mid:m1@x.pt"
+    assert r["priority"] == "NEEDS_REVIEW" and r["decided_by"] == "tier1:error"
+
+    # Idempotent: a second incremental run skips it (it's in results.jsonl), no duplicate row.
+    counts2 = cascade.triage_corpus(settings, store=object())
+    assert counts2["skipped"] == 1 and counts2["new"] == 0
+    rows2 = [x for x in (p["out_dir"] / "results.jsonl").read_text().splitlines() if x]
+    assert len(rows2) == 1
+
+
+def test_no_message_id_dedups_across_inbox_and_sent(tmp_path, monkeypatch):
+    """Closed dedup edge: a Message-ID-LESS email in BOTH INBOX and a Sent folder maps to ONE corpus
+    file — the id is hashed from the ORIGINAL bytes (before the X-Email2Data-Source header is
+    injected), so the copies no longer diverge and the Sent copy wins (direction = outbound)."""
+    from email import message_from_bytes
+
+    from email2data.config import paths
+    from email2data.signals import header_signals
+
+    settings = _settings(tmp_path)
+    settings["imap"]["accounts"][0]["mailboxes"] = ["INBOX", "INBOX.Sent"]
+    no_mid = b"From: orcamentos@lindoservico.pt\r\nTo: c@client.pt\r\nSubject: ping\r\n\r\nbody\r\n"
+    fake = FakeIMAP(uidvalidity=42, messages={1: no_mid})
+    monkeypatch.setattr(fetch, "_connect", lambda s, a: fake)
+
+    fetch.fetch_account(settings, settings["imap"]["accounts"][0])
+    p = paths(settings, settings["__settings_path__"])
+    files = list(p["corpus_dir"].glob("*.eml"))
+    assert len(files) == 1                                          # one file, not two
+    assert header_signals(message_from_bytes(files[0].read_bytes())).direction == "outbound"

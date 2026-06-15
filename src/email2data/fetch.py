@@ -211,9 +211,14 @@ def _fetch_mailbox(
             max_uid = max(max_uid, int(uid))
         except (TypeError, ValueError):
             pass
-        if inject:
-            raw = _source_header(mailbox) + raw
+        # Identity is hashed from the ORIGINAL bytes (before the source header is injected): for the
+        # rare Message-ID-less email the fallback id is sha256(raw), so prepending X-Email2Data-Source
+        # would otherwise make the INBOX and Sent copies hash differently — two files, and the Sent
+        # override never fires. Hashing pre-injection keeps ONE file per email regardless of folder/
+        # order; for Message-ID-bearing mail (the norm) the id is unaffected either way.
         dest = corpus_dir / safe_filename(canonical_id_from_raw(raw))
+        if inject:
+            raw = _source_header(mailbox) + raw  # but CACHE the copy with the source header for direction
         if dest.exists():
             # First-writer-wins — EXCEPT a Sent-folder copy must override a non-Sent cached one, so a
             # message that lives in BOTH an INBOX and a Sent folder is classified outbound regardless
@@ -275,11 +280,17 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
 
 
 def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool = False) -> dict[str, int]:
-    """Fetch every configured account incrementally. Returns {account_id: messages_cached}.
+    """Fetch every configured account incrementally. Returns {account_id: messages_cached} (0 for a
+    failed account).
 
     Opens its own ``sync.SyncStore`` (``out/sync.db``) when ``sync`` is not supplied, so the
     "since last retrieve" watermark works out of the box. ``full=True`` re-bootstraps every mailbox.
-    Per-account failures are audited and re-raised so the CLI can report which account broke."""
+
+    Per-account isolation (red-team: a bad/expired credential must never starve the OTHER accounts):
+    a ``FetchError`` from one account is AUDITED (``fetch_account_failed``) and SKIPPED so the loop
+    keeps going and every healthy account still syncs and advances its watermark. Only when EVERY
+    account fails is the error re-raised — a total outage surfaces loudly to the CLI instead of a
+    misleading "0 emails"."""
     p = paths(settings, settings["__settings_path__"])
     audit_log = p["audit_log"]
     results: dict[str, int] = {}
@@ -290,10 +301,20 @@ def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool =
     if owns_sync:
         from .sync import SyncStore
         sync = SyncStore(p["out_dir"] / "sync.db").connect()
+    failures: dict[str, str] = {}
     try:
         for account in accounts:
             started = time.monotonic()
-            files = fetch_account(settings, account, sync=sync, full=full)
+            try:
+                files = fetch_account(settings, account, sync=sync, full=full)
+            except FetchError as exc:
+                # Audited + skipped: the other accounts still sync (their watermarks already
+                # committed per-mailbox). Detail is the credential-safe server reply, never the secret.
+                results[account["id"]] = 0
+                failures[account["id"]] = _imap_detail(exc)
+                audit.log(audit_log, "fetch_account_failed", account["id"],
+                          {"error": _imap_detail(exc)})
+                continue
             results[account["id"]] = len(files)
             audit.log(
                 audit_log,
@@ -301,6 +322,9 @@ def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool =
                 account["id"],
                 {"messages": len(files), "elapsed_s": round(time.monotonic() - started, 2)},
             )
+        if failures and len(failures) == len(accounts):
+            raise FetchError("all accounts failed: "
+                             + "; ".join(f"{a} ({d})" for a, d in failures.items()))
     finally:
         if owns_sync and sync is not None:
             sync.close()

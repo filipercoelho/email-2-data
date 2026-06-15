@@ -395,3 +395,61 @@ def test_projetos_page_ships_capture_ui(tmp_path):
                    "function contestedBanner", "_registarFromURL", "/custom-field", "/event",
                    "/timeline", 'data-tab="registar"'):
         assert marker in html, marker
+
+
+def test_from_settings_builds_on_fresh_out_dir(tmp_path):
+    """Fresh-volume boot (the Docker first-run): from_settings must construct the app against an empty
+    out/ — no results.jsonl/jobspecs/crm.db yet — without raising. Tests elsewhere inject prepared=...
+    which short-circuits report.prepare(); this one exercises the REAL build path that bricked
+    `docker compose up`. The lifespan boot-sync is disabled so no IMAP/LLM is touched."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "reply_playbook.md").write_text("be brief", encoding="utf-8")
+    settings = {**SETTINGS, "__settings_path__": str(cfg_dir / "settings.json"),
+                "sync": {"on_startup": False}}
+    app = webapp.from_settings(settings)          # must not raise on empty out/
+    c = TestClient(app)
+    assert c.get("/inbox").status_code == 200      # renders an empty-but-valid report
+
+
+def test_reply_is_memoized_across_calls(tmp_path, monkeypatch):
+    """Reload-safe caching: a 2nd /api/reply for an UNCHANGED spec is served from the server-side memo
+    and does NOT re-call the model — fixes the per-reload token re-bill the audit flagged."""
+    calls = {"n": 0}
+    monkeypatch.setattr(webapp.classifier, "make_client", lambda s: object())
+
+    def fake_draft(*a, **k):
+        calls["n"] += 1
+        return f"DRAFT {calls['n']}"
+    monkeypatch.setattr(webapp.replydraft, "draft_reply", fake_draft)
+
+    c = _client(tmp_path)
+    r1 = c.post("/api/reply", json={"message_id": "m1"})
+    r2 = c.post("/api/reply", json={"message_id": "m1"})
+    assert r1.json()["reply"] == "DRAFT 1" and r2.json()["reply"] == "DRAFT 1"
+    assert r2.json().get("cached") is True
+    assert calls["n"] == 1                       # model called exactly once despite two requests
+
+
+def test_reply_cache_busts_when_spec_changes(tmp_path, monkeypatch):
+    """A spec change (here: confirming a field) changes the reply prompt → new cache key → regenerate.
+    Proves the memo keys on the actual prompt, not just the message_id."""
+    calls = {"n": 0}
+    monkeypatch.setattr(webapp.classifier, "make_client", lambda s: object())
+
+    def fake_draft(*a, **k):
+        calls["n"] += 1
+        return f"DRAFT {calls['n']}"
+    monkeypatch.setattr(webapp.replydraft, "draft_reply", fake_draft)
+
+    c = _client(tmp_path)
+    c.post("/api/reply", json={"message_id": "m1"})                       # call 1, cached
+    c.post("/api/confirm", json={"message_id": "m1", "field": "material#0", "value": "inox"})
+    c.post("/api/reply", json={"message_id": "m1"})                       # spec changed → call 2
+    assert calls["n"] == 2
+
+
+def test_healthz_liveness_probe(tmp_path):
+    """The Docker HEALTHCHECK hits /healthz — it must answer 200 without any DB/LLM/IMAP work."""
+    r = _client(tmp_path).get("/healthz")
+    assert r.status_code == 200 and r.json() == {"status": "ok"}

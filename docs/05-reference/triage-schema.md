@@ -57,6 +57,11 @@ incoherent → `NEEDS_REVIEW`); `HIGH_VALUE_COUNTERPARTIES = {CLIENT, LEAD}`;
 `confidence` (0.0–1.0), `reason`, `entities` (see below), `extractor_version`, and provenance:
 `subject`, `from_addr`, `decided_by` ([ADR-008](../03-decisions/adr-008-every-verdict-records-decided-by.md)).
 
+`decided_by` values: `tier0:<signal>` (offline header IGNORE), `tier1:<model>` (LLM classification),
+and `tier1:error` — a Tier-1 failure (e.g. LLM/auth down) that **escalated** the message to
+`NEEDS_REVIEW` instead of dropping it, so client mail never silently vanishes from the Fila; clear it
+with `triage --full` once the LLM is back ([ADR-016](../03-decisions/adr-016-post-audit-resilience-hardening.md)).
+
 **`Entities`**: `client_name`, `client_email`, `deadline` (ISO `YYYY-MM-DD`), `money`,
 `product_or_service`, `action_requested` — drafted by the LLM, nullable; plus `nif` (PT taxpayer
 id, 9 digits, mod-11 valid) and `iban` — filled **deterministically** by `extract.py`,

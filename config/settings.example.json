@@ -37,7 +37,11 @@
     "api_key_env": "ANTHROPIC_API_KEY",
     "max_tokens": 1024,
     "max_retries": 5,
-    "ignore_confidence_floor": 0.85
+    "ignore_confidence_floor": 0.85,
+    "_context_cache": "Vertex/Gemini: cache the large stable playbook prefix so it is not re-billed every call. min_chars ~ the model's caching floor (~1024 tokens); best-effort, falls back to the plain path on any error.",
+    "context_cache": true,
+    "context_cache_ttl_s": 3600,
+    "context_cache_min_chars": 4096
   },
   "paths": {
     "corpus_dir": "corpus",
