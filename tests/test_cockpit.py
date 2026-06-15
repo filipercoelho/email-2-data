@@ -281,3 +281,21 @@ def test_workspace_states_feed_build_fila(tmp_path):
     rows = [_row("t1", "m1", ago(6))]
     assert build_fila(rows, ws.thread_states(), now=NOW) == []   # resolved → not in the active queue
     ws.close()
+
+
+def test_build_fila_row_carries_message_id_and_auto():
+    """Phase A2: each Fila row carries the dominant message_id (so reclassify can write against it)
+    and the ORIGINAL auto verdict (for value_auto + the '↺ auto' reset)."""
+    [r] = build_fila([_row("t1", "m1", ago(2))], now=NOW)
+    assert r["message_id"] == "m1"
+    assert r["auto"] == {"counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT"}
+
+
+def test_reclassified_row_keeps_original_auto():
+    """A human correction overlays the displayed value but `auto` keeps the original — so the training
+    pair (value_auto) and the reset target survive the override."""
+    recl = {"m1": {"purpose": "FOLLOW_UP", "counterparty": "SUPPLIER"}}
+    [r] = build_fila([_row("t1", "m1", ago(2))], now=NOW, reclassified=recl)
+    assert r["purpose"] == "FOLLOW_UP" and r["counterparty"] == "SUPPLIER"     # overlaid
+    assert r["auto"] == {"counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT"}
+    assert r["trust"]["committed"] is True

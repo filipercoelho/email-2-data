@@ -27,10 +27,14 @@ from typing import Any, Optional
 
 from . import jobspec as js
 
-# Lifecycle. LEAD arrives → GATHERING info → ESTIMABLE (Gate-1 passes) → QUOTED → WON|LOST; ARCHIVED
-# is a manual retire. Terminal stages are human verdicts the auto-suggester must never overwrite.
-STAGES = ["LEAD", "GATHERING", "ESTIMABLE", "QUOTED", "WON", "LOST", "ARCHIVED"]
-TERMINAL_STAGES = frozenset({"QUOTED", "WON", "LOST", "ARCHIVED"})
+# Lifecycle. LEAD arrives → GATHERING info → ESTIMABLE (Gate-1 passes) → QUOTED → WON|LOST; a project
+# in flight can also be CANCELLED (called off, with a reason + party); ARCHIVED is a manual retire.
+# Terminal stages are human verdicts the auto-suggester must never overwrite.
+STAGES = ["LEAD", "GATHERING", "ESTIMABLE", "QUOTED", "WON", "LOST", "CANCELLED", "ARCHIVED"]
+TERMINAL_STAGES = frozenset({"QUOTED", "WON", "LOST", "CANCELLED", "ARCHIVED"})
+# Stages that carry a close-out (who ended it + why). Entering one stamps close_party/close_reason/
+# closed_at; leaving for any other stage clears them (a reopened project isn't "cancelled" anymore).
+CLOSED_STAGES = frozenset({"CANCELLED", "LOST"})
 
 # Source precedence for the job-level auto-merge. Higher wins; ties broken by message recency.
 _SOURCE_RANK = {"user": 3, "llm": 2, "offline": 1, "": 0}
@@ -111,6 +115,7 @@ class ProjectStore:
         self._conn.execute("DELETE FROM project_field_history WHERE project_id=?", (pid,))
         self._conn.execute("DELETE FROM project_fields WHERE project_id=?", (pid,))
         self._conn.execute("DELETE FROM project_threads WHERE project_id=?", (pid,))
+        self._conn.execute("DELETE FROM project_owners WHERE project_id=?", (pid,))
         self._conn.execute("DELETE FROM projects WHERE project_id=?", (pid,))
         self._conn.commit()
         return True
@@ -118,10 +123,24 @@ class ProjectStore:
     def _touch(self, pid: str) -> None:
         self._conn.execute("UPDATE projects SET updated_ts=? WHERE project_id=?", (_now(), pid))
 
-    def set_stage(self, pid: str, stage: str) -> None:
+    def set_stage(self, pid: str, stage: str, *, close_party: Optional[str] = None,
+                  close_reason: Optional[str] = None) -> None:
+        """Set the lifecycle stage. Entering a CLOSED stage (CANCELLED/LOST) records the close-out
+        (who ended it + why + when); moving to any other stage clears a prior close-out so a reopened
+        project is no longer stamped cancelled. ``close_party``/``close_reason`` are ignored for
+        non-closed stages."""
         assert stage in STAGES, f"unknown stage: {stage}"
-        self._conn.execute("UPDATE projects SET stage=?, updated_ts=? WHERE project_id=?",
-                           (stage, _now(), pid))
+        now = _now()
+        if stage in CLOSED_STAGES:
+            self._conn.execute(
+                "UPDATE projects SET stage=?, close_party=?, close_reason=?, closed_at=?, updated_ts=? "
+                "WHERE project_id=?",
+                (stage, close_party or None, close_reason or None, now, now, pid))
+        else:
+            self._conn.execute(
+                "UPDATE projects SET stage=?, close_party=NULL, close_reason=NULL, closed_at=NULL, "
+                "updated_ts=? WHERE project_id=?",
+                (stage, now, pid))
         self._conn.commit()
 
     def set_item_count(self, pid: str, n: int) -> None:
@@ -155,6 +174,24 @@ class ProjectStore:
             "SELECT thread_root FROM project_threads WHERE project_id=? ORDER BY added_ts ASC",
             (pid,)).fetchall()
         return [r["thread_root"] for r in rows]
+
+    # -- owners (multi) -------------------------------------------------------
+
+    def set_owners(self, pid: str, owners: list[str]) -> None:
+        """Replace the project's owner set (multi-owner, from the roster). ``[]`` clears it. The set is
+        rewritten each call (mirrors a multi-select picker); de-dupes + trims blanks."""
+        self._conn.execute("DELETE FROM project_owners WHERE project_id=?", (pid,))
+        for o in dict.fromkeys(n.strip() for n in (owners or []) if n and n.strip()):
+            self._conn.execute(
+                "INSERT OR IGNORE INTO project_owners(project_id, owner, ts) VALUES (?,?,?)",
+                (pid, o, _now()))
+        self._touch(pid)
+        self._conn.commit()
+
+    def owners_for(self, pid: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT owner FROM project_owners WHERE project_id=? ORDER BY ts, owner", (pid,)).fetchall()
+        return [r["owner"] for r in rows]
 
     # -- canonical fields -----------------------------------------------------
 
@@ -236,6 +273,31 @@ class ProjectStore:
             " FROM project_field_history WHERE project_id=?"
             " ORDER BY COALESCE(acquired_at, ts) DESC, rowid DESC", (pid,)).fetchall()
         return [dict(r) for r in rows]
+
+    def participants(self, pid: str) -> list[dict[str, Any]]:
+        """Who has contributed knowledge to this project, aggregated from the ledger's ``asserted_by``
+        (ADR-015 surfacing — multiple people report info; this rolls them up). Returns
+        ``[{name, contributions, channels, last_at}]`` newest-first. Unattributed rows (no asserted_by)
+        are skipped — the answer is the named people who fed the project."""
+        rows = self._conn.execute(
+            "SELECT asserted_by, channel, acquired_at, ts FROM project_field_history WHERE project_id=?",
+            (pid,)).fetchall()
+        agg: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            who = (r["asserted_by"] or "").strip()
+            if not who:
+                continue
+            a = agg.setdefault(who, {"name": who, "contributions": 0, "channels": set(), "last_at": ""})
+            a["contributions"] += 1
+            if r["channel"]:
+                a["channels"].add(r["channel"])
+            at = r["acquired_at"] or r["ts"] or ""
+            if at > a["last_at"]:
+                a["last_at"] = at
+        out = [{"name": a["name"], "contributions": a["contributions"],
+                "channels": sorted(a["channels"]), "last_at": a["last_at"]} for a in agg.values()]
+        out.sort(key=lambda x: (x["last_at"], x["name"]), reverse=True)
+        return out
 
     def fields_for(self, pid: str) -> dict[str, tuple[str, str]]:
         """{address: (value, source_mid)} for this project's canonical decisions (merge input)."""

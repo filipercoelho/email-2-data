@@ -165,16 +165,46 @@ _BODY = """
   .tl-h b{font-weight:700}
   .tl-m{font-size:11px;color:var(--mut2);margin-top:2px}
   .tl-old{color:var(--mut2);text-decoration:line-through;margin-right:6px}
+  /* ── owners (multi) ─────────────────────────────────────────────────── */
+  .owners{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
+  .owners .olbl{font-size:11.5px;color:var(--mut);font-weight:600}
+  .ochip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--int);
+    background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:2px 4px 2px 9px}
+  .ochip .ox{border:none;background:none;color:var(--mut2);cursor:pointer;font-size:11px;padding:0 2px;line-height:1}
+  .ochip .ox:hover{color:var(--red)}
+  .oadd{font-size:11.5px;font-weight:600;color:var(--mut);background:#fff;border:1px solid var(--bd);
+    border-radius:20px;padding:2px 10px;cursor:pointer}
+  .oadd:hover{border-color:var(--ac);color:var(--ac)}
+  .menu .mhdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:5px 11px 3px}
+  .menu .mi.reset{color:var(--int);border-top:1px solid var(--bd2);margin-top:3px}
+  /* ── close-out (cancel / lost) ──────────────────────────────────────── */
+  .closed{background:#fbeaea;border:1px solid #f3c9c9;color:var(--red);border-radius:9px;
+    padding:7px 12px;font-size:12.5px;font-weight:600;margin:4px 0 8px}
+  .cof{background:var(--card);border:1px solid #f3c9c9;border-radius:11px;padding:13px 15px;margin:6px 0 10px}
+  .cof .lbl{font-size:12.5px;font-weight:650;color:var(--tx);margin-bottom:8px}
+  .cof textarea{width:100%;min-height:54px;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;
+    font:13px/1.5 inherit;color:var(--tx);resize:vertical;outline:none;margin-top:8px}
+  .cof textarea:focus{border-color:var(--ac)}
+  .cofacts{display:flex;justify-content:flex-end;gap:8px;margin-top:9px}
+  .act-btn.danger{border-color:var(--red);color:var(--red)} .act-btn.danger:hover{background:#fbeaea}
+  /* ── participants (who contributed) ─────────────────────────────────── */
+  .parts{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:2px 0 8px;font-size:11.5px}
+  .parts .plbl{color:var(--mut);font-weight:600}
+  .pcontrib{color:var(--purple);background:#efeafb;border:1px solid #ddd2f5;border-radius:20px;padding:1px 9px;cursor:default}
+  .pcontrib b{font-variant-numeric:tabular-nums}
 </style>
 """
 
-_STAGES = ["LEAD", "GATHERING", "ESTIMABLE", "QUOTED", "WON", "LOST", "ARCHIVED"]
-_TERMINAL = {"QUOTED", "WON", "LOST", "ARCHIVED"}
+_STAGES = ["LEAD", "GATHERING", "ESTIMABLE", "QUOTED", "WON", "LOST", "CANCELLED", "ARCHIVED"]
+_TERMINAL = {"QUOTED", "WON", "LOST", "CANCELLED", "ARCHIVED"}
 
 _LENS_JS = r"""
 let projects = PROJECTS.slice(), focus = 0, selected = null;
-const STAGES = ['LEAD','GATHERING','ESTIMABLE','QUOTED','WON','LOST','ARCHIVED'];
-const TERMINAL = new Set(['QUOTED','WON','LOST','ARCHIVED']);
+const STAGES = ['LEAD','GATHERING','ESTIMABLE','QUOTED','WON','LOST','CANCELLED','ARCHIVED'];
+const TERMINAL = new Set(['QUOTED','WON','LOST','CANCELLED','ARCHIVED']);
+const CLOSED_STAGES = new Set(['CANCELLED','LOST']);     // carry a close-out (party + reason)
+const STAGEpt = {LEAD:'Lead',GATHERING:'A reunir',ESTIMABLE:'Orçamentável',QUOTED:'Orçamentado',WON:'Ganho',LOST:'Perdido',CANCELLED:'Cancelado',ARCHIVED:'Arquivado'};
+const PARTYpt = {client:'Cliente',supplier:'Fornecedor',our:'Nós'};
 
 /* ── field registry (from jobspec.FIELDS — single source of truth) ────── */
 const byKey = {}; FIELDS.forEach(f=>byKey[f.key]=f);
@@ -370,6 +400,80 @@ function captureHTML(){
     +'</div>';
 }
 
+/* ── owners (multi) · close-out (cancel/lost) · participants — ADR-017/-018, ADR-015 surfacing ── */
+let roster = (typeof ROSTER!=='undefined'?ROSTER:[]).slice();
+let _pendingStage=null, _coParty='client';
+
+function ownersBarHTML(){
+  const ow=selected.owners||[];
+  const chips=ow.length
+    ? ow.map(o=>'<span class="ochip">@'+esc(o)+'<button class="ox" data-own-rm="'+esc(o)+'" aria-label="remover dono">✕</button></span>').join('')
+    : '<span class="hint2">sem donos</span>';
+  return '<div class="owners" id="_ownersbar"><span class="olbl">Donos:</span>'+chips
+    +'<button class="oadd" id="_ownadd">+ atribuir</button></div>';
+}
+function ownerPicker(){
+  const ow=new Set(selected.owners||[]);
+  const items=roster.map(nm=>'<div class="mi'+(ow.has(nm)?' on':'')+'" data-own-tg="'+esc(nm)+'">'+(ow.has(nm)?'✓ ':'')+'@'+esc(nm)+'</div>').join('')
+    ||'<div class="mi" style="color:var(--mut2)">sem equipa — adiciona um</div>';
+  const m=$('#_menu');
+  m.innerHTML='<div class="mhdr">Donos do projeto</div>'+items+'<div class="mi reset" data-own-new="1">+ novo dono…</div>';
+  m.dataset.kind='projowner'; m.classList.remove('hidden');
+  const b=$('#_ownadd').getBoundingClientRect();
+  m.style.top=(window.scrollY+b.bottom+4)+'px'; m.style.left=(window.scrollX+Math.max(8,b.left))+'px';
+}
+async function setOwners(owners){
+  try{ selected=await post('/api/projects/'+selected.project_id+'/owners',{owners});
+    const bar=$('#_ownersbar'); if(bar) bar.outerHTML=ownersBarHTML(); }
+  catch(e){ toast(S.revertido); }
+}
+async function toggleOwner(name){
+  const ow=new Set(selected.owners||[]);
+  ow.has(name)?ow.delete(name):ow.add(name);
+  await setOwners([...ow]); ownerPicker();        // keep the picker open with refreshed checks
+}
+async function addRosterOwner(){
+  const nm=prompt('Novo dono (nome):'); if(!nm||!nm.trim()) return;
+  try{ const r=await post('/api/roster',{name:nm.trim()}); roster=r.roster||roster; await toggleOwner(nm.trim()); }
+  catch(e){ toast(S.revertido); }
+}
+
+function closeoutBannerHTML(){
+  const p=selected.project;
+  if(!CLOSED_STAGES.has(p.stage)) return '';
+  const party=p.close_party?(' · '+(PARTYpt[p.close_party]||p.close_party)):'';
+  const reason=p.close_reason?(' — '+esc(p.close_reason)):'';
+  return '<div class="closed">✗ '+(STAGEpt[p.stage]||p.stage)+party+reason+'</div>';
+}
+function openCloseout(stage){
+  _pendingStage=stage; _coParty='client';
+  const parties=[['client','Cliente'],['supplier','Fornecedor'],['our','Nós']];
+  const box=$('#_closeform'); if(!box) return;
+  box.innerHTML='<div class="cof"><div class="lbl">'+(stage==='CANCELLED'?'Cancelar projeto':'Marcar como perdido')+' — de quem partiu e porquê?</div>'
+    +'<div class="chips" id="_coparty">'+parties.map((p,i)=>'<span class="chip'+(i===0?' on':'')+'" data-party="'+p[0]+'">'+p[1]+'</span>').join('')+'</div>'
+    +'<textarea id="_coreason" placeholder="Motivo (opcional): o que aconteceu?" spellcheck="false"></textarea>'
+    +'<div class="cofacts"><button class="act-btn" id="_cocancel">Voltar</button>'
+    +'<button class="act-btn danger" id="_coconfirm">Confirmar</button></div></div>';
+  box.classList.remove('hidden');
+  const ta=$('#_coreason'); if(ta) ta.focus();
+}
+async function confirmCloseout(){
+  try{ selected=await post('/api/projects/'+selected.project_id+'/stage',
+        {stage:_pendingStage, close_party:_coParty, close_reason:(($('#_coreason')||{}).value||'').trim()});
+    renderDetail(); toast('atualizado'); }
+  catch(e){ toast(S.revertido); }
+}
+
+async function loadParticipants(){
+  const box=$('#_participants'); if(!box||!selected) return;
+  try{
+    const d=await (await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/participants')).json();
+    const ps=d.participants||[];
+    box.innerHTML=ps.length?('<span class="plbl">Contribuíram:</span>'
+      +ps.map(p=>'<span class="pcontrib" title="'+p.contributions+' contribuição(ões)'+(p.channels&&p.channels.length?' · '+esc(p.channels.join(', ')):'')+'">@'+esc(p.name)+' <b>'+p.contributions+'</b></span>').join('')):'';
+  }catch(e){ box.innerHTML=''; }
+}
+
 function detailHTML(){
   const p=selected.project, rd=selected.readiness||{};
   const job=selected.job_fields||{}, items=selected.items||[], customs=selected.custom_fields||{};
@@ -430,6 +534,10 @@ function detailHTML(){
     +'<span id="_ring">'+ringHTML(rd.coverage||0,rd.estimable||false)+'</span>'
     +'<div class="pstage">'+stages+'</div>'
     +'<span class="grow"></span>'+cpBadge+clientSpan+'</div>'
+    +ownersBarHTML()
+    +'<div id="_participants" class="parts"></div>'
+    +closeoutBannerHTML()
+    +'<div id="_closeform" class="hidden"></div>'
     +contestedBanner()+tabs
     +'<div class="ppanel" data-panel="espec">'+espec+'</div>'
     +'<div class="ppanel hidden" data-panel="origem">'+origem+'</div>'
@@ -487,6 +595,7 @@ function renderDetail(){
   const wd=$('#_capwhen'); if(wd&&!wd.value){ try{wd.value=new Date().toISOString().slice(0,10);}catch(_){} }
   loadSource();
   loadDraft();
+  loadParticipants();
   if(_registarFromURL()) showTab('registar');   // deep-link straight into capture (?registar=nota)
 }
 
@@ -622,9 +731,21 @@ $('#_detail').addEventListener('click', async e=>{
   if(!selected) return;
   if(e.target.closest('#_backbtn')){closeDetail();return;}
   const st=e.target.closest('.pstage .st');
-  if(st){ try{await post('/api/projects/'+selected.project_id+'/stage',{stage:st.dataset.stage});
-    selected=await (await fetch('/api/projects/'+selected.project_id)).json(); renderDetail();}
+  if(st){ const stage=st.dataset.stage;
+    // CANCELLED/LOST open an inline close-out form (party + reason) instead of posting immediately.
+    if(CLOSED_STAGES.has(stage) && selected.project.stage!==stage){ openCloseout(stage); e.stopPropagation(); return; }
+    try{await post('/api/projects/'+selected.project_id+'/stage',{stage});
+      selected=await (await fetch('/api/projects/'+selected.project_id)).json(); renderDetail();}
     catch(err){toast(S.revertido);} return; }
+  /* owners (multi) */
+  if(e.target.closest('#_ownadd')){ ownerPicker(); e.stopPropagation(); return; }
+  const orm=e.target.closest('[data-own-rm]');
+  if(orm){ await setOwners((selected.owners||[]).filter(o=>o!==orm.dataset.ownRm)); return; }
+  /* close-out form */
+  const coc=e.target.closest('#_coparty .chip');
+  if(coc){ _coParty=coc.dataset.party; coc.parentElement.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===coc)); return; }
+  if(e.target.closest('#_coconfirm')){ await confirmCloseout(); return; }
+  if(e.target.closest('#_cocancel')){ const b=$('#_closeform'); if(b){b.classList.add('hidden');b.innerHTML='';} return; }
   if(e.target.closest('#_attachbtn')){
     const ref=prompt('Cola o thread_root ou message_id do email a ligar:'); if(!ref||!ref.trim()) return;
     try{ selected=await post('/api/projects/'+selected.project_id+'/attach',{ref:ref.trim()});
@@ -693,6 +814,13 @@ $('#_detail').addEventListener('click', async e=>{
     catch(err){ toast(S.revertido); } return; }
 });
 
+/* owner picker menu (shared #_menu): toggle a roster name, or add a brand-new owner */
+$('#_menu').addEventListener('click', async e=>{
+  const mi=e.target.closest('.mi'); if(!mi||!selected) return;
+  if(mi.dataset.ownNew){ await addRosterOwner(); return; }
+  if(mi.dataset.ownTg){ await toggleOwner(mi.dataset.ownTg); return; }
+});
+
 /* deep-link + history: open the project named in the URL on load, and let the browser
    back/forward buttons move between list and detail. */
 window.addEventListener('popstate',()=>{
@@ -715,10 +843,11 @@ window.addEventListener('popstate',()=>{
 
 
 def build_html(projects: list[dict[str, Any]],
-               nav_counts: dict[str, int] | None = None) -> str:
+               nav_counts: dict[str, int] | None = None,
+               roster: list[str] | None = None) -> str:
     return cockpit_ui.page(
         "Projetos", "projetos", _BODY,
-        embeds={"projects": projects, "fields": _FIELDS},
+        embeds={"projects": projects, "fields": _FIELDS, "roster": list(roster or [])},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
     )

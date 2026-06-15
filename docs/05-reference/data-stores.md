@@ -48,6 +48,22 @@ loses messages.
 
 ## Project lifecycle
 
-`LEAD → GATHERING → ESTIMABLE → QUOTED → WON | LOST`, plus `ARCHIVED` (soft-retire, hidden by
-default). A successful export advances a Project to `QUOTED`
-([ADR-011](../03-decisions/adr-011-export-honesty-boundary.md)).
+`LEAD → GATHERING → ESTIMABLE → QUOTED → WON | LOST`, plus `CANCELLED` (called off in flight) and
+`ARCHIVED` (soft-retire, hidden by default). A successful export advances a Project to `QUOTED`
+([ADR-011](../03-decisions/adr-011-export-honesty-boundary.md)). `CANCELLED`/`LOST` carry a **close-out**
+— `close_party` (client/supplier/our) + `close_reason` + `closed_at`, cleared on reopen
+([ADR-017](../03-decisions/adr-017-project-close-out-lifecycle.md)).
+
+## Ownership & roster (v4)
+
+Owners are a **set**, not a single field: `thread_owners(thread_root, owner)` and
+`project_owners(project_id, owner)` join tables (the pre-v4 single `thread_state.owner` is backfilled
+into `thread_owners` and then vestigial). The owner **roster** is `settings.team` (config, ordered)
+plus an in-app `roster(name)` table — the effective roster is their union, computed per request so a
+newly-added owner needs no restart ([ADR-018](../03-decisions/adr-018-multi-owner-and-in-app-roster.md)).
+The per-project **participants** view (`GET /api/projects/{pid}/participants`) is a read-only rollup of
+the ADR-015 ledger's `asserted_by` — who fed knowledge into the project.
+
+> **Migration note:** v4 added the close-out columns + the three tables above. v3 added the ADR-015
+> provenance columns. Each is a guarded `ALTER`/`CREATE IF NOT EXISTS` in `_migrate`, pinned by
+> `tests/test_workspace_migration.py` (a prior-version DB *with rows*).

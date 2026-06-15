@@ -330,3 +330,56 @@ def test_dangling_threads_detection():
     crm = _FakeCrm(known={"live-root"})
     assert p.dangling_threads(store, pid, crm) == ["stale-root"]
     assert p.dangling_threads(store, pid, None) == []   # degraded mode: never false-alarm
+
+
+# ── lifecycle: CANCELLED + close-out (ADR-017) ───────────────────────────────
+
+def test_cancel_records_party_reason_and_closed_at():
+    store = p.ProjectStore(_conn())
+    pid = store.create("Troféus")
+    store.set_stage(pid, "CANCELLED", close_party="client", close_reason="cliente desistiu do evento")
+    row = store.get(pid)
+    assert row["stage"] == "CANCELLED" and row["close_party"] == "client"
+    assert row["close_reason"] == "cliente desistiu do evento" and row["closed_at"]
+    assert "CANCELLED" in p.STAGES and "CANCELLED" in p.TERMINAL_STAGES
+
+
+def test_reopening_a_cancelled_project_clears_the_closeout():
+    store = p.ProjectStore(_conn())
+    pid = store.create("X")
+    store.set_stage(pid, "CANCELLED", close_party="our", close_reason="margem insuficiente")
+    store.set_stage(pid, "GATHERING")                       # reopened
+    row = store.get(pid)
+    assert row["stage"] == "GATHERING"
+    assert row["close_party"] is None and row["close_reason"] is None and row["closed_at"] is None
+
+
+def test_lost_also_carries_a_closeout_party():
+    store = p.ProjectStore(_conn())
+    pid = store.create("Y")
+    store.set_stage(pid, "LOST", close_party="supplier", close_reason="fornecedor não entrega a tempo")
+    row = store.get(pid)
+    assert row["stage"] == "LOST" and row["close_party"] == "supplier" and row["closed_at"]
+
+
+# ── multi-owner on a project ─────────────────────────────────────────────────
+
+def test_project_owners_set_and_clear():
+    store = p.ProjectStore(_conn())
+    pid = store.create("Z")
+    assert store.owners_for(pid) == []
+    store.set_owners(pid, ["Pedro", "Rita", "Pedro", ""])    # de-duped + blank trimmed
+    assert store.owners_for(pid) == ["Pedro", "Rita"]
+    store.set_owners(pid, ["Filipe"])                         # replace semantics
+    assert store.owners_for(pid) == ["Filipe"]
+    store.set_owners(pid, [])
+    assert store.owners_for(pid) == []
+
+
+def test_delete_project_also_clears_owners():
+    conn = _conn()
+    store = p.ProjectStore(conn)
+    pid = store.create("Del")
+    store.set_owners(pid, ["Pedro"])
+    assert store.delete(pid) is True
+    assert conn.execute("SELECT COUNT(*) FROM project_owners WHERE project_id=?", (pid,)).fetchone()[0] == 0

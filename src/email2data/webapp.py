@@ -53,7 +53,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     rpb = (reply_pb if reply_pb is not None
            else replydraft.load_playbook(Path(settings["__settings_path__"]).parents[1] / "config" / "reply_playbook.md"))
     emails, contacts, cost = prepared if prepared is not None else report.prepare(settings)
-    _team = list(settings.get("team", []) or [])  # owner roster for the Fila (A5); editable in settings.json
+    _team = list(settings.get("team", []) or [])  # base owner roster (settings.json); never removable in-app
+
+    def _roster() -> list[str]:
+        """Effective owner roster = settings.team (in its configured order) followed by the in-app-added
+        names (workspace.db). Computed per request so a freshly-added owner shows up without a restart
+        (v4: "define new owners")."""
+        return list(_team) + [n for n in ws.roster() if n not in _team]
 
     # When the caller injects state (tests), the data isn't backed by real files — disable the
     # rebuild/startup-sync machinery so we never try to re-read results.jsonl from a fixture.
@@ -572,6 +578,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         d = spec.to_dict()
         return {
             "project_id": pid, "project": proj,
+            "owners": pstore.owners_for(pid),       # multi-owner (v4)
             "job_fields": d["job_fields"], "items": d["items"], "readiness": rd,
             "custom_fields": d["custom_fields"], "field_provenance": pstore.field_provenance(pid),
             "provenance": prov, "conflicts": conflicts,
@@ -620,6 +627,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         for pr in pstore.list(include_archived=archived):
             cov, est = _summary_for(pr)   # denormalized read (F3); no per-row build_canonical
             out.append({**pr, "n_threads": len(pstore.threads_for(pr["project_id"])),
+                        "owners": pstore.owners_for(pr["project_id"]),
                         "coverage": cov, "estimable": est})
         return JSONResponse(out)
 
@@ -768,14 +776,40 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
     @app.post("/api/projects/{pid}/stage")
     async def project_stage(pid: str, request: Request):
+        """Set the lifecycle stage. For a CLOSED stage (CANCELLED/LOST) the body may carry
+        ``close_party`` (client|supplier|our) + ``close_reason`` (free text); they're recorded as the
+        close-out and cleared automatically if the project later reopens."""
+        from .workspace import CLOSE_PARTIES
         if pstore.get(pid) is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         body = await request.json()
         stage = str(body.get("stage", ""))
         if stage not in _project.STAGES:
             return JSONResponse({"error": "bad stage"}, status_code=400)
-        pstore.set_stage(pid, stage)
+        party = (str(body.get("close_party", "") or "").strip().lower() or None)
+        if party is not None and party not in CLOSE_PARTIES:
+            return JSONResponse({"error": "bad close_party"}, status_code=400)
+        reason = str(body.get("close_reason", "") or "").strip() or None
+        pstore.set_stage(pid, stage, close_party=party, close_reason=reason)
         return JSONResponse(_project_view(pid))
+
+    @app.post("/api/projects/{pid}/owners")
+    async def project_owners(pid: str, request: Request):
+        """Assign owners (multi) to a project, from the roster. ``{owners: [...]}``; replaces the set."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        body = await request.json()
+        owners = [str(o).strip() for o in (body.get("owners") or []) if str(o).strip()]
+        pstore.set_owners(pid, owners)
+        return JSONResponse(_project_view(pid))
+
+    @app.get("/api/projects/{pid}/participants")
+    def project_participants(pid: str):
+        """Who has fed knowledge into this project — the named people from the capture ledger's
+        asserted_by, rolled up (ADR-015 surfacing of the multi-participant scenario)."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"participants": pstore.participants(pid)})
 
     @app.post("/api/projects/{pid}/export")
     async def project_export(pid: str, request: Request):
@@ -955,13 +989,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def fila():
         frows = _fila_rows()  # build once, share with the nav badges (F3)
         return HTMLResponse(fila_page.build_fila_html(
-            frows, _team,
+            frows, _roster(),
             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             nav_counts=_nav_counts(frows=frows)))
 
     @app.get("/api/fila")
     def api_fila():
-        return JSONResponse({"rows": _fila_rows(), "team": _team})
+        return JSONResponse({"rows": _fila_rows(), "team": _roster()})
 
     @app.post("/api/thread/handled")
     async def thread_handled(request: Request):
@@ -974,13 +1008,43 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
     @app.post("/api/thread/owner")
     async def thread_owner(request: Request):
+        """Assign owners to a Fila thread. Accepts ``{owners: [...]}`` (multi-owner, preferred) or the
+        legacy ``{owner: "x"}`` (single; "" clears). The full set is replaced each call."""
         body = await request.json()
         root = str(body.get("thread_root", "")).strip()
         if not root:
             return JSONResponse({"error": "thread_root required"}, status_code=400)
-        owner = str(body.get("owner", "")).strip()
-        ws.set_thread_owner(root, owner)
-        return JSONResponse({"ok": True, "thread_root": root, "owner": owner})
+        if "owners" in body:
+            owners = [str(o).strip() for o in (body.get("owners") or []) if str(o).strip()]
+        else:
+            one = str(body.get("owner", "")).strip()
+            owners = [one] if one else []
+        ws.set_thread_owners(root, owners)
+        return JSONResponse({"ok": True, "thread_root": root,
+                             "owner": owners[0] if owners else "", "owners": owners})
+
+    # -- in-app owner roster (v4): effective roster = settings.team ∪ ws.roster() ------------------
+    @app.get("/api/roster")
+    def get_roster():
+        return JSONResponse({"roster": _roster(), "team": _team, "added": ws.roster()})
+
+    @app.post("/api/roster")
+    async def add_roster(request: Request):
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return JSONResponse({"error": "name required"}, status_code=400)
+        ws.roster_add(name)
+        return JSONResponse({"ok": True, "roster": _roster()})
+
+    @app.post("/api/roster/remove")
+    async def remove_roster(request: Request):
+        """Remove an in-app-added owner name. settings.team names live in config and are not removable
+        here (returned in ``protected``)."""
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        ws.roster_remove(name)
+        return JSONResponse({"ok": True, "roster": _roster(), "protected": _team})
 
     # -------------------------------------------------------------------------
     # C2 — Contrapartes lens
@@ -1129,8 +1193,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         for p in pstore.list():
             cov, est = _summary_for(p)
             projects_summary.append({**p, "coverage": cov, "estimable": est,
-                                     "n_threads": len(pstore.threads_for(p["project_id"]))})
-        return projetos_page.build_html(projects_summary, nav_counts=_nav_counts())
+                                     "n_threads": len(pstore.threads_for(p["project_id"])),
+                                     "owners": pstore.owners_for(p["project_id"])})
+        return projetos_page.build_html(projects_summary, nav_counts=_nav_counts(), roster=_roster())
 
     @app.get("/projetos", response_class=HTMLResponse)
     def projetos_view():

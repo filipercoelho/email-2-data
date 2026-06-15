@@ -57,8 +57,8 @@ def test_v2_to_v3_adds_columns_backfills_and_roundtrips(tmp_path):
     ws = Workspace(db).connect()          # runs executescript(SCHEMA) (no-op on existing) + _migrate
     conn = ws._conn
 
-    # 1) the version is stamped AND the new columns actually exist on the pre-existing tables
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    # 1) the version is stamped to the latest AND the v3 columns actually exist on the pre-existing tables
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     for table in ("project_fields", "project_field_history"):
         assert {"channel", "asserted_by", "acquired_at"} <= _cols(conn, table), table
     assert {"coverage", "estimable"} <= _cols(conn, "projects")
@@ -77,10 +77,10 @@ def test_v2_to_v3_adds_columns_backfills_and_roundtrips(tmp_path):
     ws.close()
 
 
-def test_fresh_db_is_v3_and_migrate_is_idempotent(tmp_path):
+def test_fresh_db_is_latest_and_migrate_is_idempotent(tmp_path):
     db = tmp_path / "fresh.db"
     ws = Workspace(db).connect()
-    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     ws.close()
     # Reconnecting an already-migrated DB must be a clean no-op (guarded ALTERs / early return).
     ws2 = Workspace(db).connect()
@@ -101,4 +101,76 @@ def test_events_are_appended_not_current_values(tmp_path):
     assert [r["op"] for r in tl] == ["event", "event"]
     assert tl[0]["acquired_at"] == "2026-06-13" and tl[0]["new_value"] == "avançar em inox"  # newest first
     assert tl[0]["field"] == "__decision__" and tl[0]["channel"] == "call"
+    ws.close()
+
+
+# The v3 shape of the two tables the v4 migration touches — WITHOUT the v4 close-out columns, and with
+# a single owner on thread_state (the column the v4 backfill carries into thread_owners).
+_V3_PARTIAL = """
+CREATE TABLE projects (
+    project_id TEXT PRIMARY KEY, title TEXT NOT NULL, client_email TEXT, client_name TEXT,
+    stage TEXT NOT NULL, n_items INTEGER DEFAULT 1, created_ts TEXT, updated_ts TEXT,
+    external_id TEXT, external_ts TEXT, coverage REAL, estimable INTEGER
+);
+CREATE TABLE thread_state (
+    thread_root TEXT PRIMARY KEY, owner TEXT, handled INTEGER DEFAULT 0, handled_ts TEXT, updated_ts TEXT
+);
+"""
+
+
+def _make_v3_db(path):
+    c = sqlite3.connect(path)
+    c.executescript(_V3_PARTIAL)
+    c.execute("INSERT INTO projects(project_id,title,stage,created_ts,updated_ts)"
+              " VALUES ('p-0001','Velho','LEAD','2026-06-01','2026-06-01')")
+    c.execute("INSERT INTO thread_state(thread_root,owner,handled,updated_ts)"
+              " VALUES ('t1','Pedro',0,'2026-06-01')")          # a pre-v4 single owner
+    c.execute("INSERT INTO thread_state(thread_root,owner,handled,updated_ts)"
+              " VALUES ('t2','',1,'2026-06-01')")                # handled, no owner
+    c.execute("PRAGMA user_version = 3")
+    c.commit()
+    c.close()
+
+
+def test_v3_to_v4_adds_closeout_columns_and_backfills_single_owner(tmp_path):
+    db = tmp_path / "workspace.db"
+    _make_v3_db(db)
+
+    ws = Workspace(db).connect()                       # executescript(SCHEMA) (no-op on existing) + _migrate
+    conn = ws._conn
+
+    # version stamped to latest; the close-out columns now exist on the pre-existing projects table
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert {"close_party", "close_reason", "closed_at"} <= _cols(conn, "projects")
+
+    # the single owner is carried forward into the multi-owner join table — no Fila assignment lost
+    assert ws.thread_owners() == {"t1": ["Pedro"]}
+    st = ws.thread_states()
+    assert st["t1"]["owners"] == ["Pedro"] and st["t1"]["owner"] == "Pedro"   # legacy single still readable
+    assert st["t2"]["owners"] == [] and st["t2"]["handled"] is True           # handled-only thread survives
+    ws.close()
+
+
+def test_multi_owner_thread_roundtrip(tmp_path):
+    ws = Workspace(tmp_path / "w.db").connect()
+    ws.set_thread_owners("t1", ["Pedro", "Rita", "Pedro", " "])   # de-dupes + trims blanks
+    assert ws.thread_owners()["t1"] == ["Pedro", "Rita"]
+    ws.add_thread_owner("t1", "Filipe")
+    assert set(ws.thread_owners()["t1"]) == {"Pedro", "Rita", "Filipe"}
+    ws.remove_thread_owner("t1", "Pedro")
+    assert set(ws.thread_owners()["t1"]) == {"Rita", "Filipe"}
+    ws.set_thread_owners("t1", [])                                 # clear
+    assert "t1" not in ws.thread_owners()
+    ws.close()
+
+
+def test_roster_add_remove_is_additive_and_deduped(tmp_path):
+    ws = Workspace(tmp_path / "w.db").connect()
+    assert ws.roster() == []
+    ws.roster_add("Sofia")
+    ws.roster_add("Sofia")          # idempotent
+    ws.roster_add("  ")             # blank ignored
+    assert ws.roster() == ["Sofia"]
+    ws.roster_remove("Sofia")
+    assert ws.roster() == []
     ws.close()

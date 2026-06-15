@@ -47,7 +47,10 @@ CREATE TABLE IF NOT EXISTS projects (
     external_id  TEXT,               -- external system id (e.g. materials-costing PRJ-xxxx); NULL until exported
     external_ts  TEXT,
     coverage     REAL,               -- denormalized Gate-1 coverage (0-1), recomputed on write/sync (v3)
-    estimable    INTEGER             -- denormalized Gate-1 estimable flag, recomputed on write/sync (v3)
+    estimable    INTEGER,            -- denormalized Gate-1 estimable flag, recomputed on write/sync (v3)
+    close_party  TEXT,               -- CANCELLED/LOST close-out: who ended it — client|supplier|our (v4)
+    close_reason TEXT,               -- free-text why the project was cancelled/lost (v4)
+    closed_at    TEXT                 -- UTC ISO when it was closed; NULL while open (v4)
 );
 CREATE TABLE IF NOT EXISTS project_threads (
     project_id  TEXT NOT NULL,
@@ -101,13 +104,39 @@ CREATE TABLE IF NOT EXISTS identity_links (
     account_key TEXT NOT NULL,       -- the cluster key (e.g. "acme.pt" or "nif:501234567")
     ts          TEXT
 );
+-- Multi-owner (v4): owners are a SET per Fila thread / per project, so several team members can
+-- co-own. Join tables (mirror project_threads); the legacy single thread_state.owner column is
+-- backfilled into thread_owners on migration and then read/written only via these tables.
+CREATE TABLE IF NOT EXISTS thread_owners (
+    thread_root TEXT NOT NULL,
+    owner       TEXT NOT NULL,
+    ts          TEXT,
+    PRIMARY KEY (thread_root, owner)
+);
+CREATE TABLE IF NOT EXISTS project_owners (
+    project_id  TEXT NOT NULL,
+    owner       TEXT NOT NULL,
+    ts          TEXT,
+    PRIMARY KEY (project_id, owner)
+);
+-- In-app owner roster (v4): names addable from the UI, AUGMENTING the static settings.json `team`
+-- ("define new owners" without editing config). Effective roster = settings.team ∪ this table.
+CREATE TABLE IF NOT EXISTS roster (
+    name     TEXT PRIMARY KEY,
+    added_ts TEXT
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
 # PRAGMA user_version and runs any pending migrations (see `_migrate`). Unlike crm.db, this database
 # is never rebuilt, so it must evolve in place. v3 (2026-06-14): provenance columns + denormalized
-# coverage/estimable + reserved __kind__ events in project_field_history (ADR-015).
-SCHEMA_VERSION = 3
+# coverage/estimable + reserved __kind__ events in project_field_history (ADR-015). v4 (2026-06-15):
+# project close-out columns (CANCELLED/LOST party+reason+closed_at) + multi-owner join tables
+# (thread_owners/project_owners, single owner backfilled) + in-app roster (ADR-017/-018).
+SCHEMA_VERSION = 4
+
+# Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
+CLOSE_PARTIES = ("client", "supplier", "our")
 
 RECLASSIFY_FIELDS = frozenset({"counterparty", "purpose", "priority"})
 # Reserved decision field: how many line items this job has (human override of the LLM's item count).
@@ -184,6 +213,19 @@ class Workspace:
                 "UPDATE project_field_history SET channel = CASE WHEN source_mid IS NOT NULL "
                 "AND source_mid NOT IN ('', 'user') THEN 'email' ELSE 'manual' END, "
                 "acquired_at = ts WHERE channel IS NULL")
+        if version < 4:
+            # Project close-out (cancellation/loss reason). The thread_owners/project_owners/roster
+            # tables are delivered by SCHEMA (CREATE IF NOT EXISTS, run before _migrate) — only the new
+            # COLUMNS need an explicit ALTER here.
+            self._add_column("projects", "close_party", "TEXT")
+            self._add_column("projects", "close_reason", "TEXT")
+            self._add_column("projects", "closed_at", "TEXT")
+            # Carry every existing single owner forward into the multi-owner join table so no Fila
+            # assignment is lost when ownership moves from thread_state.owner to thread_owners.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO thread_owners(thread_root, owner, ts) "
+                "SELECT thread_root, owner, updated_ts FROM thread_state "
+                "WHERE owner IS NOT NULL AND owner != ''")
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 
@@ -251,14 +293,48 @@ class Workspace:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def set_thread_owner(self, thread_root: str, owner: str, ts: str = "") -> None:
-        """Assign (or clear, with ``owner=""``) the owner of a thread. Idempotent upsert."""
+        """Legacy single-owner setter: REPLACE the owner set with ``[owner]`` (or clear on ``""``).
+        Kept so existing callers/tests work; multi-owner goes through ``set_thread_owners``."""
+        self.set_thread_owners(thread_root, [owner] if owner else [], ts)
+
+    def set_thread_owners(self, thread_root: str, owners: list[str], ts: str = "") -> None:
+        """Replace the FULL owner set of a thread (multi-owner). ``[]`` clears it. Idempotent — the set
+        is rewritten each call, so it mirrors a multi-select picker. De-dupes + trims blanks."""
         assert self._conn is not None, "call connect() first"
-        self._conn.execute(
-            "INSERT INTO thread_state(thread_root, owner, updated_ts) VALUES (?,?,?) "
-            "ON CONFLICT(thread_root) DO UPDATE SET owner=excluded.owner, updated_ts=excluded.updated_ts",
-            (thread_root, owner, ts or self._now_iso()),
-        )
+        when = ts or self._now_iso()
+        self._conn.execute("DELETE FROM thread_owners WHERE thread_root=?", (thread_root,))
+        for o in dict.fromkeys(n.strip() for n in (owners or []) if n and n.strip()):
+            self._conn.execute(
+                "INSERT OR IGNORE INTO thread_owners(thread_root, owner, ts) VALUES (?,?,?)",
+                (thread_root, o, when))
         self._conn.commit()
+
+    def add_thread_owner(self, thread_root: str, owner: str, ts: str = "") -> None:
+        """Add one owner to a thread without disturbing the others (granular toggle)."""
+        assert self._conn is not None, "call connect() first"
+        nm = (owner or "").strip()
+        if nm:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO thread_owners(thread_root, owner, ts) VALUES (?,?,?)",
+                (thread_root, nm, ts or self._now_iso()))
+            self._conn.commit()
+
+    def remove_thread_owner(self, thread_root: str, owner: str) -> None:
+        """Remove one owner from a thread, leaving the rest."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute("DELETE FROM thread_owners WHERE thread_root=? AND owner=?",
+                           (thread_root, owner))
+        self._conn.commit()
+
+    def thread_owners(self) -> dict[str, list[str]]:
+        """``{thread_root: [owner, ...]}`` — multi-owner assignments, ordered by assignment time."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT thread_root, owner FROM thread_owners ORDER BY ts, owner").fetchall()
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            out.setdefault(r["thread_root"], []).append(r["owner"])
+        return out
 
     def set_thread_handled(self, thread_root: str, handled: bool, ts: str = "") -> None:
         """Mark a thread handled / unhandled. Sets ``handled_ts`` on handle (so a later inbound reopens
@@ -274,13 +350,45 @@ class Workspace:
         self._conn.commit()
 
     def thread_states(self) -> dict[str, dict[str, Any]]:
-        """``{thread_root: {owner, handled, handled_ts}}`` for the cockpit overlay (mirrors
-        ``get_reclassifications``; embedded in the report / consumed by ``cockpit.build_fila``)."""
+        """``{thread_root: {owner, owners, handled, handled_ts}}`` for the cockpit overlay. ``owners`` is
+        the multi-owner list (source of truth, from thread_owners); ``owner`` is its first element for
+        legacy single-owner readers. A thread can appear via owners-only or handled-only, so both
+        tables are unioned (mirrors ``get_reclassifications``; consumed by ``cockpit.build_fila``)."""
         assert self._conn is not None, "call connect() first"
-        rows = self._conn.execute(
-            "SELECT thread_root, owner, handled, handled_ts FROM thread_state").fetchall()
-        return {r["thread_root"]: {"owner": r["owner"] or "", "handled": bool(r["handled"]),
-                                   "handled_ts": r["handled_ts"]} for r in rows}
+        handled = {r["thread_root"]: r for r in self._conn.execute(
+            "SELECT thread_root, handled, handled_ts FROM thread_state").fetchall()}
+        owners = self.thread_owners()
+        out: dict[str, dict[str, Any]] = {}
+        for root in set(handled) | set(owners):
+            own = owners.get(root, [])
+            h = handled.get(root)
+            out[root] = {"owner": own[0] if own else "", "owners": own,
+                         "handled": bool(h["handled"]) if h else False,
+                         "handled_ts": h["handled_ts"] if h else None}
+        return out
+
+    # -- in-app owner roster (v4: "define new owners" without editing settings.json) --------------
+
+    def roster_add(self, name: str, ts: str = "") -> None:
+        """Add an owner name to the in-app roster (augments settings.team). Idempotent."""
+        assert self._conn is not None, "call connect() first"
+        nm = (name or "").strip()
+        if nm:
+            self._conn.execute("INSERT OR IGNORE INTO roster(name, added_ts) VALUES (?,?)",
+                               (nm, ts or self._now_iso()))
+            self._conn.commit()
+
+    def roster_remove(self, name: str) -> None:
+        """Remove an in-app-added owner name (settings.team names live in config, not here)."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute("DELETE FROM roster WHERE name=?", ((name or "").strip(),))
+        self._conn.commit()
+
+    def roster(self) -> list[str]:
+        """The in-app-added owner names (sorted). Effective roster = settings.team ∪ this."""
+        assert self._conn is not None, "call connect() first"
+        return [r["name"] for r in self._conn.execute(
+            "SELECT name FROM roster ORDER BY name").fetchall()]
 
     # -- identity links (C1b) ---------------------------------------------------------------
 

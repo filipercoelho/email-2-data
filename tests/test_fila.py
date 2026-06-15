@@ -313,3 +313,18 @@ def test_fila_page_contains_nav_links(tmp_path):
     html = cl.get("/").text
     for href in ["/contrapartes", "/projetos", "/para-ti"]:
         assert href in html
+
+
+def test_fila_page_ships_purpose_label_and_reclassify():
+    """Phase A: the Fila renders the PT purpose label + a clickable picker to correct the verdict
+    (purpose AND counterparty) inline, wired to /api/reclassify."""
+    html = fila_page.build_fila_html(
+        [{"thread_root": "t1", "message_id": "m1", "subject": "Pedido",
+          "counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT",
+          "auto": {"counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT"},
+          "clock": {"band": "green", "label": "agora"}, "trust": {}}],
+        team=["Pedro"])
+    assert "const LABELS" in html                         # PT label dict embedded for the pickers
+    assert "Pedido de orçamento" in html                  # a PT purpose label present
+    assert 'data-act="reclassPur"' in html and 'data-act="reclassCp"' in html
+    assert "function reclassify(" in html and "/api/reclassify" in html

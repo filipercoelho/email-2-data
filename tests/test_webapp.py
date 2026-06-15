@@ -479,3 +479,88 @@ def test_reply_stream_is_memoized_and_cross_route(tmp_path, monkeypatch):
     assert r2.text == "STREAMED DRAFT" and calls["stream"] == 1           # generator NOT re-run
     r3 = c.post("/api/reply", json={"message_id": "m1"})                  # cross-route: served cached
     assert r3.json() == {"reply": "STREAMED DRAFT", "cached": True} and calls["draft"] == 0
+
+
+def test_project_cancel_records_party_reason_and_clears_on_reopen(tmp_path):
+    """Cancellation lifecycle (ADR-017): CANCELLED carries party (client/supplier/our) + reason;
+    a bad party is rejected; reopening clears the close-out."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "T", "from_message": "m1"}).json()["project_id"]
+    r = c.post(f"/api/projects/{pid}/stage",
+               json={"stage": "CANCELLED", "close_party": "client", "close_reason": "cliente desistiu"})
+    assert r.status_code == 200
+    proj = r.json()["project"]
+    assert proj["stage"] == "CANCELLED" and proj["close_party"] == "client"
+    assert proj["close_reason"] == "cliente desistiu" and proj["closed_at"]
+    assert c.post(f"/api/projects/{pid}/stage", json={"stage": "LOST", "close_party": "bogus"}).status_code == 400
+    reopened = c.post(f"/api/projects/{pid}/stage", json={"stage": "GATHERING"}).json()["project"]
+    assert reopened["close_party"] is None and reopened["closed_at"] is None
+
+
+def test_project_owners_endpoint_sets_and_lists(tmp_path):
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "T", "from_message": "m1"}).json()["project_id"]
+    r = c.post(f"/api/projects/{pid}/owners", json={"owners": ["Pedro", "Rita", "Pedro"]})
+    assert r.status_code == 200 and r.json()["owners"] == ["Pedro", "Rita"]      # de-duped
+    assert any(p["project_id"] == pid and p["owners"] == ["Pedro", "Rita"]
+               for p in c.get("/api/projects").json())                          # surfaced in the list
+    assert c.post(f"/api/projects/{pid}/owners", json={"owners": []}).json()["owners"] == []
+
+
+def test_thread_multi_owner_endpoint_and_legacy_single(tmp_path):
+    c = _client(tmp_path)
+    r = c.post("/api/thread/owner", json={"thread_root": "mid:t1", "owners": ["Pedro", "Rita"]})
+    assert r.status_code == 200 and r.json()["owners"] == ["Pedro", "Rita"]
+    r2 = c.post("/api/thread/owner", json={"thread_root": "mid:t1", "owner": "Filipe"})   # legacy single
+    assert r2.json()["owners"] == ["Filipe"] and r2.json()["owner"] == "Filipe"
+
+
+def test_roster_add_remove_and_served_to_fila(tmp_path):
+    """In-app 'define new owners': a name added via /api/roster augments the settings roster and is
+    served to the Fila picker without a restart."""
+    c = _client(tmp_path)
+    assert c.get("/api/roster").json()["team"] == []          # SETTINGS has no team
+    assert "Sofia" in c.post("/api/roster", json={"name": "Sofia"}).json()["roster"]
+    assert "Sofia" in c.get("/api/fila").json()["team"]       # effective roster reaches the Fila
+    assert c.post("/api/roster", json={"name": ""}).status_code == 400
+    c.post("/api/roster/remove", json={"name": "Sofia"})
+    assert "Sofia" not in c.get("/api/roster").json()["roster"]
+
+
+def test_project_participants_rolls_up_asserted_by(tmp_path):
+    """Multi-participant surfacing (ADR-015): the people who fed the project (via the capture ledger's
+    asserted_by) are rolled up into a per-person contributor list."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "T", "from_message": "m1"}).json()["project_id"]
+    c.post(f"/api/projects/{pid}/event", json={"kind": "decision", "text": "avançar",
+           "asserted_by": "Pedro", "channel": "call", "acquired_at": "2026-06-13"})
+    c.post(f"/api/projects/{pid}/event", json={"kind": "note", "text": "sem pressa",
+           "asserted_by": "Rita", "channel": "meeting", "acquired_at": "2026-06-12"})
+    parts = c.get(f"/api/projects/{pid}/participants").json()["participants"]
+    assert {p["name"] for p in parts} == {"Pedro", "Rita"}
+    pedro = next(p for p in parts if p["name"] == "Pedro")
+    assert pedro["contributions"] >= 1 and "call" in pedro["channels"]
+    assert parts[0]["name"] == "Pedro"                        # newest-first (2026-06-13 > 06-12)
+
+
+def test_projetos_page_ships_owners_cancel_and_participants(tmp_path):
+    """Phase C: the Projetos lens ships the multi-owner picker, the CANCELLED close-out form (party +
+    reason) + banner, and the participants ('quem contribuiu') panel — wired to the v4 endpoints."""
+    html = _client(tmp_path).get("/projetos").text
+    # owners (multi) + in-app roster add
+    assert "function ownerPicker(" in html and "/owners" in html and "+ novo dono" in html
+    assert "function addRosterOwner(" in html and "/api/roster" in html
+    # cancellation lifecycle
+    assert "CANCELLED" in html and "function openCloseout(" in html and "Cancelar projeto" in html
+    assert "close_party" in html and "function closeoutBannerHTML(" in html and "Cancelado" in html
+    # participants surfacing (ADR-015)
+    assert "function loadParticipants(" in html and "/participants" in html and "Contribuíram" in html
+
+
+def test_fila_page_ships_multi_owner_picker(tmp_path):
+    """Phase C: the Fila owner control is now a multi-select picker writing the owners list, with an
+    in-app '+ novo dono' that adds to the roster."""
+    html = _client(tmp_path).get("/").text
+    assert "function setThreadOwners(" in html and "function toggleThreadOwner(" in html
+    assert "function ownerLabel(" in html and "function addFilaOwner(" in html
+    assert "+ novo dono" in html and "/api/roster" in html

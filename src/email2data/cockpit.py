@@ -296,6 +296,9 @@ def build_fila(interactions: Iterable[dict[str, Any]],
                     if rc:
                         break
         committed = bool(rc)
+        # Keep the ORIGINAL auto verdict so the Fila reclassify picker can send value_auto (the
+        # training pair) and offer "↺ auto" reset, even after a human override has replaced the value.
+        auto_cp, auto_purpose = s.counterparty, s.last_purpose
         if rc.get("counterparty"):
             s.counterparty = rc["counterparty"]
         if rc.get("purpose"):
@@ -306,13 +309,16 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             continue
         rows.append({
             "thread_root": s.thread_root,
+            "message_id": s.dominant_mid,   # the verdict id reclassify writes against (correct from the Fila)
             "subject": s.subject,
             "counterparty": s.counterparty,
             "purpose": s.last_purpose,
+            "auto": {"counterparty": auto_cp, "purpose": auto_purpose},  # pre-override verdict (training pair + reset)
             "contact": s.participants[0] if s.participants else "",
             "n_messages": s.n_messages,
             "has_attachment": s.has_attachment,
-            "owner": st.get("owner") or "",
+            "owner": st.get("owner") or "",              # legacy single (first owner) for old readers
+            "owners": st.get("owners") or [],            # multi-owner set (the Fila chips)
             "clock": clock,
             "trust": {"confidence": round(s.confidence, 2), "decided_by": s.decided_by,
                       "reason": s.reason, "committed": committed},

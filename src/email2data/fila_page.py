@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import cockpit_ui
+from . import cockpit_ui, labels as _labels
 
 _LENS_JS = r"""
 /* ── Fila lens state ────────────────────────────────────────────────── */
@@ -141,24 +141,28 @@ function render(){
   const list=$('#_list');
   list.innerHTML=v.map((r,i)=>{
     const c=r.clock||{},tr=r.trust||{};
-    const owner=r.owner?('@'+esc(r.owner)):'sem dono';
+    const owner=ownerLabel(r);
     const decided=decidedShort(tr.decided_by);
     const conf=tr.confidence?(' · '+Math.round(tr.confidence*100)+'%'):'';
     const trust=decided
       ?'<button class="trust '+(tr.committed?'committed':'proposed')+'" data-act="why" aria-label="ver porquê">'+esc(decided)+conf+'</button>'
       :'';
-    const meta=[esc(r.contact||''),r.n_messages>1?(r.n_messages+' msgs'):'',r.has_attachment?'📎':'',
-                r.purpose?esc(String(r.purpose).toLowerCase()):''].filter(Boolean).join(' · ');
+    // PT-labelled, clickable badges: the counterparty pill and the purpose chip each open a picker
+    // to CORRECT the LLM's verdict from the Fila (was: raw enum text, no way to fix it here).
+    const cpLabel=(LABELS.counterparty&&LABELS.counterparty[r.counterparty])||r.counterparty||'—';
+    const purLabel=(LABELS.purpose&&LABELS.purpose[r.purpose])||(r.purpose?String(r.purpose).toLowerCase().replace(/_/g,' '):'');
+    const purChip=purLabel?'<button class="pur'+(tr.committed?' committed':'')+'" data-act="reclassPur" title="tipo: '+esc(purLabel)+' — clica para corrigir">'+esc(purLabel)+'</button>':'';
+    const metaText=[esc(r.contact||''),r.n_messages>1?(r.n_messages+' msgs'):'',r.has_attachment?'📎':''].filter(Boolean).join(' · ');
     const why=(r._why&&tr.reason)?'<div class="why">'+esc(tr.reason)+'</div>':'';
     return '<div class="row'+(i===focus?' on':'')+(r._open?' open':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
-      +'<span class="cp '+esc(r.counterparty||'OTHER')+'">'+esc(r.counterparty||'—')+'</span>'
+      +'<button class="cp '+esc(r.counterparty||'OTHER')+'" data-act="reclassCp" title="contraparte: '+esc(cpLabel)+' — clica para corrigir">'+esc(cpLabel)+'</button>'
       +'<div class="rmain" data-act="thread" title="abrir conversa (Enter)">'
       +'<div class="subj">'+esc(r.subject||'(sem assunto)')+(r._open?' <span class="chev open">▾</span>':' <span class="chev">▸</span>')+'</div>'
-      +'<div class="rmeta">'+meta+(trust?' '+trust:'')
+      +'<div class="rmeta">'+purChip+(metaText?' <span class="mtxt">'+metaText+'</span>':'')+(trust?' '+trust:'')
       +(r.project?' <button class="rpchip" data-act="openproj" title="já está no projeto '+esc(r.project.project_id)+' — abrir">📁 '+esc(r.project.title||r.project.project_id)+'</button>':'')
       +'</div>'+why+_threadHTML(r)+'</div>'
       +'<span class="clock '+esc(c.band||'none')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
-      +'<button class="owner'+(r.owner?'':' empty')+'" data-act="owner" aria-label="atribuir dono">'+owner+'</button>'
+      +'<button class="owner'+((r.owners&&r.owners.length)?'':' empty')+'" data-act="owner" aria-label="atribuir donos">'+owner+'</button>'
       +'<div class="acts"><button data-act="handled" aria-label="marcar tratado" title="tratado (E)">✓</button>'
       +'<button data-act="owner" aria-label="atribuir dono" title="dono (A)">@</button></div></div>';
   }).join('');
@@ -179,22 +183,64 @@ function handle(i){
     el.classList.add('leaving');el.addEventListener('transitionend',go,{once:true});setTimeout(go,240);}
   else commit();
 }
-function setOwner(i,owner){
+/* ── owners (multi) — picked from the roster; "+ novo dono" adds to it ─────────────── */
+let filaRoster = (typeof TEAM!=='undefined'?TEAM:[]).slice();
+function ownerLabel(r){ const o=r.owners||[]; return o.length?('@'+esc(o[0])+(o.length>1?(' +'+(o.length-1)):'')):'sem dono'; }
+async function setThreadOwners(i,owners){
   const r=view()[i]; if(!r) return;
-  const prev=r.owner||'';
-  r.owner=owner;
-  undo.push({label:'dono',revert:()=>{r.owner=prev;render();post('/api/thread/owner',{thread_root:r.thread_root,owner:prev}).catch(()=>toast(S.revertido));}});
-  render();
-  post('/api/thread/owner',{thread_root:r.thread_root,owner}).catch(()=>{r.owner=prev;undo.pop();render();toast(S.revertido);});
+  const prev=r.owners||[];
+  r.owners=owners; r.owner=owners[0]||''; render();
+  try{ await post('/api/thread/owner',{thread_root:r.thread_root,owners}); }
+  catch(e){ r.owners=prev; r.owner=prev[0]||''; render(); toast(S.revertido); }
+}
+function toggleThreadOwner(i,name){
+  const r=view()[i]; if(!r) return;
+  const own=new Set(r.owners||[]);
+  own.has(name)?own.delete(name):own.add(name);
+  setThreadOwners(i,[...own]).then(()=>ownerMenu(i));   // keep the picker open with refreshed checks
+}
+async function addFilaOwner(i){
+  const nm=prompt('Novo dono (nome):'); if(!nm||!nm.trim()) return;
+  try{ const r=await post('/api/roster',{name:nm.trim()}); filaRoster=r.roster||filaRoster; toggleThreadOwner(i,nm.trim()); }
+  catch(e){ toast(S.revertido); }
 }
 function toggleWhy(i){ const r=view()[i]; if(r){r._why=!r._why;render();} }
 
-function ownerMenu(i){
-  const m=$('#_menu');
-  m.innerHTML=TEAM.map(nm=>'<div class="mi" data-n="'+esc(nm)+'">@'+esc(nm)+'</div>').join('')+'<div class="mi" data-n="">sem dono</div>';
-  m.dataset.i=i; m.classList.remove('hidden');
-  const row=document.querySelector('.row[data-i="'+i+'"]');
+function positionMenu(i){
+  const m=$('#_menu'), row=document.querySelector('.row[data-i="'+i+'"]');
   if(row){const b=row.getBoundingClientRect();m.style.top=(window.scrollY+b.bottom+4)+'px';m.style.left=(window.scrollX+Math.max(8,b.right-180))+'px';}
+}
+function ownerMenu(i){
+  const r=view()[i]; if(!r) return;
+  const own=new Set(r.owners||[]);
+  const m=$('#_menu');
+  const items=filaRoster.map(nm=>'<div class="mi'+(own.has(nm)?' on':'')+'" data-n="'+esc(nm)+'">'+(own.has(nm)?'✓ ':'')+'@'+esc(nm)+'</div>').join('');
+  m.innerHTML='<div class="mhdr">Donos</div>'+items
+    +'<div class="mi reset" data-clear="1">sem dono</div>'
+    +'<div class="mi reset" data-new="1">+ novo dono…</div>';
+  m.dataset.i=i; m.dataset.kind='owner'; m.classList.remove('hidden'); positionMenu(i);
+}
+
+/* ── reclassify: correct the LLM verdict from the Fila (one field at a time) ──────────
+   The purpose/counterparty badges open this picker; mirrors the /inbox rcPanel but inline. */
+function reclassMenu(i,field){
+  const r=view()[i]; if(!r) return;
+  if(!r.message_id){ toast('sem id para corrigir'); return; }
+  const m=$('#_menu'), dict=(LABELS&&LABELS[field])||{}, cur=r[field]||'';
+  const auto=(r.auto&&r.auto[field])||'';
+  const items=Object.keys(dict).map(k=>'<div class="mi'+(k===cur?' on':'')+'" data-val="'+esc(k)+'">'+esc(dict[k])+'</div>').join('');
+  const reset=auto?'<div class="mi reset" data-val="">↺ auto ('+esc(dict[auto]||auto)+')</div>':'';
+  m.innerHTML='<div class="mhdr">'+(field==='counterparty'?'Contraparte':'Tipo')+'</div>'+items+reset;
+  m.dataset.i=i; m.dataset.kind='reclass'; m.dataset.field=field; m.classList.remove('hidden'); positionMenu(i);
+}
+function reclassify(i,field,value){
+  const r=view()[i]; if(!r||!r.message_id) return;
+  const auto=(r.auto&&r.auto[field])||r[field], prev=r[field];
+  r[field]=value||auto;
+  if(r.trust) r.trust.committed=!!value;
+  announce(value?'corrigido':'reposto'); render();
+  post('/api/reclassify',{message_id:r.message_id,field,value_auto:auto,value_human:value||null})
+    .catch(()=>{ r[field]=prev; if(r.trust)r.trust.committed=false; render(); toast(S.revertido); });
 }
 
 /* ── thread expansion ───────────────────────────────────────────────── */
@@ -242,6 +288,8 @@ function _threadHTML(r){
 function dispatch(action,i){
   if(action==='handled')handle(i);
   else if(action==='owner')ownerMenu(i);
+  else if(action==='reclassCp')reclassMenu(i,'counterparty');
+  else if(action==='reclassPur')reclassMenu(i,'purpose');
   else if(action==='why')toggleWhy(i);
   else if(action==='thread')toggleThread(i);
   else if(action==='mkproj')makeProject(i);
@@ -349,7 +397,12 @@ $('#_list').addEventListener('click',e=>{
 });
 $('#_menu').addEventListener('click',e=>{
   const mi=e.target.closest('.mi'); if(!mi) return;
-  setOwner(parseInt($('#_menu').dataset.i,10),mi.dataset.n);$('#_menu').classList.add('hidden');
+  const m=$('#_menu'), i=parseInt(m.dataset.i,10);
+  if(m.dataset.kind==='reclass'){ reclassify(i,m.dataset.field,mi.dataset.val||''); m.classList.add('hidden'); return; }
+  // owner (multi-select): toggle keeps the picker open; clear / new are explicit
+  if(mi.dataset.new){ addFilaOwner(i); return; }
+  if(mi.dataset.clear){ setThreadOwners(i,[]); m.classList.add('hidden'); return; }
+  toggleThreadOwner(i,mi.dataset.n);
 });
 
 /* filter bar chip clicks */
@@ -437,6 +490,18 @@ _EXTRA_CSS = """
   .fbar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
   .fchip{display:inline-flex;align-items:center;gap:5px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:20px;padding:3px 10px;font-weight:600;cursor:pointer;font-size:12px}
   .fchip:hover{background:#dfe8ff}
+  /* counterparty pill is now a button (inline reclassify) — reset native chrome, keep .cp colours */
+  .cp{border:none;cursor:pointer;font-family:inherit}
+  .cp:hover{filter:brightness(.97)}
+  /* purpose chip (PT label) — click to correct the LLM's purpose right from the Fila */
+  .pur{font-size:10px;font-weight:650;border-radius:20px;padding:2px 9px;background:#f3f4f6;
+    color:var(--mut);border:1px solid var(--bd);cursor:pointer;line-height:1.5}
+  .pur:hover{border-color:var(--ac);color:var(--ac);background:#eef2ff}
+  .pur.committed{border-color:var(--int);color:var(--int);background:#f0fdfa}
+  .mtxt{color:var(--mut)}
+  /* reclassify menu header + reset row (shared .menu chrome lives in cockpit_ui) */
+  .menu .mhdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:5px 11px 3px}
+  .menu .mi.reset{color:var(--mut);border-top:1px solid var(--bd2);margin-top:3px}
 """
 
 
@@ -447,7 +512,8 @@ def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
         "Fila",
         "fila",
         _BODY_HTML,
-        embeds={"rows": rows, "team": list(team or []), "now": now_iso},
+        embeds={"rows": rows, "team": list(team or []), "now": now_iso,
+                "labels": _labels.fila_labels()},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
         extra_css=_EXTRA_CSS,

@@ -431,7 +431,7 @@ const PRIcol={HIGH:'#e5484d',NEEDS_REVIEW:'#8e4ec6',MEDIUM:'#f5a623',LOW:'#3358d
 const CPcol={CLIENT:'#13a36a',LEAD:'#0d9488',SUPPLIER:'#3358d4',INTERNAL:'#7c7f86',BULK:'#b9bbc6',OTHER:'#8b8d98'};
 const PRIS=['HIGH','NEEDS_REVIEW','MEDIUM','LOW','IGNORE'], ROLE={from:'From',reply_to:'Reply-To',to:'To',cc:'Cc'};
 const CPpt={CLIENT:'Cliente',LEAD:'Lead',SUPPLIER:'Fornecedor',INTERNAL:'Interno',BULK:'Newsletter',OTHER:'Outro'};
-const PURpt={PO_FROM_CLIENT:'Encomenda de cliente',ESTIMATE_REQUEST_FROM_CLIENT:'Pedido de orçamento',OUTBOUND_INVOICE:'Fatura nossa',OUR_ORDER_TO_SUPPLIER:'Encomenda a fornecedor',SUPPLIER_REPLY_OR_CONFIRMATION:'Resposta de fornecedor',INVOICE_OR_ACCOUNTING:'Fatura / contabilidade',FOLLOW_UP:'Seguimento',PUBLICITY:'Publicidade',INTERNAL_OPS:'Operações internas',OTHER:'Outro'};
+const PURpt={PO_FROM_CLIENT:'Encomenda de cliente',ESTIMATE_REQUEST_FROM_CLIENT:'Pedido de orçamento',OUTBOUND_INVOICE:'Fatura nossa',OUR_ORDER_TO_SUPPLIER:'Encomenda a fornecedor',SUPPLIER_REPLY_OR_CONFIRMATION:'Resposta de fornecedor',INVOICE_OR_ACCOUNTING:'Fatura / contabilidade',FOLLOW_UP:'Seguimento',OWN_REJECTION:'Recusámos',CLIENT_REJECTION:'Cliente recusou',PUBLICITY:'Publicidade',INTERNAL_OPS:'Operações internas',OTHER:'Outro'};
 const PRIpt={HIGH:'Alta',MEDIUM:'Média',LOW:'Baixa',IGNORE:'Ignorar',NEEDS_REVIEW:'Rever'};
 const DIRpt={inbound:'entrada',outbound:'saída',internal:'interno'};
 // Stage + lead-status labels/colors — defined here so the project/lead facet registries can use them.
