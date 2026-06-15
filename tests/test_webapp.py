@@ -453,3 +453,29 @@ def test_healthz_liveness_probe(tmp_path):
     """The Docker HEALTHCHECK hits /healthz — it must answer 200 without any DB/LLM/IMAP work."""
     r = _client(tmp_path).get("/healthz")
     assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_reply_stream_is_memoized_and_cross_route(tmp_path, monkeypatch):
+    """Stream route caching: a 2nd stream for an unchanged spec replays from the memo (generator NOT
+    re-run), and a prior stream populates the cache that the non-stream /api/reply then serves for 0
+    tokens. Guards the documented cross-route reuse the audit found untested."""
+    calls = {"stream": 0, "draft": 0}
+    monkeypatch.setattr(webapp.classifier, "make_client", lambda s: object())
+
+    def fake_stream(*a, **k):
+        calls["stream"] += 1
+        yield "STREAMED "
+        yield "DRAFT"
+
+    def fake_draft(*a, **k):
+        calls["draft"] += 1
+        return "NONSTREAM"
+    monkeypatch.setattr(webapp.replydraft, "draft_reply_stream", fake_stream)
+    monkeypatch.setattr(webapp.replydraft, "draft_reply", fake_draft)
+
+    c = _client(tmp_path)
+    assert c.post("/api/reply/stream", json={"message_id": "m1"}).text == "STREAMED DRAFT"
+    r2 = c.post("/api/reply/stream", json={"message_id": "m1"})           # replay from cache
+    assert r2.text == "STREAMED DRAFT" and calls["stream"] == 1           # generator NOT re-run
+    r3 = c.post("/api/reply", json={"message_id": "m1"})                  # cross-route: served cached
+    assert r3.json() == {"reply": "STREAMED DRAFT", "cached": True} and calls["draft"] == 0

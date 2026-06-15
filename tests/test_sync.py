@@ -216,13 +216,18 @@ def test_fetch_all_isolates_a_failing_account(tmp_path, monkeypatch):
 
 
 def test_fetch_all_raises_when_every_account_fails(tmp_path, monkeypatch):
-    """A TOTAL outage (every account down) must surface loudly rather than report a misleading 0."""
+    """A TOTAL outage (every account down) must surface loudly rather than report a misleading 0 — and
+    only AFTER trying every account (the aggregated error names each, both are audited). This
+    discriminates the new try-all-then-aggregate branch from the old fail-fast-on-the-first one."""
     import pytest
     settings = _two_accounts(tmp_path, ids=("a", "b"))
     monkeypatch.setattr(fetch, "_connect",
                         lambda s, a: (_ for _ in ()).throw(fetch.FetchError(f"boom {a['id']}")))
-    with pytest.raises(fetch.FetchError):
+    with pytest.raises(fetch.FetchError) as ei:
         fetch.fetch_all(settings)
+    # both accounts were attempted: the aggregated message names each (old fail-fast would name only 'a')
+    assert "a" in str(ei.value) and "b" in str(ei.value)
+    assert (tmp_path / "out" / "audit.jsonl").read_text().count("fetch_account_failed") == 2
 
 
 def test_cli_reports_total_fetch_failure_cleanly(tmp_path, monkeypatch, capsys):
@@ -294,3 +299,56 @@ def test_no_message_id_dedups_across_inbox_and_sent(tmp_path, monkeypatch):
     files = list(p["corpus_dir"].glob("*.eml"))
     assert len(files) == 1                                          # one file, not two
     assert header_signals(message_from_bytes(files[0].read_bytes())).direction == "outbound"
+
+
+def test_tier1_failure_preserves_outbound_direction(tmp_path, monkeypatch):
+    """The escalated NEEDS_REVIEW row keeps the one fact still available offline — direction from header
+    signals (here a Sent-folder copy → outbound) — so an escalated client reply isn't mis-binned."""
+    from email2data import cascade
+    from email2data.config import paths
+    from email2data.llm import LLMError
+
+    settings = _settings(tmp_path)
+    p = paths(settings, settings["__settings_path__"])
+    (p["corpus_dir"] / "s.eml").write_bytes(
+        b"X-Email2Data-Source: INBOX.Sent\r\nMessage-ID: <s1@x.pt>\r\n"
+        b"From: orcamentos@lindoservico.pt\r\nTo: c@client.pt\r\nSubject: re\r\n\r\nbody")
+    monkeypatch.setattr(cascade.classifier, "load_playbook", lambda _p: "pb")
+    monkeypatch.setattr(cascade.classifier, "make_client", lambda s: object())
+    monkeypatch.setattr(cascade, "triage", lambda *a, **k: (_ for _ in ()).throw(LLMError("down")))
+
+    cascade.triage_corpus(settings, store=object())
+    rows = [json.loads(x) for x in (p["out_dir"] / "results.jsonl").read_text().splitlines() if x]
+    assert rows[0]["priority"] == "NEEDS_REVIEW" and rows[0]["decided_by"] == "tier1:error"
+    assert rows[0]["direction"] == "outbound"          # offline header signal preserved, not defaulted
+
+
+def test_full_run_clears_a_tier1_error_escalation(tmp_path, monkeypatch):
+    """Documented recovery: once the LLM is back, `triage --full` overwrites a tier1:error NEEDS_REVIEW
+    row with the real classification (no stale escalation, no duplicate row)."""
+    from email2data import cascade
+    from email2data.config import paths
+    from email2data.llm import LLMError
+    from email2data.schema import EXTRACTOR_VERSION, Entities, TriageResult
+
+    settings = _settings(tmp_path)
+    p = paths(settings, settings["__settings_path__"])
+    (p["corpus_dir"] / "a.eml").write_bytes(_eml(1))
+    monkeypatch.setattr(cascade.classifier, "load_playbook", lambda _p: "pb")
+    monkeypatch.setattr(cascade.classifier, "make_client", lambda s: object())
+
+    monkeypatch.setattr(cascade, "triage", lambda *a, **k: (_ for _ in ()).throw(LLMError("down")))
+    cascade.triage_corpus(settings, store=object())            # 1) LLM down → escalated
+
+    def ok(raw, playbook, store, client, settings):
+        from email2data.envelope import parse_eml
+        return TriageResult(message_id=parse_eml(raw)["message_id"], counterparty="CLIENT", purpose="OTHER",
+                            direction="inbound", priority="HIGH", urgency=80, confidence=0.9, reason="ok",
+                            entities=Entities(), extractor_version=EXTRACTOR_VERSION, subject="s",
+                            from_addr="a@x.pt", decided_by="tier1:test")
+    monkeypatch.setattr(cascade, "triage", ok)
+    cascade.triage_corpus(settings, store=object(), full=True)  # 2) LLM back → full reclassify overwrites
+
+    rows = [json.loads(x) for x in (p["out_dir"] / "results.jsonl").read_text().splitlines() if x]
+    assert len(rows) == 1
+    assert rows[0]["decided_by"] == "tier1:test" and rows[0]["priority"] == "HIGH"

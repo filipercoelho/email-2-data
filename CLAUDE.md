@@ -98,12 +98,14 @@ email2data serve --port 8042           # local workspace UI on http://127.0.0.1:
 ```
 
 All tests must pass before handing a change back. **Baseline pin (2026-06-15, `fix/audit-followups`):
-308 passed, 0 failed** (the +19 tests over the prior 289 are the ADR-016 post-audit hardening:
-fresh-volume boot guard, `fetch_all` per-account isolation, triage→`NEEDS_REVIEW` on a Tier-1 failure,
-Gemini context-cache reuse, reply-draft memo, no-Message-ID dedup, fail-loud port + `/healthz`). The
-prior pin was 288 (counted with the e2e suite self-skipping); the 7 browser e2e checks in
+312 passed, 0 failed** (the +23 tests over the prior 289 are the ADR-016 post-audit hardening:
+fresh-volume boot guard, `fetch_all` per-account isolation + total-outage aggregation, triage→
+`NEEDS_REVIEW` on a Tier-1 failure + `--full` recovery, Gemini context-cache reuse, reply-draft memo
+across both reply routes, no-Message-ID dedup, fail-loud port + `/healthz` — the last round was added
+after an adversarial review found the first cut under-tested). The prior pin was 288 (counted with the
+e2e suite self-skipping); the 7 browser e2e checks in
 [tests/test_cockpit_urls_e2e.py](tests/test_cockpit_urls_e2e.py) need the `e2e` extra + Chrome and
-self-skip otherwise, so a no-Chrome run is 301. Re-confirm against this pin; if your change moves the
+self-skip otherwise, so a no-Chrome run is 305. Re-confirm against this pin; if your change moves the
 count, say why explicitly. "Tests pass" is a claim that must be backed by shown output.
 
 ## Conventions

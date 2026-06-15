@@ -48,8 +48,15 @@ def _cfg(**over):
     return base
 
 
-def test_large_prefix_cached_once_and_reused():
+@pytest.fixture(autouse=True)
+def _clear_gemini_cache():
+    """Isolate the module-global cache registry so a test that crashes can't pollute the next."""
     llm._GEMINI_CACHE.clear()
+    yield
+    llm._GEMINI_CACHE.clear()
+
+
+def test_large_prefix_cached_once_and_reused():
     client = FakeClient()
     system = "PLAYBOOK " * 50                       # well over the (test) 10-char floor
     for _ in range(3):
@@ -60,7 +67,6 @@ def test_large_prefix_cached_once_and_reused():
 
 
 def test_small_prefix_is_not_cached():
-    llm._GEMINI_CACHE.clear()
     client = FakeClient()
     llm.call(client, _cfg(context_cache_min_chars=100_000), "short", "u", text=True)
     assert client.caches.created == []
@@ -68,7 +74,6 @@ def test_small_prefix_is_not_cached():
 
 
 def test_context_cache_can_be_disabled():
-    llm._GEMINI_CACHE.clear()
     client = FakeClient()
     llm.call(client, _cfg(context_cache=False), "x" * 50, "u", text=True)
     assert client.caches.created == []
@@ -76,7 +81,6 @@ def test_context_cache_can_be_disabled():
 
 
 def test_cache_create_failure_falls_back_to_plain_path():
-    llm._GEMINI_CACHE.clear()
     client = FakeClient()
 
     def boom(*a, **k):
@@ -89,7 +93,6 @@ def test_cache_create_failure_falls_back_to_plain_path():
 
 
 def test_expired_cache_is_evicted_and_retried_uncached():
-    llm._GEMINI_CACHE.clear()
     client = FakeClient()
     calls = []
 
