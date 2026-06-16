@@ -328,8 +328,11 @@ sign-off resolves a question, it does not always remove the risk).
 **Both gating confirmations are resolved (2026-06-16):** R1 reading confirmed (staffer's own
 dictation/artifacts, not client-call recordings); R6 = webapp **LAN-bound behind a minimal single-user
 auth gate**. The only build-time choice still open is the engine (R3 — Vertex / Whisper / other),
-deferrable to Phase 0. Next step: record the three ADRs (N5-narrowing, R5-egress, and the
-N6-relaxation-with-minimal-auth) so the build starts from decisions, not from this proposal.
+deferrable to Phase 0. These three invariant-touching decisions are now recorded as
+[ADR-019](../03-decisions/adr-019-conversational-intake-capture-adapter.md) ·
+[ADR-020](../03-decisions/adr-020-capture-egress-and-data-handling.md) ·
+[ADR-021](../03-decisions/adr-021-intake-lan-binding-minimal-auth.md) (Proposed). The MVP build plan is
+[intake-bot-mvp-plan-v1](intake-bot-mvp-plan-v1.md).
 
 ## 12. Out of scope for v1
 
@@ -357,7 +360,8 @@ Per [CLAUDE.md](../../CLAUDE.md), every L2+ phase ships in the same commit with:
 ---
 
 *Owner decisions R1–R9, the scrub/preserve requirement, and the R1/R6 confirmations incorporated
-2026-06-16 (LAN access = minimal single-user auth). Before build: record the three ADRs (N5-narrowing,
-R5-egress, N6-relaxation-with-minimal-auth). This document decides nothing on its own — it is the
+2026-06-16 (LAN access = minimal single-user auth). The three invariant-touching decisions are recorded
+as ADR-019/020/021 (Proposed); the MVP build plan is intake-bot-mvp-plan-v1.md. This document decides
+nothing on its own — it is the
 engineering reading of the brief against production, with `materials-costing` and ADR-015 as
 load-bearing precedents.*

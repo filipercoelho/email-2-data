@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 
 from email2data import project as p
+from email2data.captures import CaptureStore
 from email2data.workspace import SCHEMA_VERSION, Workspace
 
 # The v2 shape of the three tables the v3 migration alters — WITHOUT the new columns. Hand-written so
@@ -50,6 +51,11 @@ def _cols(conn, table):
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _has_table(conn, name):
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
 def test_v2_to_v3_adds_columns_backfills_and_roundtrips(tmp_path):
     db = tmp_path / "workspace.db"
     _make_v2_db(db)
@@ -81,6 +87,7 @@ def test_fresh_db_is_latest_and_migrate_is_idempotent(tmp_path):
     db = tmp_path / "fresh.db"
     ws = Workspace(db).connect()
     assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert _has_table(ws._conn, "captures") and _has_table(ws._conn, "capture_users")
     ws.close()
     # Reconnecting an already-migrated DB must be a clean no-op (guarded ALTERs / early return).
     ws2 = Workspace(db).connect()
@@ -140,7 +147,7 @@ def test_v3_to_v4_adds_closeout_columns_and_backfills_single_owner(tmp_path):
     conn = ws._conn
 
     # version stamped to latest; the close-out columns now exist on the pre-existing projects table
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert {"close_party", "close_reason", "closed_at"} <= _cols(conn, "projects")
 
     # the single owner is carried forward into the multi-owner join table — no Fila assignment lost
@@ -174,3 +181,80 @@ def test_roster_add_remove_is_additive_and_deduped(tmp_path):
     ws.roster_remove("Sofia")
     assert ws.roster() == []
     ws.close()
+
+
+# The v4 shape of the projects table (close-out columns present) WITHOUT the v5 intake capture tables —
+# the state of a real DB upgraded to v4 before conversational intake (ADR-019/-020/-021) landed.
+_V4_PARTIAL = """
+CREATE TABLE projects (
+    project_id TEXT PRIMARY KEY, title TEXT NOT NULL, client_email TEXT, client_name TEXT,
+    stage TEXT NOT NULL, n_items INTEGER DEFAULT 1, created_ts TEXT, updated_ts TEXT,
+    external_id TEXT, external_ts TEXT, coverage REAL, estimable INTEGER,
+    close_party TEXT, close_reason TEXT, closed_at TEXT
+);
+"""
+
+
+def _make_v4_db(path):
+    c = sqlite3.connect(path)
+    c.executescript(_V4_PARTIAL)
+    c.execute("INSERT INTO projects(project_id,title,stage,created_ts,updated_ts)"
+              " VALUES ('p-0007','Estante Sousa','LEAD','2026-06-10','2026-06-10')")
+    c.execute("PRAGMA user_version = 4")
+    c.commit()
+    c.close()
+
+
+def test_v4_to_v5_adds_capture_tables_and_preserves_projects(tmp_path):
+    """v5 adds the intake capture queue + allowlist as BRAND-NEW tables (delivered by SCHEMA, no ALTER).
+    A real v4 DB with rows must gain them in place without losing the precious project (ADR-019/-020)."""
+    db = tmp_path / "workspace.db"
+    _make_v4_db(db)
+
+    ws = Workspace(db).connect()        # executescript(SCHEMA) creates the new tables; _migrate stamps v5
+    conn = ws._conn
+
+    # version stamped to latest; the two brand-new intake tables now exist
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert _has_table(conn, "captures") and _has_table(conn, "capture_users")
+
+    # the pre-existing project survives the migration untouched (precious DB, never rebuilt)
+    assert conn.execute(
+        "SELECT title FROM projects WHERE project_id='p-0007'").fetchone()[0] == "Estante Sousa"
+
+    # a capture round-trips through the new store (would raise "no such table" if SCHEMA was not updated)
+    cap = CaptureStore(conn)
+    cid, created = cap.add(telegram_message_id=11, telegram_chat_id=99, raw_text="prazo 30 jun",
+                           channel="call", asserted_by="Pedro")
+    assert created is True and cid == "c-99-11"
+    assert [c["capture_id"] for c in cap.list_pending()] == ["c-99-11"]
+    ws.close()
+
+
+def test_connect_enables_wal_and_busy_timeout(tmp_path):
+    # The intake worker is a SEPARATE process writing this precious DB alongside the webapp (R4);
+    # WAL + busy_timeout are the foundation that lets them coexist instead of "database is locked".
+    ws = Workspace(tmp_path / "w.db").connect()
+    assert ws._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert ws._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    ws.close()
+
+
+def test_wal_lets_a_writer_proceed_while_a_reader_holds_a_transaction(tmp_path):
+    """Under the default rollback journal a held READ (a page-building cursor) blocks a writer; WAL
+    lets the intake worker's write land while the webapp holds a read transaction (R4). Pins the
+    cross-process concurrency foundation — this raised 'database is locked' before WAL."""
+    db = tmp_path / "w.db"
+    reader = Workspace(db).connect()
+    reader._conn.execute("BEGIN")
+    reader._conn.execute("SELECT * FROM captures").fetchall()   # hold a SHARED read lock
+
+    writer = Workspace(db).connect()                            # the worker's own connection
+    cid, created = CaptureStore(writer._conn).add(
+        telegram_message_id=1, telegram_chat_id=2, raw_text="x")
+    assert created is True                                      # would lock + raise pre-WAL
+    assert CaptureStore(writer._conn).get(cid)["raw_text"] == "x"
+
+    reader._conn.execute("ROLLBACK")
+    reader.close()
+    writer.close()

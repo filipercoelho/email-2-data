@@ -125,6 +125,39 @@ CREATE TABLE IF NOT EXISTS roster (
     name     TEXT PRIMARY KEY,
     added_ts TEXT
 );
+-- Conversational intake (ADR-019/-020/-021): the Telegram capture queue. A capture is durably
+-- persisted HERE *before* it is scrubbed from Telegram (ADR-020 §2 persist-then-scrub), and stays
+-- until the user validates it into a project (ADR-019 §5 — no auto-apply). Precious: once Telegram is
+-- scrubbed it is not a fallback, so this row + its media on disk are the only copy (ADR-020 §4).
+CREATE TABLE IF NOT EXISTS captures (
+    capture_id           TEXT PRIMARY KEY,   -- "c-<chat>-<message>" (deterministic = idempotency key) (v5)
+    telegram_message_id  INTEGER,            -- source Telegram message id (v5)
+    telegram_chat_id     INTEGER,            -- source Telegram chat/user id (v5)
+    content_class        TEXT,               -- artifact | conversation (content-class router; ADR-019 §5.1) (v5)
+    raw_text             TEXT,               -- verbatim text the staffer sent ("" if none) (v5)
+    media_paths          TEXT,               -- JSON array of media files on disk, relative to captures_dir (v5)
+    inferred_project_id  TEXT,               -- the project the user picked; NULL until resolved (v5)
+    channel              TEXT,               -- real-world channel (call|meeting|whatsapp|sms|manual) (v5)
+    asserted_by          TEXT,               -- who stated it (the sender's roster name) (v5)
+    acquired_at          TEXT,               -- real-world acquisition time (timeline sort key) (v5)
+    status               TEXT NOT NULL DEFAULT 'stored',  -- stored|parsed|applied|discarded (v5)
+    telegram_scrubbed_at TEXT,               -- UTC ISO when the source was deleted from Telegram (v5)
+    created_ts           TEXT,               -- UTC ISO when the capture row was created (v5)
+    applied_ts           TEXT,               -- UTC ISO when validated into a project; NULL until then (v5)
+    UNIQUE (telegram_message_id, telegram_chat_id)   -- explicit idempotency guarantee (ADR-020)
+);
+CREATE INDEX IF NOT EXISTS ix_captures_status ON captures(status, created_ts);
+-- Intake allowlist (ADR-019 §6 / ADR-021): default-deny identity for the bot, keyed by numeric
+-- Telegram user id. enabled=0 soft-disables without losing the audit. This is the app's first identity
+-- model; display_name maps a sender to a roster owner for asserted_by attribution.
+CREATE TABLE IF NOT EXISTS capture_users (
+    telegram_user_id INTEGER PRIMARY KEY,    -- numeric Telegram user id (v5)
+    display_name     TEXT,                    -- greeting + maps to the roster owner (v5)
+    roster_owner     TEXT,                    -- effective owner name for asserted_by (v5)
+    enabled          INTEGER NOT NULL DEFAULT 1,  -- soft-disable flag (v5)
+    added_by         TEXT,                    -- who added this sender (v5)
+    added_at         TEXT                     -- UTC ISO when added (v5)
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
@@ -133,7 +166,9 @@ CREATE TABLE IF NOT EXISTS roster (
 # coverage/estimable + reserved __kind__ events in project_field_history (ADR-015). v4 (2026-06-15):
 # project close-out columns (CANCELLED/LOST party+reason+closed_at) + multi-owner join tables
 # (thread_owners/project_owners, single owner backfilled) + in-app roster (ADR-017/-018).
-SCHEMA_VERSION = 4
+# v5 (2026-06-16): conversational-intake capture queue + allowlist (captures/capture_users tables,
+# brand-new so delivered by SCHEMA with no ALTER; ADR-019/-020/-021).
+SCHEMA_VERSION = 5
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -165,6 +200,15 @@ class Workspace:
         # local app so cross-thread reuse of one connection is safe (access is effectively serial).
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Concurrency foundation (solution-design R4): the conversational-intake worker is a SEPARATE
+        # process that opens its own connection to this precious DB and writes `captures` alongside the
+        # webapp. WAL lets that worker coexist with the webapp's reads/writes instead of mutually
+        # blocking under the default rollback journal; busy_timeout (per-connection, so it must be set
+        # on EVERY opener) makes brief concurrent writers serialize instead of raising "database is
+        # locked". WAL is a persistent, idempotent header flag — safe on a populated DB — but it adds
+        # -wal/-shm sidecar files the backup set MUST include (see docs/05-reference/data-stores.md).
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         self._migrate()
@@ -226,6 +270,9 @@ class Workspace:
                 "INSERT OR IGNORE INTO thread_owners(thread_root, owner, ts) "
                 "SELECT thread_root, owner, updated_ts FROM thread_state "
                 "WHERE owner IS NOT NULL AND owner != ''")
+        # v5 (captures + capture_users) adds only NEW TABLES — delivered by SCHEMA above, which runs
+        # before _migrate — so there is no ALTER to do here; the stamp below records the upgrade. Add a
+        # guarded `if version < 5:` block ONLY if a future change adds a COLUMN to a pre-existing table.
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 

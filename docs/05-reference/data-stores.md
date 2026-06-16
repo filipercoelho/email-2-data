@@ -4,7 +4,7 @@
 | --- | --- |
 | Type | Reference |
 | Status | Active |
-| Last reviewed | 2026-06-10 |
+| Last reviewed | 2026-06-16 |
 
 Where the pipeline persists state. The recoverability tier of each store is an invariant —
 see [ADR-010](../03-decisions/adr-010-workspace-db-precious-vs-regenerable.md).
@@ -16,7 +16,7 @@ see [ADR-010](../03-decisions/adr-010-workspace-db-precious-vs-regenerable.md).
 | `out/results.jsonl` | append-only `TriageResult` per message | derived | re-run `triage --full` | `EXTRACTOR_VERSION` |
 | `out/crm.db` | interactions (event log) + contacts (person rollup) | **regenerable** | `email2data crm` drops & rebuilds each run | `crm.SCHEMA_VERSION` |
 | `out/sync.db` | per-mailbox IMAP **UID watermark** (cursor) | cursor | deletable — next `fetch` re-bootstraps by date | `sync.SCHEMA` (additive) |
-| `out/workspace.db` | **human decisions** + Projects + edit history | **precious** | **never auto-rebuilt** | `workspace.SCHEMA_VERSION` (`user_version`) |
+| `out/workspace.db` | **human decisions** + Projects + edit history + the intake capture queue/allowlist (v5) | **precious** | **never auto-rebuilt** | `workspace.SCHEMA_VERSION` (`user_version`) |
 | `corpus/*.eml` | raw fetched messages (read-only source mirror) | cache | re-fetch | — |
 
 ## Provenance / corpus
@@ -39,6 +39,18 @@ contains rows (see `tests/test_workspace_migration.py`). Never drop-and-recreate
 Hand edits live in `project_fields` (always win) and every edit — plus off-email `__kind__` events
 ([ADR-015](../03-decisions/adr-015-knowledge-capture-claim-ledger.md)) — is recorded append-only in
 `project_field_history`.
+
+## WAL mode & backups (v5)
+
+`Workspace.connect` opens `workspace.db` in **WAL** journal mode with a 5 s `busy_timeout` so the
+conversational-intake worker — a separate process ([ADR-021](../03-decisions/adr-021-intake-lan-binding-minimal-auth.md))
+— can write the `captures` queue alongside the webapp instead of mutually blocking under the default
+rollback journal. Consequence for the **precious** store: WAL keeps committed-but-not-checkpointed data
+in the **`workspace.db-wal`** sidecar (alongside `workspace.db-shm`). **A backup MUST capture all three
+files together, or use the SQLite Online Backup API / `VACUUM INTO`** — a naive `cp workspace.db` alone
+can lose the latest committed decisions. A clean connection close checkpoints the WAL back into the main
+file. This matters doubly once intake media becomes the sole copy
+([ADR-020](../03-decisions/adr-020-capture-egress-and-data-handling.md) preserve-at-core).
 
 ## Dangling references
 
