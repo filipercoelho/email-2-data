@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from email2data import project as p
 from email2data.captures import CaptureStore
-from email2data.workspace import SCHEMA_VERSION, Workspace
+from email2data.workspace import SCHEMA_VERSION, Workspace, WorkspaceVersionError
 
 # The v2 shape of the three tables the v3 migration alters — WITHOUT the new columns. Hand-written so
 # the test reproduces a real old DB rather than depending on today's SCHEMA string.
@@ -258,3 +260,34 @@ def test_wal_lets_a_writer_proceed_while_a_reader_holds_a_transaction(tmp_path):
     reader._conn.execute("ROLLBACK")
     reader.close()
     writer.close()
+
+
+def test_worker_open_refuses_to_migrate_a_stale_db(tmp_path):
+    # Single-migrator gate (ADR-021): the intake worker (connect(migrate=False)) must NOT upgrade the
+    # precious DB — it asserts the schema is current and refuses if behind, never racing a migration
+    # from a second process.
+    db = tmp_path / "w.db"
+    c = sqlite3.connect(db)
+    c.executescript(
+        "CREATE TABLE projects(project_id TEXT PRIMARY KEY, title TEXT, stage TEXT NOT NULL);")
+    c.execute("PRAGMA user_version = 4")
+    c.commit()
+    c.close()
+
+    with pytest.raises(WorkspaceVersionError):
+        Workspace(db).connect(migrate=False)
+
+    # the worker did NOT migrate: version unchanged, the captures table never created
+    c2 = sqlite3.connect(db)
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert c2.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='captures'").fetchall() == []
+    c2.close()
+
+
+def test_worker_open_accepts_a_current_db_without_migrating(tmp_path):
+    db = tmp_path / "w.db"
+    Workspace(db).connect().close()              # the webapp/CLI migrates to v5
+    ws = Workspace(db).connect(migrate=False)     # the worker opens a current DB cleanly
+    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    ws.close()

@@ -43,9 +43,23 @@
     "context_cache_ttl_s": 3600,
     "context_cache_min_chars": 4096
   },
+  "intake": {
+    "_comment": "Conversational-intake Telegram worker (ADR-019/-020/-021). Disabled by default. The bot token lives in .env (never here); start the worker with `email2data intake-bot`.",
+    "enabled": false,
+    "bot_token_env": "TELEGRAM_BOT_TOKEN",
+    "bot_name": "default",
+    "admin_chat_id": null,
+    "delete_after_scrub": true,
+    "_allowlist_note": "Default-deny: only these Telegram user ids may use the bot. roster_owner feeds the capture's asserted_by provenance.",
+    "allowlist": [
+      {"telegram_user_id": 123456789, "display_name": "Pedro", "roster_owner": "Pedro Ferreira"}
+    ]
+  },
   "paths": {
     "corpus_dir": "corpus",
     "out_dir": "out",
+    "captures_dir": "captures",
+    "_captures_dir_note": "PRECIOUS intake media (photos/audio); sibling of out/, NOT regenerable — once a capture is scrubbed from Telegram this is the sole copy, so it MUST be in the backup set (data-stores.md).",
     "playbook": "config/triage_playbook.md",
     "audit_log": "out/audit.jsonl"
   }

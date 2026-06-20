@@ -190,12 +190,18 @@ def event_field(kind: str) -> str:
     return f"__{kind}__"
 
 
+class WorkspaceVersionError(RuntimeError):
+    """The precious DB is behind ``SCHEMA_VERSION`` and the opener refused to migrate it. Raised by the
+    single-migrator gate (``connect(migrate=False)``) so a SEPARATE process (the intake worker) never
+    upgrades workspace.db — only the webapp/CLI migrates (ADR-021 / M2 prereq)."""
+
+
 class Workspace:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
 
-    def connect(self) -> "Workspace":
+    def connect(self, *, migrate: bool = True) -> "Workspace":
         # check_same_thread=False: FastAPI dispatches sync routes to a threadpool; this is a single-user
         # local app so cross-thread reuse of one connection is safe (access is effectively serial).
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -209,6 +215,16 @@ class Workspace:
         # -wal/-shm sidecar files the backup set MUST include (see docs/05-reference/data-stores.md).
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        if not migrate:
+            # Single-migrator gate (ADR-021 / M2 prereq): the intake worker opens read/write but must
+            # NOT migrate the precious, never-rebuilt DB — only the webapp/CLI does. Assert the schema
+            # is current; if behind, refuse rather than racing a migration from a second process.
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if version < SCHEMA_VERSION:
+                raise WorkspaceVersionError(
+                    f"workspace.db is at v{version}; run `email2data serve` once to upgrade it to "
+                    f"v{SCHEMA_VERSION} — the intake worker will not migrate the precious DB")
+            return self
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         self._migrate()

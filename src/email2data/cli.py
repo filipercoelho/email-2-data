@@ -454,6 +454,61 @@ def _resolve_serve_port(preferred: int, host: str) -> tuple[int | None, str | No
     return port, f"Port {preferred} is in use — using {port} instead."
 
 
+def cmd_intake_bot(args: argparse.Namespace) -> int:
+    """Run the conversational-intake Telegram worker (ADR-019/-021): an outbound long-poll worker that
+    writes captures via the store seam (never the HTTP API, so 8042 stays closed) and never binds a
+    port. Config in settings.json ``intake`` block; the bot token in .env. Ctrl-C to stop."""
+    from . import captures as capmod, intake, project as projmod, telegram as tg
+    from .config import resolve_secret
+    from .workspace import Workspace, WorkspaceVersionError
+
+    settings = _load_settings(args)
+    cfg = settings.get("intake", {})
+    if not cfg.get("enabled", False):
+        print("intake bot is disabled — set intake.enabled=true in config/settings.json",
+              file=sys.stderr)
+        return 1
+    try:
+        token = resolve_secret(cfg.get("bot_token_env", "TELEGRAM_BOT_TOKEN"))
+        client = tg.TelegramClient(token)
+    except (ConfigError, ValueError) as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
+        return 2
+
+    p = paths(settings, settings["__settings_path__"])
+    try:
+        # Single-migrator gate (ADR-021): the worker refuses to migrate the precious DB — run
+        # `email2data serve` once to upgrade it. Only the webapp/CLI migrates workspace.db.
+        ws = Workspace(p["out_dir"] / "workspace.db").connect(migrate=False)
+    except WorkspaceVersionError as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        captures = capmod.CaptureStore(ws._conn)
+        projects = projmod.ProjectStore(ws._conn)
+        for entry in cfg.get("allowlist", []):
+            uid = entry.get("telegram_user_id") if isinstance(entry, dict) else entry
+            captures.allow(
+                int(uid),
+                display_name=(entry.get("display_name", "") if isinstance(entry, dict) else ""),
+                roster_owner=(entry.get("roster_owner", "") if isinstance(entry, dict) else ""),
+                added_by="settings")
+        bot = intake.IntakeBot(
+            client=client, captures=captures, projects=projects, captures_dir=p["captures_dir"],
+            admin_chat_id=cfg.get("admin_chat_id"),
+            delete_after_scrub=cfg.get("delete_after_scrub", True))
+        bot_name = cfg.get("bot_name", "default")
+        print(f"intake-bot polling (bot={bot_name}; outbound long-poll only; Ctrl-C to stop)")
+        intake.poll_forever(
+            client=client, bot=bot, bot_name=bot_name,
+            offset_path=p["out_dir"] / "intake_offset.json")
+    except KeyboardInterrupt:
+        print("\nintake-bot stopped.")
+    finally:
+        ws.close()
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Run the local workspace (the 'confirm one lead' slice). Read-only IMAP; never sends."""
     try:
@@ -536,6 +591,10 @@ def main(argv: list[str] | None = None) -> int:
     pex.add_argument("--adapter", choices=["json", "materials-costing"], default="json")
     pex.add_argument("--force", action="store_true", help="export even if not estimable / re-export")
     pp.set_defaults(fn=cmd_project)
+    ib = sub.add_parser(
+        "intake-bot",
+        help="run the conversational-intake Telegram worker (outbound long-poll; never binds a port)")
+    ib.set_defaults(fn=cmd_intake_bot)
     args = parser.parse_args(argv)
     try:
         return args.fn(args)

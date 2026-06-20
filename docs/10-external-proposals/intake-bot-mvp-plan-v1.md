@@ -137,12 +137,18 @@ not via cached runs or mocks:
 
 ## 8. Deferred to fast-follow increments (with why)
 
-- **Increment 1 — audio + deterministic resolve.** Pick the R3 engine; add transcription into the same
-  pipeline; add a project pre-filter (gazetteer + `capture_playbook.md`) to **shorten/pre-select** the
-  pick-list. Audio is the highest-value modality (speaking > thumb-typing) and is the natural next test
-  once the loop is proven.
-- **Increment 2 — LLM inference + field extraction.** The R2 measured loop — the expensive part the MVP
-  exists to de-risk. Only worth building once H1–H3 hold.
+> **R3 decided (2026-06-16): reuse the app's existing Google Vertex/Gemini dispatch**
+> ([llm.py](../../src/email2data/llm.py) / [ADR-012](../03-decisions/adr-012-shared-llm-provider-dispatch.md),
+> project `materials-492723`, EU region) for both increments — no new engine, no new credentials. The
+> cloud egress is the owner-signed path (ADR-020 / R5); the increments degrade gracefully when the LLM
+> is unavailable (the capture still persists; inference is best-effort).
+
+- **Increment 1 — audio + deterministic resolve.** Transcribe voice notes via the existing Vertex/Gemini
+  multimodal path; add a project pre-filter (gazetteer + `capture_playbook.md`) to **shorten/pre-select**
+  the pick-list. Audio is the highest-value modality (speaking > thumb-typing).
+- **Increment 2 — LLM inference + field extraction.** Project inference + job-spec field extraction via
+  the same Vertex/Gemini dispatch — the R2 measured loop. Extracted fields queue for **field-by-field
+  validation** (no auto-apply, R9).
 - **Increment (on demand) — LAN-bind + minimal auth** ([ADR-021](../03-decisions/adr-021-intake-lan-binding-minimal-auth.md)).
   Needed only when validation must happen on a **different** workstation than the box. Until then,
   loopback-at-the-desk keeps the MVP free of the app's first auth layer.

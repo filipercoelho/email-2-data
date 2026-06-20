@@ -93,9 +93,14 @@ def paths(settings: dict[str, Any], settings_path: str | Path) -> dict[str, Path
     out = {
         "corpus_dir": base / cfg.get("corpus_dir", "corpus"),
         "out_dir": base / cfg.get("out_dir", "out"),
+        # Intake media (ADR-020): user-supplied capture photos/audio. PRECIOUS — once the source is
+        # scrubbed from Telegram this is the sole copy — so it lives OUTSIDE the regenerable out/
+        # (a sibling, not under it) and MUST be in the backup set (see data-stores.md).
+        "captures_dir": base / cfg.get("captures_dir", "captures"),
         "playbook": base / cfg.get("playbook", "config/triage_playbook.md"),
         "audit_log": base / cfg.get("audit_log", "out/audit.jsonl"),
     }
     out["corpus_dir"].mkdir(parents=True, exist_ok=True)
     out["out_dir"].mkdir(parents=True, exist_ok=True)
+    out["captures_dir"].mkdir(parents=True, exist_ok=True)
     return out
