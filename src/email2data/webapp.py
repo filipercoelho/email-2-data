@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (accounts as _accounts, classifier, clientdraft, cockpit, contrapartes_page,
+from . import (accounts as _accounts, captures, classifier, clientdraft, cockpit, contrapartes_page,
                crm as _crm, export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
                project as _project, projetos_page, replydraft, report)
 from .config import paths
@@ -36,7 +36,8 @@ def _load_jobspecs(out_dir: Path) -> dict[str, Any]:
 
 
 def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply_pb=None,
-               prepared=None, crm_store=None, corpus_index=None):
+               prepared=None, crm_store=None, corpus_index=None, capture_store=None,
+               captures_dir=None):
     """Injectable factory. Defaults wire to the real files; tests pass prepared/jobspecs/workspace.
 
     ``crm_store`` is an open ``CrmStore`` instance; when omitted the factory opens ``out/crm.db``
@@ -48,6 +49,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # Touch __settings_path__ only for args that aren't injected (tests inject everything).
     def _outdir():
         return paths(settings, settings["__settings_path__"])["out_dir"]
+
+    def _capturesdir() -> Path:
+        # intake media root (ADR-020 sole-copy); injectable for tests, else resolved from settings.
+        if captures_dir is not None:
+            return Path(captures_dir)
+        return paths(settings, settings["__settings_path__"])["captures_dir"]
     ws = workspace or Workspace(_outdir() / "workspace.db").connect()
     jspecs = jobspecs if jobspecs is not None else _load_jobspecs(_outdir())
     rpb = (reply_pb if reply_pb is not None
@@ -565,6 +572,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # Projects — cross-thread canonical spec + export. Shares the Workspace connection.
     # -------------------------------------------------------------------------
     pstore = _project.ProjectStore(ws._conn)
+    cstore = capture_store or captures.CaptureStore(ws._conn)
 
     def _project_view(pid: str) -> dict:
         """Canonical spec + readiness + provenance + conflicts + custom fields + threads for one
@@ -892,6 +900,67 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         disp = "inline" if (ctype.startswith("image/") or ctype == "application/pdf") else "attachment"
         return Response(content=data, media_type=ctype,
                         headers={"Content-Disposition": f'{disp}; filename="{name.replace(chr(34), chr(39))}"'})
+
+    # -------------------------------------------------------------------------
+    # Caixa de Capturas — the conversational-intake validation queue (ADR-019 §5 / R9 no-auto-apply).
+    # A capture lands here from the Telegram worker; the user validates it INTO a project — nothing is
+    # applied automatically. The photo (sole copy once Telegram is scrubbed, ADR-020) is served inline.
+    # -------------------------------------------------------------------------
+    @app.get("/api/captures")
+    def list_captures():
+        return JSONResponse({"captures": cstore.list_pending()})
+
+    @app.post("/api/captures/{cid}/apply")
+    async def apply_capture(cid: str, request: Request):
+        """Validate a capture into a project: append it to the project's ADR-015 ledger carrying the
+        capture's own provenance, then mark the capture applied. A photo stays linked via the event's
+        source_mid (``capture:<cid>``) so the project timeline can show it."""
+        from .workspace import EVENT_KINDS
+        cap = cstore.get(cid)
+        if cap is None:
+            return JSONResponse({"error": "capture not found"}, status_code=404)
+        body = await request.json()
+        pid = str(body.get("project_id", "")).strip()
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        kind = str(body.get("kind", "note")).strip().lower() or "note"
+        if kind not in EVENT_KINDS:
+            return JSONResponse({"error": "bad kind (note/decision/opinion/todo)"}, status_code=400)
+        text = (cap.get("raw_text") or "").strip() or "📎 captura sem texto"
+        pstore.add_event(pid, kind, text,
+                         channel=cap.get("channel") or "manual",
+                         asserted_by=cap.get("asserted_by") or "",
+                         acquired_at=cap.get("acquired_at") or "",
+                         source_mid=f"capture:{cid}" if cap.get("media_paths") else "")
+        cstore.set_project(cid, pid)
+        cstore.mark_applied(cid)
+        return JSONResponse({"ok": True, "project_id": pid})
+
+    @app.post("/api/captures/{cid}/discard")
+    async def discard_capture(cid: str):
+        if cstore.get(cid) is None:
+            return JSONResponse({"error": "capture not found"}, status_code=404)
+        cstore.discard(cid)
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/captures/{cid}/media/{index}")
+    def get_capture_media(cid: str, index: int):
+        """Serve a capture's photo bytes inline (read-only, local) — guarded against path traversal."""
+        import mimetypes
+        from fastapi.responses import Response
+        cap = cstore.get(cid)
+        if cap is None:
+            return JSONResponse({"error": "capture not found"}, status_code=404)
+        media = cap.get("media_paths") or []
+        if index < 0 or index >= len(media):
+            return JSONResponse({"error": "media not found"}, status_code=404)
+        root = _capturesdir().resolve()
+        full = (root / media[index]).resolve()
+        if root not in full.parents or not full.is_file():
+            return JSONResponse({"error": "media not found"}, status_code=404)
+        ctype = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
+        return Response(content=full.read_bytes(), media_type=ctype,
+                        headers={"Content-Disposition": "inline"})
 
     # -------------------------------------------------------------------------
     # Cockpit Fila — response queue (cockpit.build_fila over the CRM + thread_state overlay).
