@@ -37,7 +37,16 @@ corpus/*.eml
 *.db
 *.sqlite
 *.sqlite3
-# out/ holds personal data (subjects, addresses, bodies, contact DB) — ignore all but the keep file
+# SQLite WAL sidecars (workspace.db runs in WAL mode; the intake worker is a 2nd writer — ADR-021).
+# `*.db` is matched literally, so the -wal/-shm siblings need their own globs. (out/* already covers the
+# real out/workspace.db-* pair; these guard a db opened elsewhere, e.g. a stray root-level copy.)
+*.db-wal
+*.db-shm
+# Conversational-intake media (ADR-020): PRECIOUS sole-copy photos/audio — never committed; it lives
+# in the backup set instead (see docs/05-reference/data-stores.md). The intake worker writes here.
+captures/
+# out/ holds personal data (subjects, addresses, bodies, contact DB) + the regenerable intake offset
+# cursor (out/intake_offset.json) — ignore all but the keep file
 out/*
 !out/.gitkeep
 
