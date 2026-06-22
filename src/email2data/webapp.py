@@ -17,9 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (accounts as _accounts, captures, classifier, clientdraft, cockpit, contrapartes_page,
-               crm as _crm, export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
-               project as _project, projetos_page, replydraft, report)
+from . import (accounts as _accounts, captures, captures_page, classifier, clientdraft, cockpit,
+               contrapartes_page, crm as _crm, export as _export, fila_page, jobspec as js, para_ti,
+               para_ti_page, project as _project, projetos_page, replydraft, report)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
 
@@ -906,6 +906,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # A capture lands here from the Telegram worker; the user validates it INTO a project — nothing is
     # applied automatically. The photo (sole copy once Telegram is scrubbed, ADR-020) is served inline.
     # -------------------------------------------------------------------------
+    def _active_projects() -> list[dict[str, Any]]:
+        """The active-project pick-list for the Caixa de Capturas (terminal stages filtered out, same
+        as the Telegram worker's ``_offer_projects``). Newest-first by id so a fresh lead is on top."""
+        active = [p for p in pstore.list() if p.get("stage") not in _project.TERMINAL_STAGES]
+        active.sort(key=lambda p: p["project_id"], reverse=True)
+        return [{"project_id": p["project_id"], "title": p.get("title") or p["project_id"],
+                 "stage": p.get("stage") or ""} for p in active]
+
+    @app.get("/capturas", response_class=HTMLResponse)
+    def capturas_view():
+        """The Caixa de Capturas validation queue (ADR-019 §5 / R9 no-auto-apply). The page is glue
+        over the M3 API; nothing is applied without a deliberate click."""
+        return HTMLResponse(captures_page.build_html(
+            cstore.list_pending(), _active_projects(), nav_counts=_nav_counts()))
+
     @app.get("/api/captures")
     def list_captures():
         return JSONResponse({"captures": cstore.list_pending()})
@@ -919,10 +934,22 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         cap = cstore.get(cid)
         if cap is None:
             return JSONResponse({"error": "capture not found"}, status_code=404)
+        # Idempotency + preserve-at-core (M3 review): a terminal capture (already applied, or discarded)
+        # must NEVER re-append to a project ledger. set_project/mark_applied are guarded to pending, but
+        # add_event below is NOT — so short-circuit here. Closes a double-click double-write and an
+        # apply-after-discard leak of content the user chose to keep out (ADR-019 §5 / ADR-020).
+        if cap.get("status") not in captures.PENDING_STATUSES:
+            return JSONResponse({"error": "capture is no longer pending",
+                                 "status": cap.get("status")}, status_code=409)
         body = await request.json()
         pid = str(body.get("project_id", "")).strip()
-        if pstore.get(pid) is None:
+        proj = pstore.get(pid)
+        if proj is None:
             return JSONResponse({"error": "project not found"}, status_code=404)
+        # Match the picker (_active_projects): never file a capture into a closed/archived project.
+        if proj.get("stage") in _project.TERMINAL_STAGES:
+            return JSONResponse({"error": "project is closed", "stage": proj.get("stage")},
+                                status_code=409)
         kind = str(body.get("kind", "note")).strip().lower() or "note"
         if kind not in EVENT_KINDS:
             return JSONResponse({"error": "bad kind (note/decision/opinion/todo)"}, status_code=400)
@@ -1051,7 +1078,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             frows, clusters,
             {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])},
         ))
-        return {k: v for k, v in {"fila": active, "para-ti": para_ti_count}.items() if v}
+        # Pending captures awaiting validation (ADR-019 §5 / R9) — the Caixa de Capturas badge.
+        capturas_count = len(cstore.list_pending())
+        return {k: v for k, v in {"fila": active, "para-ti": para_ti_count,
+                                  "capturas": capturas_count}.items() if v}
 
     @app.get("/", response_class=HTMLResponse)
     @app.get("/fila", response_class=HTMLResponse)

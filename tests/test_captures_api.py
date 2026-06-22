@@ -78,6 +78,45 @@ def test_discard_keeps_the_row_but_removes_it_from_the_queue(tmp_path):
     ws.close()
 
 
+def test_double_apply_appends_exactly_one_event_and_409s_the_second(tmp_path):
+    # M3 review (HIGH): apply must be idempotent — a double-click / two in-flight POSTs must NOT
+    # double-append the off-email knowledge event. The 2nd hit sees a terminal capture and 409s.
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="cliente confirmou prazo")
+    r1 = client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "decision"})
+    r2 = client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "decision"})
+    assert r1.status_code == 200 and r2.status_code == 409   # second is rejected, not re-applied
+    events = [r for r in proj.timeline(pid) if r["op"] == "event"]
+    assert len(events) == 1                                  # the ledger event landed exactly once
+    ws.close()
+
+
+def test_apply_after_discard_never_leaks_into_the_ledger(tmp_path):
+    # M3 review (HIGH): a capture the user DISCARDED must never end up written into a project — the
+    # unguarded add_event used to leak it. preserve-at-core / terminal immutability (ADR-020).
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="engano")
+    assert client.post(f"/api/captures/{cid}/discard").status_code == 200
+    r = client.post(f"/api/captures/{cid}/apply", json={"project_id": pid})
+    assert r.status_code == 409                              # terminal capture: rejected
+    assert cap.get(cid)["status"] == "discarded"            # stays discarded
+    assert proj.timeline(pid) == []                          # nothing leaked into the project
+    ws.close()
+
+
+def test_apply_to_a_closed_project_is_rejected(tmp_path):
+    # M3 review (LOW): the picker only offers active projects; the apply endpoint must agree and refuse
+    # a terminal-stage (WON/LOST/CANCELLED/ARCHIVED) target instead of appending to a closed project.
+    client, ws, cap, proj, _pid = _setup(tmp_path)
+    won = proj.create("Fechada", stage="WON")
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="x")
+    r = client.post(f"/api/captures/{cid}/apply", json={"project_id": won})
+    assert r.status_code == 409                              # closed project: rejected
+    assert cap.get(cid)["status"] == "stored"               # capture untouched, still pending
+    assert proj.timeline(won) == []
+    ws.close()
+
+
 def test_media_is_served_inline_and_guards_index_range(tmp_path):
     client, ws, cap, _proj, _pid = _setup(tmp_path)
     (tmp_path / "c-2-1").mkdir()

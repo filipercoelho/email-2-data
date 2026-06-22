@@ -165,6 +165,8 @@ _BODY = """
   .tl-h b{font-weight:700}
   .tl-m{font-size:11px;color:var(--mut2);margin-top:2px}
   .tl-old{color:var(--mut2);text-decoration:line-through;margin-right:6px}
+  /* the photo in the project timeline — a capture event's sole-copy media (ADR-020) */
+  .tl-thumb{margin-top:6px;width:84px;height:84px;object-fit:cover;border-radius:9px;border:1px solid var(--bd);cursor:zoom-in;display:block}
   /* ── owners (multi) ─────────────────────────────────────────────────── */
   .owners{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
   .owners .olbl{font-size:11.5px;color:var(--mut);font-weight:600}
@@ -582,8 +584,15 @@ function timelineHTML(rows){
     const chan=(r.channel&&CHAN_ICON[r.channel])?(CHAN_ICON[r.channel]+' '):'';
     const who=r.asserted_by?(' · '+esc(r.asserted_by)):'';
     const when=esc((r.acquired_at||r.ts||'').slice(0,10));
+    // The photo in the project timeline: a capture event carries its media via source_mid
+    // ("capture:<cid>", set on apply) — render the sole-copy thumbnail inline (ADR-020).
+    const sm=r.source_mid||'';
+    const thumb=(isEvent&&sm.indexOf('capture:')===0)
+      ? '<img class="tl-thumb" src="/api/captures/'+encodeURIComponent(sm.slice(8))+'/media/0"'
+        +' alt="captura" loading="lazy" onclick="window.open(this.src)">'
+      : '';
     return '<div class="tl-row'+(isEvent?' event':'')+(isClear?' removed':'')+'">'
-      +'<div class="tl-h">'+head+'</div><div class="tl-m">'+chan+when+who+'</div></div>';
+      +'<div class="tl-h">'+head+'</div>'+thumb+'<div class="tl-m">'+chan+when+who+'</div></div>';
   }).join('')+'</div>';
 }
 
@@ -677,6 +686,7 @@ function paletteItems(q){
     {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
+    {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
     {kind:'ação',label:'Novo projeto',run:promptNew},
     {kind:'ação',label:'Registar conhecimento',run:()=>{ if(selected) showTab('registar'); else toast('abre um projeto primeiro'); }},
     {kind:'ação',label:S.actSync,run:syncNow},

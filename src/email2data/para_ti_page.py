@@ -154,6 +154,7 @@ function paletteItems(q){
     {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
+    {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
   return q?base.filter(it=>(it.label+' '+it.kind).toLowerCase().includes(q)):base;

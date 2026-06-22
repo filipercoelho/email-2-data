@@ -332,6 +332,7 @@ function paletteItems(q){
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
+    {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
   ];
   if(hasFilters()) items.unshift({kind:'filtro',label:'limpar filtros',run:clearFilters});
 

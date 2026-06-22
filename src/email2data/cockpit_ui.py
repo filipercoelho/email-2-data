@@ -32,6 +32,7 @@ _NAV = [
     ("contrapartes", "Contrapartes",  "/contrapartes"),
     ("projetos",     "Projetos",      "/projetos"),
     ("para-ti",      "Para ti",       "/para-ti"),
+    ("capturas",     "Capturas",      "/capturas"),
 ]
 
 
