@@ -141,6 +141,15 @@ class CaptureStore:
             "UPDATE captures SET transcript=? WHERE capture_id=?", (text, capture_id))
         self._conn.commit()
 
+    def set_extracted_fields(self, capture_id: str, fields: dict[str, str], confidence: float) -> None:
+        """Store the LLM-extracted field VALUES + a 0-1 confidence (Increment 2, v7). Stored ONLY —
+        never auto-applied: the user validates each field into the project via /field (R9). Best-effort
+        and idempotent, like set_transcript; an extraction failure simply leaves these NULL."""
+        self._conn.execute(
+            "UPDATE captures SET extracted_fields_json=?, confidence=? WHERE capture_id=?",
+            (json.dumps(dict(fields or {})), float(confidence), capture_id))
+        self._conn.commit()
+
     def mark_scrubbed(self, capture_id: str, ts: str = "") -> None:
         """Stamp when the source was deleted from Telegram (ADR-020 §2) — called only AFTER the
         capture is durably stored, never the reverse (persist-then-scrub)."""
@@ -175,12 +184,18 @@ class CaptureStore:
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
-        """Materialise a capture row, decoding the JSON ``media_paths`` back into a list — always a
-        list, even if the column holds NULL, "" or a non-array value written out-of-band."""
+        """Materialise a capture row, decoding the JSON ``media_paths`` (→ always a list) and
+        ``extracted_fields_json`` (→ always a dict) back into Python — even if the column holds NULL,
+        "" or a non-container value written out-of-band."""
         d = dict(row)
         try:
             paths = json.loads(d["media_paths"]) if d.get("media_paths") else []
         except (TypeError, ValueError):
             paths = []
         d["media_paths"] = paths if isinstance(paths, list) else []
+        try:
+            fields = json.loads(d["extracted_fields_json"]) if d.get("extracted_fields_json") else {}
+        except (TypeError, ValueError):
+            fields = {}
+        d["extracted_fields"] = fields if isinstance(fields, dict) else {}
         return d

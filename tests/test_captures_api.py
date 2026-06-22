@@ -118,6 +118,22 @@ def test_apply_uses_the_transcript_when_there_is_no_typed_text(tmp_path):
     ws.close()
 
 
+def test_extracted_fields_never_reach_the_estimable_gate_without_explicit_confirm(tmp_path):
+    # WP4 safety pin (the highest-stakes property): a capture's LLM-extracted field values must NEVER be
+    # written to project_fields by extraction or by Aplicar — only by an explicit per-field /field POST.
+    # So applying a capture loaded with extracted fields leaves the project's canonical fields empty.
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="inox 3mm, prazo 1 jul")
+    cap.set_extracted_fields(cid, {"material#0": "inox 304", "deadline": "2026-07-01",
+                                   "thickness#0": "3 mm"}, 0.95)
+    # Aplicar files the note as a tier=context event — it must NOT apply any extracted spec field.
+    client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "note"})
+    assert proj.fields_for(pid) == {}                  # zero canonical fields written (gate untouched)
+    tl = proj.timeline(pid)
+    assert tl and tl[0]["op"] == "event"               # only the event landed
+    ws.close()
+
+
 def test_apply_to_a_closed_project_is_rejected(tmp_path):
     # M3 review (LOW): the picker only offers active projects; the apply endpoint must agree and refuse
     # a terminal-stage (WON/LOST/CANCELLED/ARCHIVED) target instead of appending to a closed project.

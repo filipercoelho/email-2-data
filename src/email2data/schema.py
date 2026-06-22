@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from . import jobspec as _js  # the job-spec field registry (capture extraction, Increment 2)
+
 # Bump whenever the playbook OR this schema changes verdicts, so re-runs are comparable and the
 # verdict cache (Phase 4) invalidates correctly.
 EXTRACTOR_VERSION = "counterparty.2026-06-11.v4"
@@ -190,5 +192,73 @@ GEMINI_SPEC_SCHEMA = {
                       "properties": {k: {"type": "string", "nullable": True} for k in SPEC_ITEM_KEYS}},
         },
         **{k: {"type": "string", "nullable": True} for k in SPEC_JOB_KEYS},
+    },
+}
+
+
+# --- Increment 2 (conversational intake): project inference + capture field extraction ----------
+# Both are LLM stages invoked ONLY when the deterministic resolver is ambiguous (compute ∝ uncertainty,
+# ADR-001). Both ALWAYS just suggest — every result is validated field-by-field by a human before it can
+# touch a project (R9 / never auto-apply). See capture_infer.py.
+
+# The job-spec field keys a staffer can ASSERT off-desk. Derived from the jobspec registry (single
+# source of truth), minus the internal 'process' (we set the fabrication process; the client never
+# states it). Each maps to a project field ADDRESS at validation time (capture_infer.field_address).
+CAPTURE_FIELD_KEYS = [k for k in (_js.JOB_KEYS + _js.ITEM_KEYS) if k != "process"]
+
+_CAPTURE_FIELDS_DESC = ("Extract ONLY the job-spec field VALUES explicitly stated in this short field "
+                        "note / voice transcript. Return null for anything not stated — do NOT guess "
+                        "(every value is human-confirmed and can affect the estimate). 'confidence' is "
+                        "your 0-1 certainty in the extraction.")
+
+# Gemini (Vertex) controlled generation — flat one-value-per-field (a capture states discrete facts,
+# not a multi-item spec), mirroring GEMINI_SPEC_SCHEMA's OpenAPI subset (nullable: True).
+GEMINI_CAPTURE_FIELDS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **{k: {"type": "string", "nullable": True} for k in CAPTURE_FIELD_KEYS},
+        "confidence": {"type": "number"},
+    },
+}
+CAPTURE_FIELDS_TOOL = {
+    "name": "extract_capture_fields",
+    "description": _CAPTURE_FIELDS_DESC,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            **{k: {"type": ["string", "null"]} for k in CAPTURE_FIELD_KEYS},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": [],
+    },
+}
+
+# Project inference: rank which ACTIVE project a capture is about, with a 0-1 confidence per candidate
+# and an explicit "none of these". The model must only return a project_id from the provided list;
+# capture_infer drops any hallucinated id.
+_INFER_DESC = ("Rank which of the listed ACTIVE projects this capture is about. Return candidates with "
+               "a 0-1 confidence (most likely first), OR none_match=true if none fit. NEVER invent a "
+               "project_id that is not in the list.")
+_INFER_CANDIDATES = {
+    "type": "array",
+    "items": {"type": "object", "properties": {
+        "project_id": {"type": "string"}, "confidence": {"type": "number"}}},
+}
+GEMINI_INFER_SCHEMA = {
+    "type": "object",
+    "properties": {"candidates": _INFER_CANDIDATES, "none_match": {"type": "boolean"}},
+}
+INFER_TOOL = {
+    "name": "infer_project",
+    "description": _INFER_DESC,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "candidates": {"type": "array", "items": {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1}}}},
+            "none_match": {"type": "boolean"},
+        },
+        "required": [],
     },
 }

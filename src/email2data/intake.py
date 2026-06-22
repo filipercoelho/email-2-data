@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import capture_resolve as _resolve, llm, project as _project
+from . import capture_infer as _infer, capture_resolve as _resolve, llm, project as _project
 from .captures import CONTENT_ARTIFACT, CONTENT_CONVERSATION, CaptureStore
 from .project import ProjectStore
 from .telegram import TelegramClient, TelegramError, TelegramRateLimit
@@ -175,6 +175,10 @@ class IntakeBot:
         # surfaced for manual handling — the capture is PRECIOUS; inference is not (ADR-020).
         if audio_rel:
             self._transcribe(cid, audio_rel, voice or {})
+        # Increment 2: extract job-spec field VALUES from the text/transcript (best-effort, stored only).
+        # NEVER auto-applied — the user validates each field in the Caixa de Capturas (R9). Runs after the
+        # transcript so a voice memo's words are included.
+        self._extract_fields(cid)
         self._offer_projects(chat_id, t1_id, cid)
 
     def _reject(self, chat_id: int, sender_id: int, from_user: dict[str, Any]) -> None:
@@ -231,6 +235,24 @@ class IntakeBot:
         except Exception:
             logger.info("intake_transcribe_error", extra={"capture_id": cid})
 
+    def _extract_fields(self, cid: str) -> None:
+        """Best-effort job-spec field extraction from the capture text/transcript (Increment 2), stored
+        for field-by-field validation. NEVER applied here (R9). Degrades silently with no LLM / on
+        failure — the capture survives. Raw text is NEVER logged (N4)."""
+        if self._llm_client is None or not self._llm_cfg:
+            return
+        cap = self._captures.get(cid) or {}
+        hay = " ".join(filter(None, [cap.get("raw_text"), cap.get("transcript")])).strip()
+        if not hay:
+            return
+        try:
+            result = _infer.extract_fields(hay, self._llm_client, self._llm_cfg)
+        except Exception:
+            logger.info("intake_extract_error", extra={"capture_id": cid})
+            return
+        if result.get("fields"):
+            self._captures.set_extracted_fields(cid, result["fields"], result.get("confidence", 0.0))
+
     def _scrub(self, chat_id: int, message_id: int, cid: str) -> None:
         """Delete the source from Telegram — strictly AFTER the durable persist above (ADR-020 §2). A
         failed delete is non-fatal: the capture is safe; the message just lingers in Telegram."""
@@ -248,10 +270,23 @@ class IntakeBot:
         # text/transcript names them, so the likeliest obra is the FIRST button. No auto-apply — these
         # are still buttons the staffer taps (ADR-019 §5). A no-signal capture keeps the default order.
         cap = self._captures.get(cid) or {}
-        hay = " ".join(filter(None, [cap.get("raw_text"), cap.get("transcript")]))
-        if hay.strip():
-            active = _resolve.rank_projects(hay, active, aliases=self._aliases,
-                                            gazetteer=self._gazetteer)
+        hay = " ".join(filter(None, [cap.get("raw_text"), cap.get("transcript")])).strip()
+        if hay:
+            ranked = _resolve.rank_projects(hay, active, aliases=self._aliases, gazetteer=self._gazetteer)
+            det = _resolve.best_project(hay, active, aliases=self._aliases, gazetteer=self._gazetteer)
+            if det is None and self._llm_client is not None and len(active) > 1:
+                # Deterministic resolve is ambiguous → ask the model (compute ∝ uncertainty, ADR-001).
+                # Reorder the pick-list by the inferred candidates (High first); fall back to the
+                # deterministic rank. Still all buttons the staffer taps — no auto-apply (R9).
+                order = [c["project_id"] for c in _infer.infer_project(
+                    hay, active, self._llm_client, self._llm_cfg)["candidates"]]
+                if order:
+                    pos = {pid: i for i, pid in enumerate(order)}
+                    active = sorted(active, key=lambda p: pos.get(p["project_id"], len(order) + 1))
+                else:
+                    active = ranked
+            else:
+                active = ranked
         shown = active[:_MAX_PICK]
         rows: list[list[dict[str, str]]] = [
             [{"text": f"{p['title']} ({p['project_id']})",

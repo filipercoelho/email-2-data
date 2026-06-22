@@ -11,12 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import cockpit_ui
+from . import cockpit_ui, jobspec as _js
 from .workspace import EVENT_KINDS
 
 # pt-PT labels for the off-email event kinds the capture is filed as (ADR-015). Keys track
 # ``workspace.EVENT_KINDS``; a missing key falls back to the raw kind at render time.
 _KIND_LABEL = {"note": "Nota", "decision": "Decisão", "opinion": "Opinião", "todo": "To-do"}
+
+# pt-PT labels for the extracted job-spec fields (Increment 2), keyed by base field key (the address
+# minus any ``#i``). Single source of truth = jobspec.FIELDS, so they never drift from the registry.
+_FIELD_LABELS = {k: label for k, label, _t, _q, _s in _js.FIELDS}
 
 _BODY = """
 <div class="wrap">
@@ -45,6 +49,21 @@ _BODY = """
   .capclass{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
     padding:1px 7px;border-radius:20px;background:#eef0f3;color:var(--mut)}
   .capclass.artifact{background:#efeafb;color:var(--purple)}
+  /* extracted-field validation (Increment 2) — editable, individually-confirmable rows */
+  .capfields{margin-top:11px;border:1px solid var(--bd);border-radius:10px;padding:9px 11px;background:#fbfcfe}
+  .capfhdr{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);
+    margin-bottom:7px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .capconf{font-weight:700;color:var(--int);background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:0 7px;font-size:10px}
+  .capfnote{font-weight:500;text-transform:none;letter-spacing:0;color:var(--mut2);font-size:11px}
+  .capfield{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .capflabel{flex:0 0 130px;font-size:12px;color:var(--mut);font-weight:600}
+  .capfval{flex:1;min-width:90px;border:1px solid var(--bd);border-radius:7px;padding:4px 8px;font-size:12.5px;
+    color:var(--tx);background:var(--card);font-family:inherit;outline:none}
+  .capfval:focus{border-color:var(--ac)}
+  .capfok{flex:0 0 auto;font-size:12px}
+  .capfield.saved{opacity:.7}
+  .capfield.saved .capfval{border-color:var(--green);background:#f3fbf6}
+  .capfield.saved .capfok{border-color:var(--green);color:var(--green)}
   .capctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:11px}
   .capctl select{border:1px solid var(--bd);border-radius:8px;padding:5px 9px;font-size:12.5px;
     color:var(--tx);background:var(--card);font-family:inherit;max-width:280px}
@@ -81,6 +100,30 @@ function projectOptions(sel){
 function kindOptions(sel){
   return KINDS.map(k =>
     '<option value="'+k+'"'+(k===sel?' selected':'')+'>'+esc(LABELS[k]||k)+'</option>').join('');
+}
+
+/* The LLM-extracted job-spec field values (Increment 2). Shown as editable, individually-confirmable
+   rows — NOTHING is bulk-applied: confirming one POSTs it to the SELECTED project's /field with the
+   capture's provenance (R9; a wrong extracted value can feed the estimable gate, so each is a
+   deliberate human action). The field address (e.g. "material#0") → its pt-PT label via FIELD_LABELS. */
+function fieldLabel(addr){ const base = String(addr).split('#')[0]; return FIELD_LABELS[base] || base; }
+function fieldVal(c, addr){ const o = c._fields || {}; return (addr in o) ? o[addr] : c.extracted_fields[addr]; }
+function fieldsHTML(c){
+  const f = c.extracted_fields || {};
+  const addrs = Object.keys(f);
+  if(!addrs.length) return '';
+  const conf = (typeof c.confidence === 'number')
+    ? '<span class="capconf" title="confiança da extração">'+Math.round(c.confidence*100)+'%</span>' : '';
+  const rows = addrs.map(addr =>
+    '<div class="capfield" data-addr="'+esc(addr)+'">'
+    + '<span class="capflabel">'+esc(fieldLabel(addr))+'</span>'
+    + '<input class="capfval" value="'+esc(fieldVal(c, addr))+'" aria-label="'+esc(fieldLabel(addr))+'">'
+    + '<button class="act-btn capfok" data-act="field">✓ confirmar</button>'
+    + '</div>').join('');
+  return '<div class="capfields">'
+    + '<div class="capfhdr">Campos extraídos '+conf
+    + '<span class="capfnote">confirma um a um — nada é aplicado automaticamente</span></div>'
+    + rows + '</div>';
 }
 
 function renderCard(c, i){
@@ -127,7 +170,7 @@ function renderCard(c, i){
     + '</div>';
   return '<div class="capcard'+(isFocused?' on':'')+'" data-i="'+i+'" data-cid="'+esc(cid)+'">'
     + thumb
-    + '<div class="capbody">'+bodyTxt+audioEl+meta+ctl+'</div>'
+    + '<div class="capbody">'+bodyTxt+audioEl+meta+fieldsHTML(c)+ctl+'</div>'
     + '</div>';
 }
 
@@ -197,16 +240,41 @@ function paletteItems(q){
   return q ? base.filter(it => (it.label+' '+it.kind).toLowerCase().includes(q)) : base;
 }
 
-/* Persist a project/kind pick onto its capture so a later render() restores it (not just the DOM). */
+/* Confirm ONE extracted field into the SELECTED project (R9 — never bulk-applied). POSTs to the
+   existing /field endpoint carrying the capture's provenance; on success the row is marked saved. */
+async function confirmField(card, row){
+  const c = caps.find(x => x.capture_id === card.dataset.cid); if(!c || !row) return;
+  const pid = (card.querySelector('.capproj')||{}).value || '';
+  if(!pid){ toast('Escolhe um projeto primeiro'); return; }
+  const addr = row.dataset.addr;
+  const val = ((row.querySelector('.capfval')||{}).value || '').trim();
+  if(!val){ toast('Valor vazio'); return; }
+  try{
+    await post('/api/projects/'+encodeURIComponent(pid)+'/field',
+      {field: addr, value: val, channel: c.channel || 'manual',
+       asserted_by: c.asserted_by || '', acquired_at: c.acquired_at || ''});
+    row.classList.add('saved');
+    const b = row.querySelector('.capfok'); if(b){ b.textContent = '✓ guardado'; b.disabled = true; }
+    toast('campo guardado em '+pid); announce('campo confirmado');
+  }catch(e){ toast(S.revertido); }
+}
+
+/* Persist project/kind picks AND field-value edits onto the capture so a re-render restores them. */
 $('#_list').addEventListener('change', e=>{
   const card = e.target.closest('.capcard'); if(!card) return;
   const c = caps.find(x => x.capture_id === card.dataset.cid); if(!c) return;
   if(e.target.classList.contains('capproj')) c._proj = e.target.value;
   else if(e.target.classList.contains('capkind')) c._kind = e.target.value;
+  else if(e.target.classList.contains('capfval')){
+    const row = e.target.closest('.capfield');
+    if(row){ c._fields = c._fields || {}; c._fields[row.dataset.addr] = e.target.value; }
+  }
 });
 
 $('#_list').addEventListener('click', e=>{
-  if(e.target.closest('select')) return;              // let the native picker open without re-render
+  if(e.target.closest('select') || e.target.closest('input')) return;  // let native controls work
+  const fb = e.target.closest('[data-act="field"]');                   // confirm one extracted field
+  if(fb){ confirmField(fb.closest('.capcard'), fb.closest('.capfield')); return; }
   const btn = e.target.closest('[data-act]');
   if(btn){
     const i = parseInt(btn.dataset.i, 10);
@@ -227,7 +295,8 @@ def build_html(captures: list[dict[str, Any]], projects: list[dict[str, Any]],
     labels = {k: _KIND_LABEL.get(k, k) for k in EVENT_KINDS}
     return cockpit_ui.page(
         "Capturas", "capturas", _BODY,
-        embeds={"captures": captures, "projects": projects, "labels": labels},
+        embeds={"captures": captures, "projects": projects, "labels": labels,
+                "field_labels": _FIELD_LABELS},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
     )

@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS captures (
     raw_text             TEXT,               -- verbatim text the staffer sent ("" if none) (v5)
     media_paths          TEXT,               -- JSON array of media files on disk, relative to captures_dir (v5)
     transcript           TEXT,               -- pt-PT transcript of a voice/audio capture; NULL until transcribed (v6)
+    extracted_fields_json TEXT,              -- JSON {field_addr: value} the LLM extracted; never auto-applied (v7)
+    confidence           REAL,               -- 0-1 extraction confidence (Increment 2); NULL until extracted (v7)
     inferred_project_id  TEXT,               -- the project the user picked; NULL until resolved (v5)
     channel              TEXT,               -- real-world channel (call|meeting|whatsapp|sms|manual) (v5)
     asserted_by          TEXT,               -- who stated it (the sender's roster name) (v5)
@@ -171,7 +173,9 @@ CREATE TABLE IF NOT EXISTS capture_users (
 # brand-new so delivered by SCHEMA with no ALTER; ADR-019/-020/-021).
 # v6 (2026-06-22): Increment 1 (audio) — captures.transcript, a NEW COLUMN on the pre-existing captures
 # table, so it needs a guarded ALTER in _migrate (ADR-020 preserve-at-core: transcript + original audio).
-SCHEMA_VERSION = 6
+# v7 (2026-06-22): Increment 2 (inference) — captures.extracted_fields_json + captures.confidence (the
+# LLM-extracted field VALUES the user validates field-by-field; never auto-applied). Two more guarded ALTERs.
+SCHEMA_VERSION = 7
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -297,6 +301,12 @@ class Workspace:
             # pre-existing captures table, so SCHEMA's CREATE-IF-NOT-EXISTS can't add it — an explicit
             # guarded ALTER does. (ADR-020: the transcript joins the original audio + verbatim text.)
             self._add_column("captures", "transcript", "TEXT")
+        if version < 7:
+            # Increment 2 (inference): the LLM-extracted field VALUES + a 0-1 confidence. Stored only —
+            # NEVER auto-applied; the user validates each field before it touches a project (R9). Two
+            # more NEW COLUMNS on the pre-existing captures table, so two more guarded ALTERs.
+            self._add_column("captures", "extracted_fields_json", "TEXT")
+            self._add_column("captures", "confidence", "REAL")
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 

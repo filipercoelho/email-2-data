@@ -16,7 +16,7 @@ see [ADR-010](../03-decisions/adr-010-workspace-db-precious-vs-regenerable.md).
 | `out/results.jsonl` | append-only `TriageResult` per message | derived | re-run `triage --full` | `EXTRACTOR_VERSION` |
 | `out/crm.db` | interactions (event log) + contacts (person rollup) | **regenerable** | `email2data crm` drops & rebuilds each run | `crm.SCHEMA_VERSION` |
 | `out/sync.db` | per-mailbox IMAP **UID watermark** (cursor) | cursor | deletable — next `fetch` re-bootstraps by date | `sync.SCHEMA` (additive) |
-| `out/workspace.db` | **human decisions** + Projects + edit history + the intake capture queue/allowlist (v5; capture `transcript` v6) | **precious** | **never auto-rebuilt** | `workspace.SCHEMA_VERSION` (`user_version`) |
+| `out/workspace.db` | **human decisions** + Projects + edit history + the intake capture queue/allowlist (v5; capture `transcript` v6; `extracted_fields_json`+`confidence` v7) | **precious** | **never auto-rebuilt** | `workspace.SCHEMA_VERSION` (`user_version`) |
 | `corpus/*.eml` | raw fetched messages (read-only source mirror) | cache | re-fetch | — |
 
 ## Provenance / corpus

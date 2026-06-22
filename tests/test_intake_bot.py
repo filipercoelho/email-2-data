@@ -168,10 +168,13 @@ def test_voice_capture_persists_then_scrubs_then_transcribes(tmp_path, monkeypat
     seen = {}
 
     def fake_call(cl, cfg, system, user, **kw):
-        seen["deleted_before"] = list(client.deleted)       # was the scrub already done?
-        seen["audio_mime"] = (kw.get("images") or [{}])[0].get("mime")
-        seen["text_mode"] = kw.get("text")
-        return "o cliente quer mais duas estantes"
+        imgs = kw.get("images")
+        if imgs:                                            # the transcription call (carries the audio)
+            seen["deleted_before"] = list(client.deleted)   # was the scrub already done?
+            seen["audio_mime"] = imgs[0].get("mime")
+            seen["text_mode"] = kw.get("text")
+            return "o cliente quer mais duas estantes"
+        return {}                                           # the (no-image) extract_fields call -> no fields
     monkeypatch.setattr(intake_mod.llm, "call", fake_call)
 
     bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
@@ -220,6 +223,55 @@ def test_voice_without_llm_client_is_stored_not_transcribed(tmp_path, monkeypatc
     assert cap is not None and cap["transcript"] is None and cap["media_paths"]
     assert client.deleted == [(10, 100)]
     assert calls["n"] == 0                                      # transcription never attempted
+
+
+def test_text_capture_extracts_fields_best_effort(tmp_path, monkeypatch):
+    # Increment 2: the worker extracts job-spec field VALUES from the text and STORES them (never
+    # applies — R9). The extraction is the mocked LLM; the stored fields are coerced/addressed.
+    import email2data.intake as intake_mod
+    monkeypatch.setattr(intake_mod._infer, "extract_fields", lambda text, client, cfg:
+                        {"fields": {"material#0": "inox 304", "deadline": "2026-07-01"}, "confidence": 0.88})
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path, llm_client=object(),
+                                   llm_cfg={"provider": "vertex_gemini", "model": "x"})
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(text="inox 304, prazo 1 jul", message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap["extracted_fields"] == {"material#0": "inox 304", "deadline": "2026-07-01"}
+    assert cap["confidence"] == 0.88
+    assert cap["status"] == "stored"        # extracted only — NOT applied/parsed (no auto-apply)
+
+
+def test_extraction_failure_leaves_capture_without_fields(tmp_path, monkeypatch):
+    # Degradation: extraction raises -> the capture survives with NO fields (nothing half-applied).
+    import email2data.intake as intake_mod
+    def boom(*a, **k):
+        raise RuntimeError("model exploded")
+    monkeypatch.setattr(intake_mod._infer, "extract_fields", boom)
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path, llm_client=object(),
+                                   llm_cfg={"provider": "vertex_gemini", "model": "x"})
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(text="inox 304", message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None and cap["extracted_fields"] == {} and cap["confidence"] is None
+    assert client.deleted == [(10, 100)]    # the capture still persisted + scrubbed normally
+
+
+def test_extraction_is_skipped_without_an_llm_client(tmp_path, monkeypatch):
+    import email2data.intake as intake_mod
+    calls = {"n": 0}
+    monkeypatch.setattr(intake_mod._infer, "extract_fields",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"fields": {}, "confidence": 0})
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path)   # no llm_client
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(text="inox 304", message_id=100)})
+    assert captures.get("c-10-100")["extracted_fields"] == {}
+    assert calls["n"] == 0                   # extraction never attempted without a client
 
 
 def test_pick_list_ranks_the_named_project_first(tmp_path):

@@ -273,7 +273,7 @@ def test_v5_to_v6_adds_transcript_column_and_roundtrips(tmp_path):
     ws = Workspace(db).connect()        # executescript(SCHEMA) (no-op on existing) + _migrate ALTERs in transcript
     conn = ws._conn
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 6
     assert "transcript" in _cols(conn, "captures")
 
     # the pre-existing capture survived untouched; transcript is NULL until transcribed
@@ -285,6 +285,59 @@ def test_v5_to_v6_adds_transcript_column_and_roundtrips(tmp_path):
     # set_transcript round-trips (would raise "no such column" if the v6 ALTER was skipped)
     cap.set_transcript("c-99-11", "olá, o cliente quer mais duas estantes")
     assert cap.get("c-99-11")["transcript"] == "olá, o cliente quer mais duas estantes"
+    ws.close()
+
+
+# The v6 shape of the captures table (transcript present) WITHOUT the v7 inference columns — a real DB
+# upgraded for audio (Increment 1) before inference (Increment 2) landed.
+_V6_PARTIAL = """
+CREATE TABLE captures (
+    capture_id TEXT PRIMARY KEY, telegram_message_id INTEGER, telegram_chat_id INTEGER,
+    content_class TEXT, raw_text TEXT, media_paths TEXT, transcript TEXT, inferred_project_id TEXT,
+    channel TEXT, asserted_by TEXT, acquired_at TEXT,
+    status TEXT NOT NULL DEFAULT 'stored', telegram_scrubbed_at TEXT, created_ts TEXT, applied_ts TEXT,
+    UNIQUE (telegram_message_id, telegram_chat_id)
+);
+CREATE TABLE capture_users (
+    telegram_user_id INTEGER PRIMARY KEY, display_name TEXT, roster_owner TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1, added_by TEXT, added_at TEXT
+);
+"""
+
+
+def _make_v6_db(path):
+    c = sqlite3.connect(path)
+    c.executescript(_V6_PARTIAL)
+    c.execute("INSERT INTO captures(capture_id,telegram_message_id,telegram_chat_id,content_class,"
+              "raw_text,transcript,status,created_ts) "
+              "VALUES ('c-99-11',11,99,'conversation','','prazo 1 jul, inox','stored','2026-06-22')")
+    c.execute("PRAGMA user_version = 6")
+    c.commit()
+    c.close()
+
+
+def test_v6_to_v7_adds_inference_columns_and_roundtrips(tmp_path):
+    """v7 adds captures.extracted_fields_json + captures.confidence as NEW COLUMNS on the pre-existing
+    captures table (Increment 2). A populated v6 DB must gain them via the guarded ALTERs."""
+    db = tmp_path / "workspace.db"
+    _make_v6_db(db)
+
+    ws = Workspace(db).connect()
+    conn = ws._conn
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert {"extracted_fields_json", "confidence"} <= _cols(conn, "captures")
+
+    cap = CaptureStore(conn)
+    got = cap.get("c-99-11")
+    assert got is not None and got["transcript"] == "prazo 1 jul, inox"
+    assert got["extracted_fields"] == {} and got["confidence"] is None   # empty until extracted
+
+    # the extracted-fields writer round-trips (would raise "no such column" if a v7 ALTER was skipped)
+    cap.set_extracted_fields("c-99-11", {"deadline": "2026-07-01", "material#0": "inox 304"}, 0.9)
+    got = cap.get("c-99-11")
+    assert got["extracted_fields"] == {"deadline": "2026-07-01", "material#0": "inox 304"}
+    assert got["confidence"] == 0.9
     ws.close()
 
 
