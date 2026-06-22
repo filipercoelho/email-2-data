@@ -104,6 +104,20 @@ def test_apply_after_discard_never_leaks_into_the_ledger(tmp_path):
     ws.close()
 
 
+def test_apply_uses_the_transcript_when_there_is_no_typed_text(tmp_path):
+    # Increment 1: a voice memo carries its content in the transcript (raw_text empty). Applying it must
+    # file the TRANSCRIPT into the project ledger, not a "captura sem texto" placeholder.
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, content_class="conversation",
+                     media_paths=["c-2-1/voice.oga"])
+    cap.set_transcript(cid, "o cliente quer mais duas estantes em inox")
+    client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "note"})
+    tl = proj.timeline(pid)
+    assert tl[0]["op"] == "event"
+    assert tl[0]["new_value"] == "o cliente quer mais duas estantes em inox"   # transcript, not a placeholder
+    ws.close()
+
+
 def test_apply_to_a_closed_project_is_rejected(tmp_path):
     # M3 review (LOW): the picker only offers active projects; the apply endpoint must agree and refuse
     # a terminal-stage (WON/LOST/CANCELLED/ARCHIVED) target instead of appending to a closed project.

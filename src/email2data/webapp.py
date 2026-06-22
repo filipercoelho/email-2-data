@@ -17,9 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (accounts as _accounts, captures, captures_page, classifier, clientdraft, cockpit,
-               contrapartes_page, crm as _crm, export as _export, fila_page, jobspec as js, para_ti,
-               para_ti_page, project as _project, projetos_page, replydraft, report)
+from . import (accounts as _accounts, capture_resolve, captures, captures_page, classifier,
+               clientdraft, cockpit, contrapartes_page, crm as _crm, export as _export, fila_page,
+               jobspec as js, para_ti, para_ti_page, project as _project, projetos_page, replydraft,
+               report)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
 
@@ -574,6 +575,16 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     pstore = _project.ProjectStore(ws._conn)
     cstore = capture_store or captures.CaptureStore(ws._conn)
 
+    # Deterministic capture→project resolver inputs (Increment 1, R2 seed): the capture_playbook alias
+    # table + the gazetteer, loaded once. Empty when settings aren't file-backed (pure-injection tests)
+    # — the resolver then degrades to plain title/client matching, never crashes.
+    _cap_aliases: dict[str, str] = {}
+    _cap_gazetteer: dict[str, str] = {}
+    if settings.get("__settings_path__"):
+        _cfgdir = Path(settings["__settings_path__"]).parents[1] / "config"
+        _cap_aliases = capture_resolve.load_aliases(_cfgdir / "capture_playbook.md")
+        _cap_gazetteer = capture_resolve.load_gazetteer(_cfgdir / "gazetteer.csv")
+
     def _project_view(pid: str) -> dict:
         """Canonical spec + readiness + provenance + conflicts + custom fields + threads for one
         project. (Timeline is a SEPARATE, lazily-fetched endpoint — keep this default payload light.)"""
@@ -918,8 +929,18 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def capturas_view():
         """The Caixa de Capturas validation queue (ADR-019 §5 / R9 no-auto-apply). The page is glue
         over the M3 API; nothing is applied without a deliberate click."""
-        return HTMLResponse(captures_page.build_html(
-            cstore.list_pending(), _active_projects(), nav_counts=_nav_counts()))
+        pending = cstore.list_pending()
+        active = _active_projects()
+        # Deterministic pre-select (R2 seed): suggest an obra for captures the staffer didn't pick in
+        # chat. Only a CONFIDENT, unambiguous match is suggested (best_project → None otherwise); the
+        # human still confirms every capture (ADR-019 §5). Reorders nothing; just hints the <select>.
+        for c in pending:
+            if not c.get("inferred_project_id"):
+                hay = " ".join(filter(None, [c.get("raw_text"), c.get("transcript")]))
+                c["suggested_project_id"] = (capture_resolve.best_project(
+                    hay, active, aliases=_cap_aliases, gazetteer=_cap_gazetteer)
+                    if hay.strip() else None)
+        return HTMLResponse(captures_page.build_html(pending, active, nav_counts=_nav_counts()))
 
     @app.get("/api/captures")
     def list_captures():
@@ -953,7 +974,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         kind = str(body.get("kind", "note")).strip().lower() or "note"
         if kind not in EVENT_KINDS:
             return JSONResponse({"error": "bad kind (note/decision/opinion/todo)"}, status_code=400)
-        text = (cap.get("raw_text") or "").strip() or "📎 captura sem texto"
+        # A voice/audio capture carries its content in the transcript (raw_text is empty) — fall back to
+        # it so the validated event holds the staffer's actual words, not a placeholder (Increment 1).
+        text = ((cap.get("raw_text") or "").strip()
+                or (cap.get("transcript") or "").strip()
+                or "📎 captura sem texto")
         pstore.add_event(pid, kind, text,
                          channel=cap.get("channel") or "manual",
                          asserted_by=cap.get("asserted_by") or "",

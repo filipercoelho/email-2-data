@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import project as _project
+from . import capture_resolve as _resolve, llm, project as _project
 from .captures import CONTENT_ARTIFACT, CONTENT_CONVERSATION, CaptureStore
 from .project import ProjectStore
 from .telegram import TelegramClient, TelegramError, TelegramRateLimit
@@ -35,8 +35,12 @@ _LONG_POLL = 25
 _MAX_BACKOFF = 60
 _MAX_PICK = 8  # inline buttons shown; beyond this we say so (no silent cap)
 
+# The transcription system prompt (Increment 1). The audio rides as a multimodal part; the system
+# carries the only instruction. pt-PT, text-only out (the model returns just the transcript).
+_TRANSCRIBE_SYSTEM = "Transcreve o áudio em pt-PT; devolve só o texto."
+
 # pt-PT user-facing strings (project convention; code/comments stay English).
-_HELP = ("Envia uma nota ou uma foto e eu guardo-a para associares a uma obra. "
+_HELP = ("Envia uma nota, uma foto ou uma mensagem de voz e eu guardo-a para associares a uma obra. "
          "Confirmas sempre na app — nada é aplicado automaticamente.")
 _F1_UNAUTHORIZED = "Não estás autorizado a usar este canal."
 _T1_ACK = "📥 Recebido. A guardar…"
@@ -63,13 +67,23 @@ class IntakeBot:
 
     def __init__(self, *, client: TelegramClient, captures: CaptureStore, projects: ProjectStore,
                  captures_dir: str | Path, admin_chat_id: int | None = None,
-                 delete_after_scrub: bool = True) -> None:
+                 delete_after_scrub: bool = True, llm_client: Any = None,
+                 llm_cfg: dict[str, Any] | None = None,
+                 resolve_aliases: dict[str, str] | None = None,
+                 resolve_gazetteer: dict[str, str] | None = None) -> None:
         self._client = client
         self._captures = captures
         self._projects = projects
         self._captures_dir = Path(captures_dir)
         self._admin_chat_id = admin_chat_id
         self._delete = delete_after_scrub
+        # Increment 1: transcription via the shared Vertex/Gemini dispatch (R3). Lazy + optional — when
+        # no client is wired (LLM unconfigured) the bot degrades to "stored, not transcribed".
+        self._llm_client = llm_client
+        self._llm_cfg = llm_cfg or {}
+        # Deterministic resolve (R2 seed): alias table (capture_playbook) + gazetteer, loaded once.
+        self._aliases = resolve_aliases or {}
+        self._gazetteer = resolve_gazetteer or {}
 
     def handle(self, update: dict[str, Any]) -> None:
         """Dispatch one update. Swallows ordinary errors so one bad update can't break the poll loop,
@@ -108,8 +122,9 @@ class IntakeBot:
             return
 
         photos = message.get("photo") or []
+        voice = message.get("voice") or message.get("audio")   # a voice memo or an audio file
         body_text = text or (message.get("caption") or "").strip()
-        if not body_text and not photos:
+        if not body_text and not photos and not voice:
             self._client.send_message(chat_id, _E_EMPTY)
             return
 
@@ -117,6 +132,7 @@ class IntakeBot:
 
         media_paths: list[str] = []
         content_class = CONTENT_CONVERSATION
+        audio_rel: str | None = None
         if photos:
             content_class = CONTENT_ARTIFACT
             try:
@@ -125,11 +141,22 @@ class IntakeBot:
                 logger.exception("intake_download_failed", extra={"chat_id": chat_id})
                 self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD)
                 return  # before persist -> nothing to scrub; Telegram keeps the message
+        elif voice:
+            # A voice memo / audio file: the staffer's own words (ADR-019 §3) — content_class stays
+            # CONVERSATION. Download it (it is PRECIOUS: the sole copy once Telegram is scrubbed).
+            content_class = CONTENT_CONVERSATION
+            try:
+                audio_rel = self._download_audio(voice, chat_id, message_id)
+                media_paths.append(audio_rel)
+            except Exception:
+                logger.exception("intake_download_failed", extra={"chat_id": chat_id})
+                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD)
+                return  # before persist -> nothing to scrub; Telegram keeps the message
 
         user = self._captures.get_user(sender_id) or {}
         asserted_by = user.get("roster_owner") or user.get("display_name") or ""
 
-        # PERSIST (durably committed inside add()). Only AFTER this may we scrub Telegram.
+        # PERSIST (durably committed inside add(), transcript=NULL). Only AFTER this may we scrub.
         try:
             cid, _created = self._captures.add(
                 telegram_message_id=message_id, telegram_chat_id=chat_id,
@@ -143,6 +170,11 @@ class IntakeBot:
             raise TransientPersistError("capture persist failed (database locked)") from exc
 
         self._scrub(chat_id, message_id, cid)
+        # Transcribe AFTER the scrub (the persist-then-scrub order is never broken): best-effort, so a
+        # slow/failed transcription leaves the capture intact (audio preserved, transcript empty) and
+        # surfaced for manual handling — the capture is PRECIOUS; inference is not (ADR-020).
+        if audio_rel:
+            self._transcribe(cid, audio_rel, voice or {})
         self._offer_projects(chat_id, t1_id, cid)
 
     def _reject(self, chat_id: int, sender_id: int, from_user: dict[str, Any]) -> None:
@@ -169,6 +201,36 @@ class IntakeBot:
         dest.write_bytes(data)
         return rel
 
+    def _download_audio(self, audio: dict[str, Any], chat_id: int, message_id: int) -> str:
+        """Download a voice memo / audio file to the precious captures dir. The extension follows the
+        Telegram file path (voice is .oga/.ogg-Opus), defaulting to .ogg so the transcription mime is sane."""
+        meta = self._client.get_file(audio["file_id"])
+        data = self._client.download_file(meta["file_path"])
+        ext = Path(meta.get("file_path", "")).suffix.lstrip(".") or "ogg"
+        rel = f"c-{chat_id}-{message_id}/voice.{ext}"
+        dest = self._captures_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return rel
+
+    def _transcribe(self, cid: str, audio_rel: str, audio: dict[str, Any]) -> None:
+        """Best-effort pt-PT transcription via the shared Vertex/Gemini dispatch (R3), stored on the
+        capture. Degrades silently when no LLM is wired or the call fails — the capture survives either
+        way (ADR-020 preserve-at-core). The raw audio is NEVER logged (N4 / CLAUDE.md secrets rule)."""
+        if self._llm_client is None or not self._llm_cfg:
+            return  # no LLM configured -> "stored, not transcribed"
+        try:
+            data = (self._captures_dir / audio_rel).read_bytes()
+            mime = audio.get("mime_type") or "audio/ogg"
+            text = llm.call(self._llm_client, self._llm_cfg, system=_TRANSCRIBE_SYSTEM, user="",
+                            text=True, images=[{"mime": mime, "data": data}])
+            if isinstance(text, str) and text.strip():
+                self._captures.set_transcript(cid, text.strip())
+        except llm.LLMError:
+            logger.info("intake_transcribe_failed", extra={"capture_id": cid})  # never log raw audio
+        except Exception:
+            logger.info("intake_transcribe_error", extra={"capture_id": cid})
+
     def _scrub(self, chat_id: int, message_id: int, cid: str) -> None:
         """Delete the source from Telegram — strictly AFTER the durable persist above (ADR-020 §2). A
         failed delete is non-fatal: the capture is safe; the message just lingers in Telegram."""
@@ -182,6 +244,14 @@ class IntakeBot:
 
     def _offer_projects(self, chat_id: int, t1_id: int, cid: str) -> None:
         active = [p for p in self._projects.list() if p["stage"] not in _project.TERMINAL_STAGES]
+        # Deterministic resolve (R2 seed): rank the active projects by how strongly the capture's
+        # text/transcript names them, so the likeliest obra is the FIRST button. No auto-apply — these
+        # are still buttons the staffer taps (ADR-019 §5). A no-signal capture keeps the default order.
+        cap = self._captures.get(cid) or {}
+        hay = " ".join(filter(None, [cap.get("raw_text"), cap.get("transcript")]))
+        if hay.strip():
+            active = _resolve.rank_projects(hay, active, aliases=self._aliases,
+                                            gazetteer=self._gazetteer)
         shown = active[:_MAX_PICK]
         rows: list[list[dict[str, str]]] = [
             [{"text": f"{p['title']} ({p['project_id']})",

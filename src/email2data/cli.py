@@ -458,7 +458,8 @@ def cmd_intake_bot(args: argparse.Namespace) -> int:
     """Run the conversational-intake Telegram worker (ADR-019/-021): an outbound long-poll worker that
     writes captures via the store seam (never the HTTP API, so 8042 stays closed) and never binds a
     port. Config in settings.json ``intake`` block; the bot token in .env. Ctrl-C to stop."""
-    from . import captures as capmod, intake, project as projmod, telegram as tg
+    from . import (capture_resolve, captures as capmod, classifier, intake, project as projmod,
+                   telegram as tg)
     from .config import resolve_secret
     from .workspace import Workspace, WorkspaceVersionError
 
@@ -493,10 +494,25 @@ def cmd_intake_bot(args: argparse.Namespace) -> int:
                 display_name=(entry.get("display_name", "") if isinstance(entry, dict) else ""),
                 roster_owner=(entry.get("roster_owner", "") if isinstance(entry, dict) else ""),
                 added_by="settings")
+        # Increment 1 (audio): the shared Vertex/Gemini client for transcription (R3), built lazily —
+        # any failure (missing ADC, bad config) degrades the bot to "stored, not transcribed", never a
+        # crash. Plus the deterministic-resolve inputs (R2 seed): the capture playbook aliases + gazetteer.
+        base = Path(settings["__settings_path__"]).parents[1]
+        aliases = capture_resolve.load_aliases(base / "config" / "capture_playbook.md")
+        gazetteer = capture_resolve.load_gazetteer(base / "config" / "gazetteer.csv")
+        llm_cfg = settings.get("llm") or {}
+        llm_client = None
+        if llm_cfg:
+            try:
+                llm_client = classifier.make_client(settings)
+            except Exception as exc:  # noqa: BLE001 — transcription is best-effort, never a hard dep
+                print(f"(transcription disabled — LLM client unavailable: {exc})", file=sys.stderr)
         bot = intake.IntakeBot(
             client=client, captures=captures, projects=projects, captures_dir=p["captures_dir"],
             admin_chat_id=cfg.get("admin_chat_id"),
-            delete_after_scrub=cfg.get("delete_after_scrub", True))
+            delete_after_scrub=cfg.get("delete_after_scrub", True),
+            llm_client=llm_client, llm_cfg=llm_cfg,
+            resolve_aliases=aliases, resolve_gazetteer=gazetteer)
         bot_name = cfg.get("bot_name", "default")
         print(f"intake-bot polling (bot={bot_name}; outbound long-poll only; Ctrl-C to stop)")
         intake.poll_forever(

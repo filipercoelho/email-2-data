@@ -18,8 +18,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-# Capture lifecycle (MVP subset; ADR-019 §5). The transcript / extracted-field columns arrive with
-# the audio (Increment 1) and inference (Increment 2) milestones, each via its own guarded migration.
+# Capture lifecycle (MVP subset; ADR-019 §5). The transcript column arrived with audio (Increment 1,
+# v6); the extracted-field columns arrive with inference (Increment 2), each via a guarded migration.
 STATUS_STORED = "stored"        # durably persisted locally; awaiting project resolution
 STATUS_PARSED = "parsed"        # the user picked a project (inferred_project_id set)
 STATUS_APPLIED = "applied"      # validated into the project ledger
@@ -130,6 +130,15 @@ class CaptureStore:
             f"UPDATE captures SET inferred_project_id=?, status=?"
             f" WHERE capture_id=? AND status IN ({ph})",
             (project_id, STATUS_PARSED, capture_id, *PENDING_STATUSES))
+        self._conn.commit()
+
+    def set_transcript(self, capture_id: str, text: str) -> None:
+        """Store the pt-PT transcript of a voice/audio capture (Increment 1, v6). Best-effort and
+        idempotent: called AFTER the capture is durably persisted + scrubbed, so a transcription failure
+        leaves the row intact (audio preserved, transcript NULL) for manual handling — the capture is
+        PRECIOUS, inference is not (ADR-020 preserve-at-core)."""
+        self._conn.execute(
+            "UPDATE captures SET transcript=? WHERE capture_id=?", (text, capture_id))
         self._conn.commit()
 
     def mark_scrubbed(self, capture_id: str, ts: str = "") -> None:

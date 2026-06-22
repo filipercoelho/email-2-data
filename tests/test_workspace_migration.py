@@ -213,11 +213,12 @@ def test_v4_to_v5_adds_capture_tables_and_preserves_projects(tmp_path):
     db = tmp_path / "workspace.db"
     _make_v4_db(db)
 
-    ws = Workspace(db).connect()        # executescript(SCHEMA) creates the new tables; _migrate stamps v5
+    ws = Workspace(db).connect()        # executescript(SCHEMA) creates the new tables; _migrate stamps latest
     conn = ws._conn
 
-    # version stamped to latest; the two brand-new intake tables now exist
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    # version stamped to latest (>= v5 — a v4 DB now migrates all the way forward); the two brand-new
+    # intake tables now exist
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 5
     assert _has_table(conn, "captures") and _has_table(conn, "capture_users")
 
     # the pre-existing project survives the migration untouched (precious DB, never rebuilt)
@@ -230,6 +231,60 @@ def test_v4_to_v5_adds_capture_tables_and_preserves_projects(tmp_path):
                            channel="call", asserted_by="Pedro")
     assert created is True and cid == "c-99-11"
     assert [c["capture_id"] for c in cap.list_pending()] == ["c-99-11"]
+    ws.close()
+
+
+# The v5 shape of the captures table WITHOUT the v6 transcript column — a real DB upgraded to v5
+# (intake queue shipped) before Increment 1 (audio transcription) landed.
+_V5_PARTIAL = """
+CREATE TABLE captures (
+    capture_id TEXT PRIMARY KEY, telegram_message_id INTEGER, telegram_chat_id INTEGER,
+    content_class TEXT, raw_text TEXT, media_paths TEXT, inferred_project_id TEXT,
+    channel TEXT, asserted_by TEXT, acquired_at TEXT,
+    status TEXT NOT NULL DEFAULT 'stored', telegram_scrubbed_at TEXT, created_ts TEXT, applied_ts TEXT,
+    UNIQUE (telegram_message_id, telegram_chat_id)
+);
+CREATE TABLE capture_users (
+    telegram_user_id INTEGER PRIMARY KEY, display_name TEXT, roster_owner TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1, added_by TEXT, added_at TEXT
+);
+"""
+
+
+def _make_v5_db(path):
+    c = sqlite3.connect(path)
+    c.executescript(_V5_PARTIAL)
+    c.execute("INSERT INTO captures(capture_id,telegram_message_id,telegram_chat_id,content_class,"
+              "raw_text,media_paths,status,created_ts) "
+              "VALUES ('c-99-11',11,99,'conversation','memo de voz','[\"c-99-11/voice.ogg\"]',"
+              "'stored','2026-06-20')")
+    c.execute("PRAGMA user_version = 5")
+    c.commit()
+    c.close()
+
+
+def test_v5_to_v6_adds_transcript_column_and_roundtrips(tmp_path):
+    """v6 adds captures.transcript as a NEW COLUMN on the pre-existing captures table (Increment 1,
+    audio). A real v5 DB with a capture row must gain it in place via the guarded ALTER (a missing ALTER
+    would ship a column-less DB that throws 'no such column' on first set_transcript)."""
+    db = tmp_path / "workspace.db"
+    _make_v5_db(db)
+
+    ws = Workspace(db).connect()        # executescript(SCHEMA) (no-op on existing) + _migrate ALTERs in transcript
+    conn = ws._conn
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert "transcript" in _cols(conn, "captures")
+
+    # the pre-existing capture survived untouched; transcript is NULL until transcribed
+    cap = CaptureStore(conn)
+    got = cap.get("c-99-11")
+    assert got is not None and got["raw_text"] == "memo de voz"
+    assert got["media_paths"] == ["c-99-11/voice.ogg"] and got["transcript"] is None
+
+    # set_transcript round-trips (would raise "no such column" if the v6 ALTER was skipped)
+    cap.set_transcript("c-99-11", "olá, o cliente quer mais duas estantes")
+    assert cap.get("c-99-11")["transcript"] == "olá, o cliente quer mais duas estantes"
     ws.close()
 
 

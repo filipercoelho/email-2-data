@@ -38,6 +38,9 @@ _BODY = """
   .capbody{flex:1;min-width:0}
   .captxt{font-weight:620;font-size:14px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .captxt.empty{color:var(--mut2);font-weight:550;font-style:italic}
+  .captag{display:inline-block;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--int);background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:1px 7px;margin-right:7px;vertical-align:middle}
+  .capaudio{display:block;margin-top:9px;height:34px;max-width:340px;width:100%}
   .capmeta{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:5px;font-size:11.5px;color:var(--mut)}
   .capclass{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
     padding:1px 7px;border-radius:20px;background:#eef0f3;color:var(--mut)}
@@ -61,7 +64,8 @@ function visible(){ return caps.filter(c => !gone.has(c.capture_id)); }
 /* The user's project/kind picks live ON the capture object (c._proj / c._kind), not just in the DOM,
    so render() (J/K nav, a sibling apply) restores them instead of snapping back to the inferred
    default — without that, the advertised validate-many flow silently reverts or mis-files (M3 review). */
-function chosenProj(c){ return ('_proj' in c) ? c._proj : (c.inferred_project_id || ''); }
+function chosenProj(c){ return ('_proj' in c) ? c._proj
+  : (c.inferred_project_id || c.suggested_project_id || ''); }   /* suggested = deterministic resolve */
 function chosenKind(c){ return c._kind || 'note'; }
 
 /* The active-projects pick-list (PROJECTS = [{project_id,title,stage}]), pre-selected to the chosen/
@@ -81,18 +85,29 @@ function kindOptions(sel){
 
 function renderCard(c, i){
   const txt = (c.raw_text || '').trim();
+  const transcript = (c.transcript || '').trim();
   const media = c.media_paths || [];
   const hasMedia = media.length > 0;
+  const isPhoto = c.content_class === 'artifact' && hasMedia;   // photo artifact vs voice/audio memo
+  const isAudio = c.content_class !== 'artifact' && hasMedia;
   const cid = c.capture_id;
   const isFocused = i === focus;
-  // text, or a placeholder when the staffer sent only a photo/voice memo
-  const bodyTxt = txt
-    ? '<div class="captxt">'+esc(txt)+'</div>'
-    : '<div class="captxt empty">'+(hasMedia ? '📷 foto sem legenda' : '📎 captura sem texto')+'</div>';
-  // thumbnail of the first media file (the sole copy once Telegram is scrubbed — ADR-020)
-  const thumb = hasMedia
+  // The body: the typed text, else the pt-PT transcript of a voice memo (Increment 1), else a
+  // placeholder. A transcript is shown with a small hint so the user knows it came from audio.
+  let bodyTxt;
+  if(txt){ bodyTxt = '<div class="captxt">'+esc(txt)+'</div>'; }
+  else if(transcript){ bodyTxt = '<div class="captxt"><span class="captag">🎙️ transcrição</span>'+esc(transcript)+'</div>'; }
+  else { bodyTxt = '<div class="captxt empty">'
+    +(isAudio ? '🎙️ memo de voz (sem transcrição)' : (isPhoto ? '📷 foto sem legenda' : '📎 captura sem texto'))+'</div>'; }
+  // The media off the sole-copy endpoint (ADR-020): a photo is a clickable left-column thumbnail; a
+  // voice/audio memo is a playable control inside the body (an <img> on audio would just break). The
+  // src is read-only + path-traversal-guarded server-side.
+  const thumb = isPhoto
     ? '<img class="capthumb" src="/api/captures/'+encodeURIComponent(cid)+'/media/0" alt="captura"'
       + ' loading="lazy" onclick="window.open(this.src)">'
+    : '';
+  const audioEl = isAudio
+    ? '<audio class="capaudio" controls preload="none" src="/api/captures/'+encodeURIComponent(cid)+'/media/0"></audio>'
     : '';
   // provenance line: who said it, how, and when (real-world acquisition time)
   const cls = c.content_class === 'artifact' ? 'artifact' : '';
@@ -112,7 +127,7 @@ function renderCard(c, i){
     + '</div>';
   return '<div class="capcard'+(isFocused?' on':'')+'" data-i="'+i+'" data-cid="'+esc(cid)+'">'
     + thumb
-    + '<div class="capbody">'+bodyTxt+meta+ctl+'</div>'
+    + '<div class="capbody">'+bodyTxt+audioEl+meta+ctl+'</div>'
     + '</div>';
 }
 

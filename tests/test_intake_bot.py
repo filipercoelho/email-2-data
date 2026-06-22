@@ -55,7 +55,8 @@ class FakeClient:
 
     def get_file(self, file_id):
         self.order.append("get_file")
-        return {"file_path": f"photos/{file_id}.jpg"}
+        ext = "oga" if "voice" in file_id else "jpg"
+        return {"file_path": f"files/{file_id}.{ext}"}
 
     def download_file(self, file_path, **kw):
         self.order.append("download")
@@ -73,7 +74,7 @@ def _bot(conn, client, captures_dir, **kw):
     return bot, captures, projects
 
 
-def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, caption=""):
+def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, caption="", voice=False):
     m = {"message_id": message_id, "chat": {"id": chat_id, "type": "private"},
          "from": {"id": sender_id, "first_name": "Pedro"}}
     if text:
@@ -82,6 +83,8 @@ def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, capti
         m["caption"] = caption
     if photo:
         m["photo"] = [{"file_id": "small"}, {"file_id": "big"}]
+    if voice:
+        m["voice"] = {"file_id": "voicebig", "mime_type": "audio/ogg", "duration": 4}
     return m
 
 
@@ -150,6 +153,86 @@ def test_photo_capture_downloads_persists_and_scrubs(tmp_path):
     assert (tmp_path / "c-10-100" / "photo.jpg").read_bytes() == b"JPEGDATA"
     assert client.deleted == [(10, 100)]
     assert "get_file" in client.order and "download" in client.order
+
+
+def test_voice_capture_persists_then_scrubs_then_transcribes(tmp_path, monkeypatch):
+    # Increment 1: a voice memo is downloaded + persisted (transcript NULL) -> Telegram scrubbed ->
+    # transcribed best-effort (LLM mocked). The transcription runs strictly AFTER the scrub.
+    import email2data.intake as intake_mod
+    client = FakeClient(file_bytes=b"OGGDATA")
+    bot, captures, projects = _bot(_conn(), client, tmp_path, llm_client=object(),
+                                   llm_cfg={"provider": "vertex_gemini", "model": "x"})
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+
+    seen = {}
+
+    def fake_call(cl, cfg, system, user, **kw):
+        seen["deleted_before"] = list(client.deleted)       # was the scrub already done?
+        seen["audio_mime"] = (kw.get("images") or [{}])[0].get("mime")
+        seen["text_mode"] = kw.get("text")
+        return "o cliente quer mais duas estantes"
+    monkeypatch.setattr(intake_mod.llm, "call", fake_call)
+
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None and cap["content_class"] == "conversation"
+    assert cap["media_paths"] and cap["media_paths"][0].startswith("c-10-100/voice")
+    assert (tmp_path / cap["media_paths"][0]).read_bytes() == b"OGGDATA"   # audio persisted (precious)
+    assert client.deleted == [(10, 100)]                                  # scrubbed
+    assert cap["transcript"] == "o cliente quer mais duas estantes"       # transcribed
+    assert seen["deleted_before"] == [(10, 100)]    # transcription ran AFTER the scrub (persist→scrub→transcribe)
+    assert seen["audio_mime"] == "audio/ogg" and seen["text_mode"] is True
+
+
+def test_transcription_failure_keeps_the_capture_intact(tmp_path, monkeypatch):
+    # Degradation: the LLM raises -> the capture survives (audio preserved, transcript empty), and the
+    # scrub still happened (it is AFTER the durable persist; persist-then-scrub is never broken).
+    import email2data.intake as intake_mod
+
+    def boom(*a, **k):
+        raise intake_mod.llm.LLMError("vertex down")
+    monkeypatch.setattr(intake_mod.llm, "call", boom)
+    client = FakeClient(file_bytes=b"OGGDATA")
+    bot, captures, projects = _bot(_conn(), client, tmp_path, llm_client=object(),
+                                   llm_cfg={"provider": "vertex_gemini", "model": "x"})
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None and cap["transcript"] is None       # transcription failed -> empty, intact
+    assert (tmp_path / cap["media_paths"][0]).read_bytes() == b"OGGDATA"   # audio still preserved
+    assert client.deleted == [(10, 100)]                       # scrub stood (it is after persist)
+
+
+def test_voice_without_llm_client_is_stored_not_transcribed(tmp_path, monkeypatch):
+    # No LLM wired -> the bot degrades to "stored, not transcribed": no llm.call, capture + audio kept.
+    import email2data.intake as intake_mod
+    calls = {"n": 0}
+    monkeypatch.setattr(intake_mod.llm, "call",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    client = FakeClient(file_bytes=b"OGGDATA")
+    bot, captures, projects = _bot(_conn(), client, tmp_path)   # no llm_client passed
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None and cap["transcript"] is None and cap["media_paths"]
+    assert client.deleted == [(10, 100)]
+    assert calls["n"] == 0                                      # transcription never attempted
+
+
+def test_pick_list_ranks_the_named_project_first(tmp_path):
+    # Deterministic resolve (R2): the capture text reorders the pick-list so the named obra is the
+    # FIRST button — beating the default newest-first order. Still buttons; no auto-apply (R9).
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    p_acme = projects.create("Placas Acme", stage="LEAD")       # created first -> older
+    projects.create("Estante Sousa", stage="LEAD")              # newer -> default first button
+    bot.handle({"update_id": 1, "message": _msg(text="a Acme precisa de mais placas", message_id=100)})
+    kb = client.edited[-1][3]["inline_keyboard"]
+    assert kb[0][0]["callback_data"] == f"pick:c-10-100:{p_acme}"   # ranking beat newest-first
 
 
 def test_empty_message_is_rejected(tmp_path):

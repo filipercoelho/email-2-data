@@ -116,6 +116,34 @@ def test_capturas_in_every_palette_and_contrapartes_in_its_own(tmp_path):
         assert "label:'Capturas'" in html, mod.__name__          # Capturas reachable from each page
 
 
+def test_voice_capture_shows_transcript_and_audio_player(tmp_path):
+    # Increment 1 UI: a voice memo (raw_text empty, transcript set, audio media) must surface its
+    # transcript for the user to validate and a playable <audio> control off the sole-copy endpoint —
+    # not a broken <img> thumbnail or a "📷 foto" placeholder.
+    client, ws, cap, _proj, _pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, content_class="conversation",
+                     media_paths=["c-2-1/voice.oga"])
+    cap.set_transcript(cid, "o cliente confirmou o prazo para sexta")
+    html = client.get("/capturas").text
+    assert "o cliente confirmou o prazo para sexta" in html          # transcript shown (escaped)
+    assert "function renderCard" in html and "capaudio" in html       # an audio control, not an img
+    assert "c.transcript" in html and "isAudio" in html               # the voice/audio branch is wired
+    ws.close()
+
+
+def test_capturas_suggests_a_project_from_capture_text(tmp_path):
+    # WP3 deterministic resolve (R2): a capture naming the obra is pre-selected in the page <select> via
+    # a server-computed suggested_project_id (the human still confirms — ADR-019 §5). Plain title match
+    # works even without the playbook file (empty aliases), so this exercises the webapp wiring.
+    client, ws, cap, _proj, pid = _setup(tmp_path)
+    cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="o Sousa quer mais duas estantes")
+    html = client.get("/capturas").text
+    # the capture embed carries the deterministic suggestion for that pid (it matched "Estante Sousa")
+    assert f'"suggested_project_id": "{pid}"' in html
+    assert "suggested_project_id" in html and "c.suggested_project_id" in html  # ...and the JS reads it
+    ws.close()
+
+
 def test_capture_photo_thumbnail_renders_in_project_timeline(tmp_path):
     # WP1 deliverable: "the photo in the project timeline" — the timeline JS renders a capture event's
     # media (source_mid='capture:<cid>') as a thumbnail off the media endpoint.

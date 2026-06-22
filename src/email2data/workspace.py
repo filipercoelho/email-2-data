@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS captures (
     content_class        TEXT,               -- artifact | conversation (content-class router; ADR-019 §5.1) (v5)
     raw_text             TEXT,               -- verbatim text the staffer sent ("" if none) (v5)
     media_paths          TEXT,               -- JSON array of media files on disk, relative to captures_dir (v5)
+    transcript           TEXT,               -- pt-PT transcript of a voice/audio capture; NULL until transcribed (v6)
     inferred_project_id  TEXT,               -- the project the user picked; NULL until resolved (v5)
     channel              TEXT,               -- real-world channel (call|meeting|whatsapp|sms|manual) (v5)
     asserted_by          TEXT,               -- who stated it (the sender's roster name) (v5)
@@ -168,7 +169,9 @@ CREATE TABLE IF NOT EXISTS capture_users (
 # (thread_owners/project_owners, single owner backfilled) + in-app roster (ADR-017/-018).
 # v5 (2026-06-16): conversational-intake capture queue + allowlist (captures/capture_users tables,
 # brand-new so delivered by SCHEMA with no ALTER; ADR-019/-020/-021).
-SCHEMA_VERSION = 5
+# v6 (2026-06-22): Increment 1 (audio) — captures.transcript, a NEW COLUMN on the pre-existing captures
+# table, so it needs a guarded ALTER in _migrate (ADR-020 preserve-at-core: transcript + original audio).
+SCHEMA_VERSION = 6
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -287,8 +290,13 @@ class Workspace:
                 "SELECT thread_root, owner, updated_ts FROM thread_state "
                 "WHERE owner IS NOT NULL AND owner != ''")
         # v5 (captures + capture_users) adds only NEW TABLES — delivered by SCHEMA above, which runs
-        # before _migrate — so there is no ALTER to do here; the stamp below records the upgrade. Add a
-        # guarded `if version < 5:` block ONLY if a future change adds a COLUMN to a pre-existing table.
+        # before _migrate — so there is no ALTER to do here. (A guarded `if version < 5:` block would
+        # be needed ONLY if a change added a COLUMN to a pre-existing table — which is exactly v6.)
+        if version < 6:
+            # Increment 1 (audio): the pt-PT transcript of a voice/audio capture. A NEW COLUMN on the
+            # pre-existing captures table, so SCHEMA's CREATE-IF-NOT-EXISTS can't add it — an explicit
+            # guarded ALTER does. (ADR-020: the transcript joins the original audio + verbatim text.)
+            self._add_column("captures", "transcript", "TEXT")
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 
