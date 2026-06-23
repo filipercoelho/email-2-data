@@ -2,8 +2,8 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed |
-| Date | 2026-06-16 |
+| Status | Accepted |
+| Date | 2026-06-16 (accepted 2026-06-23, on shipping the scrub worker + sole-copy backup discipline) |
 
 ## Context
 
@@ -45,8 +45,32 @@ to the project** for future reference and audit.
 
 ## Consequences
 
-- **Status path:** Proposed; becomes **Accepted when Phase 1 ships** the scrub worker + backup change.
-- **Trace (pending implementation):** the persist-then-scrub worker + retry/reconciliation sweep; the
-  backup manifest extended to include `captures/`; tests for **persist-then-scrub ordering** and
-  **scrub-failure retry**. Design: [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md)
-  §6–§7. Precedent: materials-costing ADR-075 §3.2 (owner-signed egress).
+- **Status path:** **Accepted** on shipping the persist-then-scrub worker + the sole-copy backup
+  discipline. Now immutable.
+- **Trace.** Decisions 1, 3, 4 shipped in full; decision 2's *ordering* shipped, its
+  *retry-until-confirmed + reconciliation sweep* deferred (see below):
+  - **Owner-signed cloud egress, EU posture (1):** transcription (`intake._transcribe`) + extraction
+    (`capture_infer.extract_fields`) go through the shared Vertex dispatch (`classifier.make_client`,
+    `materials-492723`). Raw audio/content is **never logged** — only `capture_id` in the failure path
+    (`intake._transcribe`/`_extract_fields`); pinned by `test_transcription_failure_keeps_the_capture_intact`.
+  - **Minimise at the edge — persist-then-scrub, in that order (2):** `intake._handle_message` persists
+    via `CaptureStore.add` (a durable commit) **before** `_scrub`; a failed persist raises
+    `TransientPersistError`, holds the long-poll offset and **never scrubs**. Tests:
+    `test_persist_failure_never_scrubs`, `test_persist_lock_holds_offset_and_retries_until_committed`,
+    `test_voice_capture_persists_then_scrubs_then_transcribes`. **Deferred:** the delete is currently a
+    one-shot best-effort (a failed `deleteMessage` is non-fatal and logged — `test_scrub_failure_is_
+    nonfatal_and_capture_kept`); the **retry-until-confirmed loop + periodic reconciliation sweep** are
+    a remaining hardening follow-up. The safety guarantee still holds — a capture is never lost because
+    it is persisted-first; only the Telegram-side surface may linger until manually cleared.
+  - **Preserve at the core — full fidelity, appended for audit (3):** verbatim text + transcript
+    (`captures.transcript`, v6) + original audio/media (`captures/` on disk) + provenance are retained;
+    on validation the text/transcript lands as an ADR-015 event and a photo links via
+    `source_mid="capture:<cid>"` (rendered in the project timeline). A discarded capture is **kept**
+    (`test_discarded_capture_is_retained_for_audit`). Tests: `tests/test_captures_api.py`,
+    `tests/test_captures_page.py`.
+  - **Our copy is the sole copy → precious → backed up (4):** `captures/` is gitignored (WP0) and
+    flagged sole-copy-must-back-up in [data-stores.md](../05-reference/data-stores.md) (WAL sidecars
+    note); the [ADR-010](adr-010-workspace-db-precious-vs-regenerable.md) discipline extends to it.
+  - Design: [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md) §6–§7;
+    [execution-plan-v1](../10-external-proposals/intake-bot-execution-plan-v1.md) WP0/WP3. Precedent:
+    materials-costing ADR-075 §3.2 (owner-signed egress).

@@ -2,8 +2,8 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed |
-| Date | 2026-06-16 |
+| Status | Accepted |
+| Date | 2026-06-16 (accepted 2026-06-23, on shipping M1–M3 + Increments 1–2) |
 
 ## Context
 
@@ -48,11 +48,32 @@ extraction (decisions R1/R3/R5), which changes the constraint for that path only
 
 ## Consequences
 
-- **Status path:** Proposed now; becomes **Accepted when Phase 1 ships**, with the Trace below filled in.
-  Because it is not yet Accepted it stays mutable while the phased build refines it.
+- **Status path:** **Accepted** on shipping M1–M3 + Increments 1–2 (the build is complete and pinned).
+  Now immutable; further changes go in a new ADR.
 - **Depends on** the egress sign-off [ADR-020](adr-020-capture-egress-and-data-handling.md) and the
-  network posture [ADR-021](adr-021-intake-lan-binding-minimal-auth.md).
-- **Trace (pending implementation):** the intake worker (long-poll, allowlist), `config/capture_playbook.md`,
-  the `captures` queue + `capture_users` allowlist; tests for the allowlist gate, deterministic resolve,
-  and the no-auto-apply guarantee. Design: [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md)
-  §3–§5. Deterministic-composer precedent: [ADR-013](adr-013-client-email-composer-deterministic.md).
+  network posture [ADR-021](adr-021-intake-lan-binding-minimal-auth.md) (the latter still *Proposed* —
+  its LAN-bind + auth gate are not yet built; the intake bot needs no inbound port either way).
+- **Trace.** All six decisions are shipped and pinned:
+  - **Capture adapter, not a new store (1):** `captures.py` (`CaptureStore`) appends through the
+    ADR-015 ledger (`webapp.apply_capture` → `ProjectStore.add_event`); `workspace.db` v5
+    `captures`/`capture_users` tables. Tests: `tests/test_intake_store.py`, `tests/test_captures_api.py`.
+  - **Pluggable cloud inference, narrowing ADR-015 §Decision-4 for this path (2):** transcription +
+    extraction reuse the shared Vertex dispatch (`classifier.make_client` → `llm.call`) in `intake.py`
+    (`_transcribe`) and `capture_infer.py` (`extract_fields`/`infer_project`). Tests:
+    `tests/test_intake_bot.py` (voice), `tests/test_capture_infer.py`.
+  - **Scope = the staffer's own assertions + artifacts (3):** the worker ingests text/photo/voice
+    (`intake._handle_message`), `content_class` = `conversation`/`artifact`; no client-call recording path.
+  - **Deterministic-first, model-by-uncertainty (4):** `capture_resolve.py` (offline rank, seeded from
+    `config/capture_playbook.md` + the gazetteer) resolves the certain cases; `capture_infer.py` is
+    invoked only when the deterministic resolver is ambiguous. Tests: `tests/test_capture_resolve.py`,
+    `tests/test_capture_infer.py`.
+  - **No auto-apply — the user is the sole gatekeeper (5):** nothing writes a project field except an
+    explicit per-field POST to `/api/projects/{pid}/field`; extraction only *stores* on the capture.
+    Pinned by `test_extracted_fields_never_reach_the_estimable_gate_without_explicit_confirm` and the
+    apply-idempotency / apply-after-discard tests in `tests/test_captures_api.py`.
+  - **A capture is never dropped (6):** an unmatched capture stays pending
+    (`test_no_active_projects_holds_capture_in_queue`); a locked DB holds the offset and retries
+    (`test_persist_lock_holds_offset_and_retries_until_committed`).
+  - Design: [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md) §3–§5;
+    [execution-plan-v1](../10-external-proposals/intake-bot-execution-plan-v1.md). Deterministic-composer
+    precedent: [ADR-013](adr-013-client-email-composer-deterministic.md).

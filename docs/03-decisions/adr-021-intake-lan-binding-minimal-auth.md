@@ -33,10 +33,24 @@ authentication** today; the sibling materials-costing app is LAN-reachable but s
 
 ## Consequences
 
-- **Status path:** Proposed; becomes **Accepted when the auth gate + LAN bind ship** (Phase 1).
-- **Net-new:** the app gains its first auth layer; until now its security model *was* the loopback bind.
-  The threat model shifts from "physical access to the host" to "trusted-LAN + a single shared secret."
-- **Trace (pending implementation):** the bind/host change in `cli.py`, the auth middleware + `.env`
-  secret; tests that an **unauthenticated webapp request is rejected** and that the **worker write path
-  is unaffected** by the gate. Design: [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md)
-  §2, §6, §11.
+- **Status path:** **Still Proposed** (2026-06-23). Decisions 2 + 4 (no inbound port; the worker
+  bypasses the HTTP surface via the store seam) are **shipped**; decisions 1 + 3 (LAN bind + the app's
+  **first auth gate**) are **not yet built** — `serve` still defaults to `127.0.0.1` loopback with no
+  authentication, matching the live README/CLAUDE.md. The conversational-intake build (M1–M3 +
+  Increments 1–2) did **not** require them (the bot needs no inbound port), so they were deliberately
+  left for a later milestone; this ADR graduates to **Accepted only when the auth gate + LAN bind ship**.
+- **Net-new (when built):** the app gains its first auth layer; until now its security model *is* the
+  loopback bind. The threat model shifts from "physical access to the host" to "trusted-LAN + a single
+  shared secret."
+- **Trace.**
+  - **Shipped — no inbound port (2):** the intake worker long-polls **outbound** only
+    (`telegram.TelegramClient.get_updates`, `intake.poll_forever`); no webhook, no bound port.
+  - **Shipped — worker bypasses the gate via the store seam (4):** the worker writes through
+    `CaptureStore`/`ProjectStore` (`intake.py`), never the HTTP API, and refuses to migrate the
+    precious DB (`Workspace.connect(migrate=False)` single-migrator gate). Tests:
+    `test_worker_open_refuses_to_migrate_a_stale_db`, `test_worker_open_accepts_a_current_db_without_migrating`
+    in `tests/test_workspace_migration.py`.
+  - **Pending (1, 3):** the LAN bind default + the minimal single-user auth middleware (`.env` secret)
+    in `cli.py`/`webapp.py`; tests that an **unauthenticated webapp request is rejected** and the
+    **worker write path is unaffected** by the gate. Design:
+    [solution-design-v1](../10-external-proposals/intake-bot-solution-design-v1.md) §2, §6, §11.
