@@ -8,7 +8,7 @@ def _make(active="fila", extra_css="", counts=None):
         "Test",
         active,
         "<div id='body'>body</div>",
-        embeds={"rows": [1, 2], "team": ["Pedro"]},
+        embeds={"rows": [1, 2], "team": ["Diogo"]},
         lens_js="function render(){} function paletteItems(q){return[];} function onKey(e){}",
         nav_counts=counts or {},
         extra_css=extra_css,
@@ -40,10 +40,24 @@ def test_other_nav_items_do_not_have_on_class():
     assert html.count('nlink on') == 1
 
 
-def test_all_four_nav_items_present():
+def test_all_nav_items_present():
+    """Every lens is reachable from the shared shell. /capturas and /admin joined later — a lens with
+    no nav entry is a page only its own URL can reach, which is how /admin was unreachable at first."""
     html = _make()
-    for href in ["/", "/contrapartes", "/projetos", "/para-ti"]:
+    for href in ["/", "/contrapartes", "/projetos", "/para-ti", "/capturas", "/admin"]:
         assert f'href="{href}"' in html
+
+
+def test_nav_has_the_admin_item_and_marks_exactly_one_link_active():
+    """The Administração lens gets the same shell as the decision lenses, and ``active="admin"``
+    actually matches a nav key — before it existed the page rendered with NOTHING highlighted, which
+    reads as "you are nowhere"."""
+    html = _make(active="admin")
+    assert 'data-nav="admin" href="/admin">Admin' in html
+    assert html.count('class="nlink on"') == 1
+    assert 'class="nlink on" data-nav="admin"' in html
+    # …and it is last in the strip: config comes after the queues, never between them
+    assert html.index('href="/admin"') > html.index('href="/capturas"')
 
 
 def test_nav_count_badge_shown_when_nonzero():
@@ -105,3 +119,32 @@ def test_body_html_present():
 def test_xss_safe_title():
     html = page("<script>", "fila", "", lens_js="function render(){} function paletteItems(q){return[];} function onKey(e){}")
     assert "<script>" not in html.split("<title>")[1].split("</title>")[0]
+
+
+def test_css_has_no_stale_percent_escapes():
+    """A leftover printf-style '%%' ships as INVALID CSS (the browser drops the whole declaration).
+
+    This exact bug shipped: `.toast{left:50%%;transform:translateX(-50%%)}` and `#_pq{width:100%%}`
+    — the toast (the primary action feedback) rendered un-centred and the ⌘K palette input lost its
+    width on every page. page() builds the stylesheet with .replace(), NOT %-formatting, so a literal
+    '%%' can never be right anywhere in the shell HTML/CSS."""
+    html = _make()
+    assert "%%" not in html
+    assert "left:50%;transform:translateX(-50%)" in html   # the toast is really centred
+    assert "#_pq{width:100%;" in html                      # the palette input really fills the card
+
+
+def test_only_critical_red_clock_pulses():
+    """Motion is reserved for the critical tier: `.clock.red .d` must NOT animate unconditionally —
+    only `.clock.red.crit .d` may. 29 permanently pulsing dots made red carry zero signal."""
+    html = _make()
+    assert ".clock.red.crit .d{animation" in html
+    assert ".clock.red .d{animation" not in html
+
+
+def test_failure_strings_distinguish_reverted_from_failed():
+    """S.falhou ('nothing happened') and S.revertido ('your optimistic change was rolled back') are
+    different promises — both must exist so lenses can tell the truth about what a failure did."""
+    html = _make()
+    assert "falhou:'falhou'" in html
+    assert "revertido:'falhou — revertido'" in html

@@ -26,6 +26,23 @@ STATUS_APPLIED = "applied"      # validated into the project ledger
 STATUS_DISCARDED = "discarded"  # the user discarded it (kept for audit, not destroyed)
 PENDING_STATUSES = (STATUS_STORED, STATUS_PARSED)
 
+# How a ledger row cites the capture it came from. ADR-020 line 68 blesses this form by name, and
+# ADR-022 §7 freezes the whole `source_mid` value space at four cases:
+#   <message-id>  |  capture:<cid>  |  'user'  |  ''
+# Centralised so no caller string-sniffs the prefix on its own (it was a literal in three files).
+CAPTURE_REF_PREFIX = "capture:"
+
+
+def capture_ref(capture_id: str) -> str:
+    """The ``source_mid`` value that cites ``capture_id`` as a ledger row's origin."""
+    return f"{CAPTURE_REF_PREFIX}{capture_id}"
+
+
+def capture_id_from_ref(source_mid: str) -> str:
+    """The capture id inside a ``capture:<cid>`` reference, or "" when it is not one."""
+    ref = source_mid or ""
+    return ref[len(CAPTURE_REF_PREFIX):] if ref.startswith(CAPTURE_REF_PREFIX) else ""
+
 # The content-class router (ADR-019 §5.1). The MVP has no transcription engine yet, so these are
 # informational labels the worker sets: a photo/quote is an artifact, the staffer's own words a
 # conversation.

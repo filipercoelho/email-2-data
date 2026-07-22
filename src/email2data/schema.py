@@ -76,7 +76,9 @@ def derive_priority(counterparty: str, purpose: str, urgency: int, is_bulk: bool
 class Entities:
     client_name: Optional[str] = None
     client_email: Optional[str] = None
-    deadline: Optional[str] = None  # ISO YYYY-MM-DD
+    # ISO YYYY-MM-DD, or YYYY-MM-DDTHH:MM when the client actually stated a time of day. Date-only
+    # stays first-class — never invent an hour to fill the wider shape (see jobspec.INPUT_TYPE).
+    deadline: Optional[str] = None
     money: Optional[str] = None
     product_or_service: Optional[str] = None
     action_requested: Optional[str] = None

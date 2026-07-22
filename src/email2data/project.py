@@ -39,6 +39,56 @@ CLOSED_STAGES = frozenset({"CANCELLED", "LOST"})
 # Source precedence for the job-level auto-merge. Higher wins; ties broken by message recency.
 _SOURCE_RANK = {"user": 3, "llm": 2, "offline": 1, "": 0}
 
+# ``source_mid`` values that are NOT a reference to an email. ADR-022 §7 froze the value space at
+# ``<message-id> | capture:<cid> | 'user' | ''``; ADR-026 adds a fifth case, ``event:<rowid>`` — a
+# value the LLM read out of a timeline knowledge event during a widened re-extraction.
+_NON_MESSAGE_REFS = frozenset({"", "user"})
+
+# Provenance prefix for a field extracted from a project_field_history event row (ADR-026). It is
+# deliberately a BARE ref with no channel/asserted_by, so ``is_machine_provenance`` classifies it as
+# a machine seed: the value renders as an unconfirmed ``llm`` FACT the user still has to validate,
+# and — critically — it never lands in ``human_touched_fields``, so the next re-extract may refresh
+# it. Attributing it to the event's ``asserted_by`` would be wrong twice over: the person stated the
+# *note*, not this parsed field, and doing so would freeze a model guess as a human decision.
+EVENT_REF_PREFIX = "event:"
+
+
+def event_ref(rowid: int) -> str:
+    """The ``source_mid`` value citing timeline event ``rowid`` as a field's origin (ADR-026)."""
+    return f"{EVENT_REF_PREFIX}{rowid}"
+
+
+def is_machine_provenance(source_mid: Optional[str], channel: Optional[str],
+                          asserted_by: Optional[str]) -> bool:
+    """Was this ``project_fields``/``project_field_history`` row written by the MACHINE seed?
+
+    This is the discriminator the whole re-extract safety story rests on, so it is stated once here
+    rather than re-derived at each call site. ``seed_items_from`` lifts a value verbatim out of a
+    message's extracted jobspec: it carries the **source message id and nothing else** — no
+    ``channel`` (nobody chose how it arrived) and no ``asserted_by`` (nobody stated it; a model
+    inferred it). Every human write goes through the webapp, which either attributes the value
+    (``channel``/``asserted_by`` from the capture-confirm bundle) or leaves ``source_mid`` empty (the
+    workbench's inline field editor posts ``{field, value}`` only). A ``capture:<cid>`` reference is a
+    human confirmation of a capture, never a machine seed.
+
+    So "a bare message-id with no attribution" is unambiguous machine provenance, and everything else
+    is treated as human — the safe direction: mistaking a machine value for human only means a forced
+    re-seed skips it, while the reverse would destroy a human decision.
+
+    An ``event:<rowid>`` ref (ADR-026) is a bare ref with no attribution, so it falls through to the
+    machine branch by construction — which is the intent: the LLM parsed that field out of a note, so
+    it is an unconfirmed extraction, not the human decision the note itself represents.
+    """
+    ref = (source_mid or "").strip()
+    if ref in _NON_MESSAGE_REFS or ref.startswith(_captures_ref_prefix()):
+        return False
+    return not (channel or "").strip() and not (asserted_by or "").strip()
+
+
+def _captures_ref_prefix() -> str:
+    from . import captures
+    return captures.CAPTURE_REF_PREFIX
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -122,6 +172,18 @@ class ProjectStore:
 
     def _touch(self, pid: str) -> None:
         self._conn.execute("UPDATE projects SET updated_ts=? WHERE project_id=?", (_now(), pid))
+
+    def rename(self, pid: str, title: str) -> bool:
+        """Set a human title. Projects born from an email inherit its raw subject ("RE: AM-NCR-…"),
+        which is machine identity, not a name a person can scan a list for — so the title must be
+        editable after creation. Returns False for an unknown project or a blank title."""
+        t = (title or "").strip()
+        if not t or self.get(pid) is None:
+            return False
+        self._conn.execute("UPDATE projects SET title=?, updated_ts=? WHERE project_id=?",
+                           (t, _now(), pid))
+        self._conn.commit()
+        return True
 
     def set_stage(self, pid: str, stage: str, *, close_party: Optional[str] = None,
                   close_reason: Optional[str] = None) -> None:
@@ -229,11 +291,17 @@ class ProjectStore:
         self._touch(pid)
         self._conn.commit()
 
-    def clear_field(self, pid: str, addr: str) -> None:
+    def clear_field(self, pid: str, addr: str, source_mid: str = "", *,
+                    channel: str = "", asserted_by: str = "", acquired_at: str = "") -> None:
+        """Remove a field, carrying the same provenance bundle as ``set_field`` (WP-A). A removal can
+        flip estimability, so it must be attributable: it previously logged with a bare ``""`` and no
+        bundle, and ``participants()`` skips unattributed rows — so a deletion was never attributed."""
         old = self._field_value(pid, addr)
         self._conn.execute("DELETE FROM project_fields WHERE project_id=? AND field=?", (pid, addr))
         if old is not None:  # only log a real removal, not a clear of an absent field
-            self._log_field(pid, addr, "clear", old, None, "")
+            self._log_field(pid, addr, "clear", old, None, source_mid,
+                            channel=channel, asserted_by=asserted_by,
+                            acquired_at=acquired_at or _now())
         self._touch(pid)
         self._conn.commit()
 
@@ -273,6 +341,25 @@ class ProjectStore:
             " FROM project_field_history WHERE project_id=?"
             " ORDER BY COALESCE(acquired_at, ts) DESC, rowid DESC", (pid,)).fetchall()
         return [dict(r) for r in rows]
+
+    def knowledge_events(self, pid: str) -> list[dict[str, Any]]:
+        """The project's off-email knowledge events (note/decision/opinion/todo), **oldest-first**.
+
+        Distinct from :meth:`timeline` in two ways that matter to the widened re-extraction (ADR-026):
+        it filters to ``op='event'`` rows only (field edits are not re-readable knowledge — they ARE
+        the extraction output), and it returns each row's ``rowid`` so an extracted field can cite the
+        exact note it came from (``event:<rowid>``). Oldest-first so a later note wins a conflict,
+        matching the message re-seed order.
+        """
+        from . import workspace as _ws
+        rows = self._conn.execute(
+            "SELECT rowid, field, new_value, channel, asserted_by, acquired_at, ts"
+            " FROM project_field_history WHERE project_id=? AND op=?"
+            " ORDER BY COALESCE(acquired_at, ts) ASC, rowid ASC", (pid, _ws.EVENT_OP)).fetchall()
+        return [{"rowid": r["rowid"], "kind": (r["field"] or "").strip("_"),
+                 "text": r["new_value"] or "", "channel": r["channel"] or "",
+                 "asserted_by": r["asserted_by"] or "",
+                 "acquired_at": r["acquired_at"] or r["ts"] or ""} for r in rows]
 
     def participants(self, pid: str) -> list[dict[str, Any]]:
         """Who has contributed knowledge to this project, aggregated from the ledger's ``asserted_by``
@@ -333,6 +420,32 @@ class ProjectStore:
             if js.parse_address(addr)[1] is not None:
                 return True
         return False
+
+    def machine_fields(self, pid: str) -> set[str]:
+        """Addresses whose CURRENT value carries machine-seed provenance (see
+        :func:`is_machine_provenance`) — i.e. an extraction nobody has confirmed.
+
+        Consumed by :func:`canonical_spec`, which must render these as ``source='llm',
+        confirmed=False`` instead of auto-promoting them to a human-confirmed FACT."""
+        rows = self._conn.execute(
+            "SELECT field, source_mid, channel, asserted_by FROM project_fields WHERE project_id=?",
+            (pid,)).fetchall()
+        return {r["field"] for r in rows
+                if is_machine_provenance(r["source_mid"], r["channel"], r["asserted_by"])}
+
+    def human_touched_fields(self, pid: str) -> set[str]:
+        """Addresses a **person** is attributable for at ANY point in the append-only ledger — the
+        set a forced re-seed must never write over (CLAUDE.md non-negotiable 6).
+
+        Read from ``project_field_history``, not from the current row, on purpose: a human ``clear``
+        leaves no current row, and re-seeding a field somebody deliberately deleted destroys that
+        decision just as surely as overwriting one. Events (``op='event'``) live under reserved
+        ``__kind__`` addresses and are not spec fields, so they are excluded."""
+        rows = self._conn.execute(
+            "SELECT field, source_mid, channel, asserted_by FROM project_field_history"
+            " WHERE project_id=? AND op IN ('set','clear')", (pid,)).fetchall()
+        return {r["field"] for r in rows
+                if not is_machine_provenance(r["source_mid"], r["channel"], r["asserted_by"])}
 
     def remove_item(self, pid: str, index: int) -> None:
         """Drop line item ``index`` from the canonical spec: delete its per-item fields, shift higher
@@ -402,9 +515,23 @@ def merge_job_fields(specs: list[js.JobSpec]) -> tuple[dict[str, js.SpecField], 
     return job, provenance, conflicts
 
 
+def _apply_seeded(spec: js.JobSpec, addr: str, value: str) -> None:
+    """Overlay a MACHINE-seeded value at ``addr`` keeping ``source='llm', confirmed=False``.
+
+    Mirrors ``jobspec.confirm``'s address resolution but not its verdict: ``confirm`` exists to stamp
+    a *human* assertion (``"user"``, ``confirmed=True``) and must keep doing exactly that."""
+    base, i = js.parse_address(addr)
+    if i is None:
+        if base in spec.job_fields:
+            spec.job_fields[base] = js.SpecField(value, "llm", False)
+    elif 0 <= i < len(spec.items) and base in spec.items[i]:
+        spec.items[i][base] = js.SpecField(value, "llm", False)
+
+
 def canonical_spec(pid: str, title: str, client_name: str, n_items: int,
                    msg_specs: list[js.JobSpec],
-                   project_fields: dict[str, tuple[str, str]]
+                   project_fields: dict[str, tuple[str, str]],
+                   machine_fields: Optional[set[str]] = None
                    ) -> tuple[js.JobSpec, dict[str, Any], dict[str, str], dict[str, list]]:
     """Assemble the project's one canonical spec + Gate-1 readiness from all its message specs.
 
@@ -412,6 +539,14 @@ def canonical_spec(pid: str, title: str, client_name: str, n_items: int,
     overrides the auto-merge for every address it names. Line items are project-owned: ``n_items``
     empty items, filled ONLY from ``project_fields`` ``#i`` addresses. Returns
     (spec, readiness, provenance, conflicts).
+
+    ``machine_fields`` (from ``ProjectStore.machine_fields``) names the addresses in
+    ``project_fields`` that were **seeded by the extractor, not asserted by a human**. Those are laid
+    down as ``llm``/unconfirmed. Without it every project_field was pushed through ``js.confirm`` and
+    came out ``source='user', confirmed=True`` — so a machine-seeded ``item#0`` rendered as if a
+    person had signed it off and counted towards ``readiness['confirmed']``/``estimable``. That is an
+    INFERENCE auto-promoted to a human-confirmed FACT, which the zero-hallucination rule forbids
+    (CLAUDE.md non-negotiable 4): only an explicit human write may confirm a field.
     """
     job, provenance, conflicts = merge_job_fields(msg_specs)
     items = [{k: js.SpecField() for k in js.ITEM_KEYS} for _ in range(max(1, n_items))]
@@ -425,9 +560,13 @@ def canonical_spec(pid: str, title: str, client_name: str, n_items: int,
     # Authoritative overlay: project-level human decisions win over the auto-merge, for job AND items.
     # Custom (non-registry) fields ride their OWN channel — confirm() would silently no-op them and
     # readiness/askables iterate the static registry, so they render but never gate estimability (ADR-015).
+    seeded = machine_fields or frozenset()
     for addr, (value, source_mid) in project_fields.items():
         if js.is_custom_addr(addr):
-            spec.custom_fields[addr] = js.SpecField(value, "user", True)
+            spec.custom_fields[addr] = (js.SpecField(value, "llm", False) if addr in seeded
+                                        else js.SpecField(value, "user", True))
+        elif addr in seeded:
+            _apply_seeded(spec, addr, value)
         else:
             js.confirm(spec, addr, value)
         provenance[addr] = source_mid or "user"
@@ -481,7 +620,7 @@ def build_canonical(store: ProjectStore, ws, jobspecs: dict[str, Any], pid: str,
     specs = [s for s in (_merged_spec_for(ws, jobspecs, m) for m in mids) if s is not None]
     return canonical_spec(
         pid, proj["title"], proj.get("client_name") or "", proj.get("n_items") or 1,
-        specs, store.fields_for(pid),
+        specs, store.fields_for(pid), store.machine_fields(pid),
     )
 
 
@@ -497,24 +636,91 @@ def dangling_threads(store: ProjectStore, pid: str, crm_store=None) -> list[str]
     return [root for root in store.threads_for(pid) if not crm_store.thread(root)]
 
 
-def seed_items_from(store: ProjectStore, ws, jobspecs: dict[str, Any], pid: str, mid: str) -> bool:
+def seed_items_from(store: ProjectStore, ws, jobspecs: dict[str, Any], pid: str, mid: str,
+                    *, force: bool = False) -> bool:
     """Seed the canonical line items from one source message (seed + curate).
 
-    No-op if the project already has any per-item project_fields — items are curated from then on.
-    Returns True if seeding happened.
+    Default (``force=False``): a no-op if the project already has any per-item project_fields — items
+    are curated from then on. Returns True if seeding happened.
+
+    ``force=True`` is the **re-extract path** (ADR-025): after ``specbuild.rebuild_jobspecs(only=…)``
+    produces a better jobspec, the project must be able to pick it up even though it already has item
+    fields. Without this a perfect re-extract could never reach the project view — the one-row
+    ``item#0`` on ``p-0002`` blocked it forever.
+
+    Three properties make that safe:
+
+    * **Human decisions are never overwritten.** Every address in
+      ``ProjectStore.human_touched_fields`` (anything a person set OR deliberately cleared, per the
+      ledger) is skipped. This is the property the whole feature rests on: a re-extract that
+      destroyed a human decision would be a defect, not a feature.
+    * **Nothing is deleted.** A field the fresh extraction no longer produces keeps its previous
+      value; a re-extract adds and refreshes knowledge, it never subtracts it.
+    * **``n_items`` only grows.** Shrinking it would hide (not delete) every field on the dropped
+      indices — including human ones — because ``canonical_spec`` builds exactly ``n_items`` items and
+      out-of-range addresses silently no-op. Removing a line item stays a deliberate human act
+      (``ProjectStore.remove_item``).
+
+    Values identical to what is already stored are skipped, so a forced re-seed of an unchanged
+    jobspec writes no history rows and leaves the project byte-for-byte the same (idempotency).
     """
-    if store.has_item_fields(pid):
+    if store.has_item_fields(pid) and not force:
         return False
     spec = _merged_spec_for(ws, jobspecs, mid)
     if spec is None or not spec.items:
         return False
+    protected = store.human_touched_fields(pid) if force else set()
+    current = {addr: value for addr, (value, _src) in store.fields_for(pid).items()}
     for i, item in enumerate(spec.items):
         for k in js.ITEM_KEYS:
             fld = item.get(k)
-            if fld and fld.value:
-                store.set_field(pid, js.address(k, i), fld.value, source_mid=mid)
-    store.set_item_count(pid, len(spec.items))
+            if not (fld and fld.value):
+                continue
+            addr = js.address(k, i)
+            if addr in protected or current.get(addr) == fld.value:
+                continue
+            store.set_field(pid, addr, fld.value, source_mid=mid)
+    n = len(spec.items)
+    if force:
+        n = max(n, (store.get(pid) or {}).get("n_items") or 1)
+    store.set_item_count(pid, n)
     return True
+
+
+def apply_event_fields(store: ProjectStore, pid: str, rowid: int, fields: dict[str, str],
+                       *, protected: Optional[set[str]] = None,
+                       current: Optional[dict[str, str]] = None) -> list[str]:
+    """Write field values the LLM read out of ONE timeline event, citing it as their origin.
+
+    This is the timeline half of the widened re-extraction (ADR-026); ``seed_items_from`` is the email
+    half. It carries the same three safety properties, for the same reasons:
+
+    * **Human decisions are never overwritten** — every address in ``human_touched_fields`` is
+      skipped. A note that *mentions* a deadline must not silently undo the deadline a person typed.
+    * **Nothing is deleted** — only non-empty values are written; a field this pass no longer produces
+      keeps whatever it had.
+    * **Identical values are skipped**, so re-running over unchanged notes writes no history rows and
+      leaves the project byte-for-byte the same (the idempotency convention).
+
+    ``protected``/``current`` are accepted pre-computed because the caller loops over every event and
+    would otherwise re-query the whole ledger per note. Returns the addresses actually written.
+    """
+    if not fields:
+        return []
+    prot = store.human_touched_fields(pid) if protected is None else protected
+    cur = ({addr: value for addr, (value, _s) in store.fields_for(pid).items()}
+           if current is None else current)
+    ref = event_ref(rowid)
+    written: list[str] = []
+    for addr, value in fields.items():
+        value = (value or "").strip()
+        if not value or addr in prot or cur.get(addr) == value:
+            continue
+        # Bare ref, no channel/asserted_by — machine provenance by construction (see EVENT_REF_PREFIX).
+        store.set_field(pid, addr, value, source_mid=ref)
+        cur[addr] = value          # keep the caller's view current across events in the same pass
+        written.append(addr)
+    return written
 
 
 def resolve_thread_root(crm_store, ref: str) -> str:

@@ -28,7 +28,10 @@ def is_sent_folder(name: str) -> bool:
     return bool(name and _SENT_FOLDER_RE.search(name))
 
 # Header signals for bulk (mass mail) vs automated (auto-replies/notifications). RFC 2369 / 3834.
+# Public alias NO_REPLY_RE: para_ti reuses THIS regex to keep automated senders off the decision
+# gates (a mailer-daemon bounce must never be proposed as a client project) — one pattern, no drift.
 _NO_REPLY_RE = re.compile(r"\b(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster)\b", re.I)
+NO_REPLY_RE = _NO_REPLY_RE
 # Forward/quote banners across clients + PT (detection only — we do not parse the block).
 _FORWARD_MARKERS = (
     "---------- forwarded message",

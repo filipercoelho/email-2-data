@@ -132,3 +132,33 @@ def test_identity_links_feeds_cluster(tmp_path):
     cs = cluster(contacts, identity_links=ws.identity_links())
     assert len(cs) == 1 and "alice@gmail.com" in cs[0].emails
     ws.close()
+
+
+# ── display-name fallback for machine keys (v8) ───────────────────────────────
+
+def test_machine_key_cluster_borrows_contact_display_name():
+    """A nif:/free: cluster with no gazetteer hint must NOT show its raw key as the display name —
+    it borrows the best contact display name seen in the mail (most messages wins). Pins the real-
+    data defect where the client list was headed by "nif:274023911"."""
+    contacts = [{**_c("alice@gmail.com"), "display_name": "Alice Ferreira"}]
+    cs = cluster(contacts)
+    assert cs[0].kind == "free_mail" and cs[0].display_name == "Alice Ferreira"
+
+    # nif cluster: two free-mail addresses joined by a NIF; the busier contact names the cluster
+    contacts = [{**_c("a@gmail.com", msg_count=9), "display_name": "Tempus Lda"},
+                {**_c("b@hotmail.com", msg_count=2), "display_name": "Bruno"}]
+    cs = cluster(contacts, nif_refs={"274023911": ["a@gmail.com", "b@hotmail.com"]})
+    assert cs[0].key == "nif:274023911" and cs[0].display_name == "Tempus Lda"
+
+
+def test_machine_key_without_any_name_still_shows_key():
+    """No display name anywhere → the key remains (honest fallback, never invented)."""
+    cs = cluster([_c("alice@gmail.com")])   # helper has no display_name field
+    assert cs[0].display_name == cs[0].key
+
+
+def test_domain_cluster_keeps_readable_key_over_contact_name():
+    """Domain keys ("acme.pt") are already readable — a contact's personal name must not replace
+    the company-level label."""
+    cs = cluster([{**_c("a@acme.pt"), "display_name": "Maria"}])
+    assert cs[0].display_name == "acme.pt"

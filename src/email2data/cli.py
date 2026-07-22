@@ -194,11 +194,45 @@ def _read_spec_labels(path: Path) -> dict[str, dict[str, str]]:
     return out
 
 
+def _resolve_only(settings: dict[str, Any], refs: list[str]) -> set[str]:
+    """Expand ``--only`` refs into the set of message_ids to re-extract (ADR-025 §4).
+
+    A ``p-XXXX`` ref expands to every message across that project's attached threads, so
+    ``--only p-0002`` re-extracts the whole project rather than making the user paste message ids.
+    Anything else is taken as a message_id verbatim. An unknown project_id is fatal: silently
+    expanding it to nothing would print a reassuring "kept everything" and re-extract NOTHING."""
+    from . import project as projmod
+
+    mids: set[str] = set()
+    project_refs = [r for r in refs if r.startswith("p-")]
+    if not project_refs:
+        return {r for r in refs if r}
+    _p, ws, store, _jobspecs, crm_store = _open_project_ctx(settings)
+    try:
+        for ref in refs:
+            if not ref.startswith("p-"):
+                mids.add(ref)
+                continue
+            if store.get(ref) is None:
+                raise SystemExit(f"No such project {ref}")
+            mids.update(projmod.message_ids_for(store, ref, crm_store))
+    finally:
+        ws.close()
+        if crm_store is not None:
+            crm_store.close()
+    return mids
+
+
 def cmd_jobspec(args: argparse.Namespace) -> int:
     """Phase A/B: build JobSpecs + Gate-1 readiness for job-relevant emails (LEAD / PO / estimate).
 
-    Full rebuild (every job email); the per-email pipeline now lives in ``specbuild`` so the webapp
-    can run the same extraction incrementally after each sync."""
+    Full rebuild (every job email) by default; the per-email pipeline lives in ``specbuild`` so the
+    webapp can run the same extraction incrementally after each sync.
+
+    ``--only`` makes it a **scoped re-extract** (ADR-025 §4): only the named messages/projects are
+    rebuilt and every other entry is kept byte-for-byte, so fixing one bad extraction costs one LLM
+    call per message in that project instead of re-billing the whole corpus. ``--tier`` picks the
+    model for this run only (``llm.with_tier``)."""
     from . import specbuild
 
     settings = _load_settings(args)
@@ -207,14 +241,25 @@ def cmd_jobspec(args: argparse.Namespace) -> int:
     if not results_path.exists():
         print("No out/results.jsonl — run `email2data triage` first.", file=sys.stderr)
         return 1
+    only = _resolve_only(settings, args.only) if args.only else None
+    if only is not None:
+        print(f"  scoped re-extract: {len(only)} message(s)"
+              + (f" · tier {args.tier}" if args.tier else ""), file=sys.stderr)
     counts = specbuild.rebuild_jobspecs(
-        settings, draft=args.draft, reply=args.reply, incremental=False,
+        settings, draft=args.draft, reply=args.reply,
+        # --only is meaningless with a full rebuild: `incremental` is what preserves everything
+        # outside the scope. Without --only the command keeps its historical full-rebuild semantics.
+        incremental=only is not None, only=only, tier=args.tier,
         log=lambda m: print(f"  {m}", file=sys.stderr))
 
     specs = [json.loads(x) for x in (p["out_dir"] / "jobspecs.jsonl").read_text().splitlines() if x]
     _write_labelsheet(p["out_dir"] / "spec_labelsheet.csv", specs)
 
     tags = (f" · drafted {counts['drafted']}" if args.draft else "") + (" · replies" if args.reply else "")
+    if only is not None:
+        tags += f" · rebuilt {counts['built']} · kept {counts['kept']}"
+    if counts["failed"]:
+        tags += f" · FAILED {counts['failed']} (see spec_error / audit.jsonl)"
     print(f"\n{counts['total']} job-relevant emails (LEAD/PO/estimate){tags}")
     print(f"  {'EST':<3} {'COV':>4} {'ATT':>3}  {'MISSING must-haves':<38} SUBJECT")
     print("  " + "-" * 92)
@@ -572,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument("--draft", action="store_true", help="run the tiered LLM spec draft (Phase B; costs tokens)")
     jp.add_argument("--reply", action="store_true", help="also draft a clarifying reply per job (Phase C; costs tokens)")
     jp.add_argument("--score", action="store_true", help="score drafts vs labels/spec_labels.csv if present")
+    jp.add_argument("--tier", choices=["light", "standard", "heavy"],
+                    help="model tier for THIS run only (light=flash-lite, standard=flash, heavy=pro);"
+                         " only affects --draft/--reply")
+    jp.add_argument("--only", action="append", metavar="REF", default=None,
+                    help="scoped re-extract: rebuild ONLY this message_id or project_id (p-XXXX expands"
+                         " to its threads' messages). Repeatable. Every other entry is kept as-is.")
     jp.set_defaults(fn=cmd_jobspec)
     rp = sub.add_parser("relations", help="show emails related to a message (thread / contact / entity)")
     rp.add_argument("message_id", help="message_id to look up (from results.jsonl)")

@@ -138,6 +138,11 @@ class TelegramClient:
     def delete_message(self, chat_id: int, message_id: int) -> None:
         self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
+    def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        """Register the / autocomplete menu so the bot's commands are discoverable in the Telegram UI
+        instead of being hidden knowledge. Idempotent — Telegram replaces the whole list."""
+        self._call("setMyCommands", {"commands": commands})
+
     def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
         payload: dict[str, Any] = {"callback_query_id": callback_query_id}
         if text:

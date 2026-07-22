@@ -55,8 +55,17 @@ class FakeClient:
 
     def get_file(self, file_id):
         self.order.append("get_file")
-        ext = "oga" if "voice" in file_id else "jpg"
+        if "voice" in file_id:
+            ext = "oga"
+        elif "doc" in file_id:
+            ext = "pdf"
+        else:
+            ext = "jpg"
         return {"file_path": f"files/{file_id}.{ext}"}
+
+    def set_my_commands(self, commands):
+        self.order.append("set_commands")
+        self.commands = commands
 
     def download_file(self, file_path, **kw):
         self.order.append("download")
@@ -74,9 +83,10 @@ def _bot(conn, client, captures_dir, **kw):
     return bot, captures, projects
 
 
-def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, caption="", voice=False):
+def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, caption="", voice=False,
+         document=None):
     m = {"message_id": message_id, "chat": {"id": chat_id, "type": "private"},
-         "from": {"id": sender_id, "first_name": "Pedro"}}
+         "from": {"id": sender_id, "first_name": "Diogo"}}
     if text:
         m["text"] = text
     if caption:
@@ -85,6 +95,12 @@ def _msg(*, chat_id=10, sender_id=7, message_id=100, text="", photo=False, capti
         m["photo"] = [{"file_id": "small"}, {"file_id": "big"}]
     if voice:
         m["voice"] = {"file_id": "voicebig", "mime_type": "audio/ogg", "duration": 4}
+    if document is not None:
+        # document=True -> a plain PDF; document="name.ext" -> that file_name (attacker-controlled).
+        name = "desenho.pdf" if document is True else document
+        m["document"] = {"file_id": "docbig", "mime_type": "application/pdf"}
+        if name:
+            m["document"]["file_name"] = name
     return m
 
 
@@ -100,13 +116,13 @@ def test_unauthorized_sender_is_rejected_and_nothing_persisted(tmp_path):
 def test_text_capture_persists_then_scrubs_then_offers_pick_list(tmp_path):
     client = FakeClient()
     bot, captures, projects = _bot(_conn(), client, tmp_path)
-    captures.allow(7, display_name="Pedro", roster_owner="Pedro Ferreira")
+    captures.allow(7, display_name="Diogo", roster_owner="Diogo Costa")
     pid = projects.create("Estante Sousa", stage="LEAD")
     bot.handle({"update_id": 1, "message": _msg(text="prazo 30 jun", message_id=100)})
 
     cap = captures.get("c-10-100")
     assert cap is not None and cap["raw_text"] == "prazo 30 jun"
-    assert cap["asserted_by"] == "Pedro Ferreira"              # roster_owner -> provenance
+    assert cap["asserted_by"] == "Diogo Costa"              # roster_owner -> provenance
     assert client.deleted == [(10, 100)] and cap["telegram_scrubbed_at"] is not None
     assert client.order.index("delete") < client.order.index("edit")  # scrub before the pick-list
     pick = client.edited[-1]
@@ -442,3 +458,293 @@ def test_callback_confirmation_is_plain_text_against_markdown_titles(tmp_path):
     assert captures.get(cid)["status"] == "parsed"         # the DB committed
     conf = client.edited[-1]
     assert "Associado" in conf[2] and conf[4] is None      # confirmation rendered as PLAIN text
+
+
+# ── UX review (2026-07-19): help/guidance, media coverage, and the pick-list ──────────────────────
+# The bot is the ONLY surface a staffer sees from the phone, and a voice memo is scrubbed from
+# Telegram once stored — so what the chat says back is load-bearing, not cosmetic.
+
+
+def _llm_bot(conn, client, tmp_path, **kw):
+    return _bot(conn, client, tmp_path, llm_client=object(),
+                llm_cfg={"provider": "vertex_gemini", "model": "x"}, **kw)
+
+
+def test_unauthorized_sender_gets_no_help_text(tmp_path):
+    # The help text describes the internal workflow; default-deny must come FIRST so a stranger who
+    # finds the bot learns nothing about it.
+    client = FakeClient()
+    bot, _, _ = _bot(_conn(), client, tmp_path)
+    bot.handle({"update_id": 1, "message": _msg(text="/start")})
+    assert len(client.sent) == 1
+    assert "autorizado" in client.sent[0][1]
+    assert "Envia uma nota" not in client.sent[0][1]      # the help body never leaked
+
+
+def test_allowlisted_user_gets_help_listing_every_supported_kind(tmp_path):
+    client = FakeClient()
+    bot, captures, _ = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    for cmd in ("/start", "/ajuda", "/help"):
+        client.sent.clear()
+        bot.handle({"update_id": 1, "message": _msg(text=cmd)})
+        body = client.sent[0][1]
+        # every kind the handler actually accepts must be advertised
+        for kind in ("nota", "foto", "ficheiro", "voz"):
+            assert kind in body, f"{cmd} help omits {kind}"
+
+
+def test_empty_message_error_mentions_voice_and_files(tmp_path):
+    # It used to say "texto ou uma foto" while voice was already supported.
+    client = FakeClient()
+    bot, captures, _ = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    bot.handle({"update_id": 1, "message": _msg()})
+    body = client.sent[-1][1]
+    assert "voz" in body and "ficheiro" in body
+
+
+# -- documents: PDFs/DXFs and photos sent "as file" ------------------------------------------------
+
+
+def test_document_capture_downloads_persists_and_scrubs(tmp_path):
+    client = FakeClient(file_bytes=b"%PDF-1.7")
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(document=True, message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None and cap["content_class"] == "artifact"
+    assert cap["media_paths"] == ["c-10-100/desenho.pdf"]
+    assert (tmp_path / "c-10-100" / "desenho.pdf").read_bytes() == b"%PDF-1.7"
+    assert client.deleted == [(10, 100)]                       # persisted, then scrubbed
+
+
+def test_document_with_caption_keeps_the_caption_as_text(tmp_path):
+    client = FakeClient(file_bytes=b"%PDF")
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1,
+                "message": _msg(document=True, caption="desenho final do cliente", message_id=100)})
+    assert captures.get("c-10-100")["raw_text"] == "desenho final do cliente"
+
+
+@pytest.mark.parametrize("hostile", ["../../evil.sh", "/etc/passwd", "..\\..\\evil.bat", "....//x.sh"])
+def test_document_filename_cannot_escape_the_captures_dir(tmp_path, hostile):
+    # file_name is attacker-controlled: it must never write outside the capture folder.
+    client = FakeClient(file_bytes=b"x")
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(document=hostile, message_id=100)})
+    cap = captures.get("c-10-100")
+    assert cap is not None, "a hostile name must not lose the capture"
+    rel = cap["media_paths"][0]
+    assert ".." not in rel and not rel.startswith("/")
+    written = (tmp_path / rel).resolve()
+    assert tmp_path.resolve() in written.parents          # stayed inside the captures dir
+    assert written.exists()
+
+
+def test_document_without_filename_falls_back_to_the_telegram_extension(tmp_path):
+    client = FakeClient(file_bytes=b"x")
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(document="", message_id=100)})
+    assert captures.get("c-10-100")["media_paths"] == ["c-10-100/document.pdf"]
+
+
+def test_document_download_failure_says_file_and_never_persists(tmp_path, monkeypatch):
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    monkeypatch.setattr(client, "download_file", lambda *a, **k: (_ for _ in ()).throw(OSError("net")))
+    bot.handle({"update_id": 1, "message": _msg(document=True, message_id=100)})
+    assert captures.get("c-10-100") is None                # nothing persisted
+    assert client.deleted == []                            # nothing scrubbed -> Telegram keeps it
+    assert "ficheiro" in client.edited[-1][2]              # file wording, not "imagem"
+
+
+def test_audio_download_failure_says_voice_not_image(tmp_path, monkeypatch):
+    # The audio path reused the photo string, telling the user about an "imagem" they never sent.
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    monkeypatch.setattr(client, "download_file", lambda *a, **k: (_ for _ in ()).throw(OSError("net")))
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    body = client.edited[-1][2]
+    assert "voz" in body and "imagem" not in body
+    assert captures.get("c-10-100") is None and client.deleted == []
+
+
+# -- the transcript echo: the staffer's only chance to check what was heard -------------------------
+
+
+def test_voice_capture_echoes_the_transcript_back_to_the_chat(tmp_path, monkeypatch):
+    import email2data.intake as intake_mod
+    client = FakeClient(file_bytes=b"OGG")
+    bot, captures, projects = _llm_bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("Estante Sousa", stage="LEAD")
+    monkeypatch.setattr(intake_mod.llm, "call",
+                        lambda cl, cfg, system, user, **kw: ("cliente quer 200 unidades"
+                                                             if kw.get("images") else {}))
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    pick = client.edited[-1]
+    assert "cliente quer 200 unidades" in pick[2]     # the staffer can verify before the audio is gone
+    assert "Ouvi" in pick[2]
+    assert "projeto pertence" in pick[2]              # still offers the pick-list
+    assert pick[4] is None                            # plain text: model output is untrusted Markdown
+
+
+def test_voice_without_a_transcript_tells_the_user_it_failed(tmp_path, monkeypatch):
+    # Silence would be the worst outcome: Telegram is already scrubbed, so the staffer would believe
+    # the note was captured verbatim.
+    import email2data.intake as intake_mod
+    monkeypatch.setattr(intake_mod.llm, "call",
+                        lambda *a, **k: (_ for _ in ()).throw(intake_mod.llm.LLMError("down")))
+    client = FakeClient(file_bytes=b"OGG")
+    bot, captures, projects = _llm_bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    body = client.edited[-1][2]
+    assert "não consegui transcrev" in body.lower()
+    assert captures.get("c-10-100")["media_paths"]         # the audio itself is still preserved
+
+
+def test_voice_with_no_active_projects_still_reports_what_was_heard(tmp_path, monkeypatch):
+    import email2data.intake as intake_mod
+    client = FakeClient(file_bytes=b"OGG")
+    bot, captures, _ = _llm_bot(_conn(), client, tmp_path)   # no projects created
+    captures.allow(7)
+    monkeypatch.setattr(intake_mod.llm, "call",
+                        lambda cl, cfg, system, user, **kw: "nota solta" if kw.get("images") else {})
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    body = client.edited[-1][2]
+    assert "nota solta" in body and "Caixa de Capturas" in body
+
+
+def test_long_transcript_is_clipped_in_the_echo(tmp_path, monkeypatch):
+    import email2data.intake as intake_mod
+    long_text = "palavra " * 200
+    client = FakeClient(file_bytes=b"OGG")
+    bot, captures, projects = _llm_bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    monkeypatch.setattr(intake_mod.llm, "call",
+                        lambda cl, cfg, system, user, **kw: long_text if kw.get("images") else {})
+    bot.handle({"update_id": 1, "message": _msg(voice=True, message_id=100)})
+    body = client.edited[-1][2]
+    assert len(body) < 900 and "…" in body                       # clipped for a phone screen
+    assert captures.get("c-10-100")["transcript"].strip() == long_text.strip()  # stored in FULL
+
+
+def test_text_capture_does_not_claim_to_have_heard_anything(tmp_path):
+    client = FakeClient()
+    bot, captures, projects = _bot(_conn(), client, tmp_path)
+    captures.allow(7)
+    projects.create("X", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(text="nota escrita", message_id=100)})
+    assert "Ouvi" not in client.edited[-1][2]
+
+
+# -- pick-list buttons: two identical labels are un-pickable ---------------------------------------
+
+
+def test_button_label_disambiguates_duplicate_titles():
+    from email2data.intake import _button_label
+    a = {"project_id": "p-0002", "title": "Troféu KIA", "client_email": "ana@kia.pt",
+         "created_ts": "2026-06-01T10:00:00+00:00"}
+    b = {"project_id": "p-0003", "title": "Troféu KIA", "client_email": "jose@agencia.com",
+         "created_ts": "2026-06-04T10:00:00+00:00"}
+    la, lb = _button_label(a), _button_label(b)
+    assert la != lb                       # the whole point: they must be tellable apart
+    assert "kia.pt" in la and "agencia.com" in lb
+    assert "p-0002" in la and "p-0003" in lb
+
+
+def test_button_label_truncates_long_email_subject_titles():
+    from email2data.intake import _button_label
+    label = _button_label({"project_id": "p-0001",
+                           "title": "Re: awards for MME needed before June 14th",
+                           "client_email": "diogo@brand.com", "created_ts": "2026-06-01T10:00:00+00:00"})
+    assert "…" in label and len(label) < 60
+    assert "p-0001" in label and "brand.com" in label
+
+
+def test_button_label_falls_back_to_the_date_without_a_client_email():
+    from email2data.intake import _button_label
+    label = _button_label({"project_id": "p-0009", "title": "Troféu croissant",
+                           "client_email": "", "created_ts": "2026-06-20T10:00:00+00:00"})
+    assert "20/06" in label and "p-0009" in label
+
+
+def test_button_label_survives_missing_fields():
+    from email2data.intake import _button_label
+    assert "p-1" in _button_label({"project_id": "p-1"})            # no title, no email, no date
+    assert _button_label({"project_id": "p-2", "title": None, "created_ts": None})
+
+
+def test_pick_list_uses_the_disambiguated_labels(tmp_path):
+    from email2data.intake import _button_label
+    client = FakeClient()
+    conn = _conn()
+    bot, captures, projects = _bot(conn, client, tmp_path)
+    captures.allow(7)
+    pid = projects.create("Troféu KIA", stage="LEAD")
+    bot.handle({"update_id": 1, "message": _msg(text="nota", message_id=100)})
+    buttons = [b[0] for b in client.edited[-1][3]["inline_keyboard"]]
+    picked = [b for b in buttons if b["callback_data"].endswith(pid)]
+    assert picked and picked[0]["text"] == _button_label(
+        [p for p in projects.list() if p["project_id"] == pid][0])
+
+
+# -- the / command menu ----------------------------------------------------------------------------
+
+
+def test_poll_forever_registers_the_command_menu(tmp_path):
+
+    class OneShot(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        def get_updates(self, offset, *, timeout=25, allowed_updates=None):
+            self.polls += 1
+            stop.set()
+            return []
+
+    stop = threading.Event()
+    c = OneShot()
+    bot, _, _ = _bot(_conn(), c, tmp_path)
+    poll_forever(client=c, bot=bot, bot_name="b", offset_path=tmp_path / "o.json", shutdown=stop)
+    assert getattr(c, "commands", None), "the / menu was never registered"
+    assert any(x["command"] == "ajuda" for x in c.commands)
+    assert c.order.index("set_commands") < len(c.order)   # registered at start
+
+
+def test_command_menu_failure_never_stops_the_worker(tmp_path):
+    # Discoverability is not function: a bot that cannot register commands must still poll.
+    class Broken(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        def set_my_commands(self, commands):
+            raise RuntimeError("telegram down")
+
+        def get_updates(self, offset, *, timeout=25, allowed_updates=None):
+            self.polls += 1
+            stop.set()
+            return []
+
+    stop = threading.Event()
+    c = Broken()
+    bot, _, _ = _bot(_conn(), c, tmp_path)
+    poll_forever(client=c, bot=bot, bot_name="b", offset_path=tmp_path / "o.json", shutdown=stop)
+    assert c.polls >= 1        # polled anyway

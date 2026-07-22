@@ -82,21 +82,40 @@ def run_sync(
     do_triage: bool = True,
     do_crm: bool = True,
     full: bool = False,
-) -> dict[str, int]:
+    account_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """Pull only new mail, then classify only the new emails. Shared by CLI, button, and startup.
 
     Token spend is bounded by both layers being incremental: fetch skips already-seen UIDs, triage
     skips message_ids already in results.jsonl. ``full=True`` forces a bootstrap + full reclassify.
     ``do_crm`` rebuilds ``out/crm.db`` from the (now-updated) verdicts so the cockpit Fila never reads a
     stale relations DB — cheap (deterministic, no LLM) and keeps thread/response state current.
+
+    The three ``do_*`` switches select which stages run; ``do_fetch=True, do_triage=False`` is the
+    "pull mail, spend no Tier-1 tokens" mode (triage is the only stage that calls the LLM, and it is
+    not even constructed when off). ``account_ids`` targets a subset of accounts and is passed
+    through to ``fetch.fetch_all`` so the per-account isolation there still applies.
+
+    Return keys — the original six are unchanged for existing callers (CLI, the Sincronizar button,
+    ``report.py``'s toast); the rest are additive:
+
+      * ``per_account`` — ``{account_id: messages_cached}`` for this run;
+      * ``account_failures`` — ``{account_id: detail}`` for accounts that failed (named separately
+        from ``failed``, which counts Tier-1 triage failures, not accounts);
+      * ``stages`` — which stages actually ran, so a 0 from a skipped stage is never misread as a
+        measured 0.
     """
     from . import cascade, crm, fetch
 
-    out: dict[str, int] = {"fetched": 0, "triaged_new": 0, "triaged_skipped": 0,
-                           "offline": 0, "llm": 0, "failed": 0, "crm_recorded": 0}
+    out: dict[str, Any] = {"fetched": 0, "triaged_new": 0, "triaged_skipped": 0,
+                           "offline": 0, "llm": 0, "failed": 0, "crm_recorded": 0,
+                           "per_account": {}, "account_failures": {},
+                           "stages": {"fetch": do_fetch, "triage": do_triage, "crm": do_crm}}
     if do_fetch:
-        counts = fetch.fetch_all(settings, full=full)
+        counts = fetch.fetch_all(settings, full=full, account_ids=account_ids)
         out["fetched"] = sum(counts.values())
+        out["per_account"] = dict(counts)
+        out["account_failures"] = dict(getattr(counts, "failures", {}) or {})
     if do_triage:
         store = cascade.build_store(settings)
         try:

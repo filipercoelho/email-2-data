@@ -38,6 +38,34 @@ class FetchError(Exception):
     ``[AUTHENTICATIONFAILED] Authentication failed.`` — the password is never echoed)."""
 
 
+class FetchReport(dict):
+    """Result of a fetch run: per-account counts, plus the per-account failure detail.
+
+    It **is** a ``{account_id: messages_cached}`` dict, so every pre-existing caller
+    (``sum(counts.values())``, ``counts[acc]``, ``.items()``) keeps working unchanged. What it adds
+    is the detail ``fetch_all`` already tracked internally and then threw away at the call site:
+
+      * ``failures`` — ``{account_id: detail}`` for each account that raised, where ``detail`` is the
+        server's own reply (credential-safe, see ``_imap_detail``). A failed account is still present
+        in the counts with 0, so ``0`` never has to be read as "failed or just idle?".
+      * ``total`` — messages cached across every attempted account.
+      * ``ok`` — ids that completed without error.
+    """
+
+    def __init__(self, counts: dict[str, int] | None = None,
+                 failures: dict[str, str] | None = None) -> None:
+        super().__init__(counts or {})
+        self.failures: dict[str, str] = dict(failures or {})
+
+    @property
+    def total(self) -> int:
+        return sum(self.values())
+
+    @property
+    def ok(self) -> list[str]:
+        return [a for a in self if a not in self.failures]
+
+
 def _imap_detail(exc: Exception) -> str:
     """Human-readable IMAP error detail (server response), safe to surface — no credentials in it."""
     parts = []
@@ -279,23 +307,38 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
                 pass
 
 
-def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool = False) -> dict[str, int]:
-    """Fetch every configured account incrementally. Returns {account_id: messages_cached} (0 for a
-    failed account).
+def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool = False,
+              account_ids: list[str] | None = None) -> FetchReport:
+    """Fetch every configured account incrementally. Returns a ``FetchReport`` — a
+    ``{account_id: messages_cached}`` dict (0 for a failed account) that also carries ``.failures``.
 
     Opens its own ``sync.SyncStore`` (``out/sync.db``) when ``sync`` is not supplied, so the
     "since last retrieve" watermark works out of the box. ``full=True`` re-bootstraps every mailbox.
 
+    ``account_ids`` narrows the run to those accounts (a targeted force-sync). It filters HERE, on
+    purpose: the isolation and total-outage logic below lives in this function, so a caller that
+    wants one account must still come through it rather than reach for ``fetch_account`` directly.
+    An id that is not configured is a caller bug, not an empty run, so it raises instead of quietly
+    fetching nothing.
+
     Per-account isolation (red-team: a bad/expired credential must never starve the OTHER accounts):
     a ``FetchError`` from one account is AUDITED (``fetch_account_failed``) and SKIPPED so the loop
     keeps going and every healthy account still syncs and advances its watermark. Only when EVERY
-    account fails is the error re-raised — a total outage surfaces loudly to the CLI instead of a
-    misleading "0 emails"."""
+    attempted account fails is the error re-raised — a total outage surfaces loudly to the CLI
+    instead of a misleading "0 emails"."""
     p = paths(settings, settings["__settings_path__"])
     audit_log = p["audit_log"]
     results: dict[str, int] = {}
     accounts = settings["imap"].get("accounts", [])
-    audit.log(audit_log, "fetch_started", "all", {"accounts": len(accounts), "full": full})
+    if account_ids is not None:
+        wanted = {str(a) for a in account_ids}
+        unknown = wanted - {a["id"] for a in accounts}
+        if unknown:
+            raise FetchError("unknown account_ids: " + ", ".join(sorted(unknown)))
+        accounts = [a for a in accounts if a["id"] in wanted]
+    audit.log(audit_log, "fetch_started", "all",
+              {"accounts": len(accounts), "full": full,
+               "targeted": sorted(a["id"] for a in accounts) if account_ids is not None else None})
 
     owns_sync = sync is None
     if owns_sync:
@@ -328,4 +371,4 @@ def fetch_all(settings: dict[str, Any], *, sync: Any | None = None, full: bool =
     finally:
         if owns_sync and sync is not None:
             sync.close()
-    return results
+    return FetchReport(results, failures=failures)

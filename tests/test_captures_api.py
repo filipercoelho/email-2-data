@@ -39,7 +39,7 @@ def test_pending_capture_is_listed(tmp_path):
 def test_apply_appends_an_event_with_provenance_and_marks_applied(tmp_path):
     client, ws, cap, proj, pid = _setup(tmp_path)
     cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="cliente confirmou prazo",
-                     channel="call", asserted_by="Pedro Ferreira")
+                     channel="call", asserted_by="Diogo Costa")
     r = client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "decision"})
     assert r.status_code == 200 and r.json()["ok"] is True
     # left the pending queue (applied), and the project timeline carries the event WITH provenance
@@ -47,7 +47,7 @@ def test_apply_appends_an_event_with_provenance_and_marks_applied(tmp_path):
     tl = proj.timeline(pid)
     assert tl[0]["op"] == "event" and tl[0]["field"] == "__decision__"
     assert tl[0]["new_value"] == "cliente confirmou prazo"
-    assert tl[0]["channel"] == "call" and tl[0]["asserted_by"] == "Pedro Ferreira"
+    assert tl[0]["channel"] == "call" and tl[0]["asserted_by"] == "Diogo Costa"
     ws.close()
 
 
@@ -157,4 +157,64 @@ def test_media_is_served_inline_and_guards_index_range(tmp_path):
     assert r.status_code == 200 and r.content == b"JPEGDATA"
     assert r.headers["content-type"].startswith("image/")
     assert client.get(f"/api/captures/{cid}/media/5").status_code == 404   # out of range
+    ws.close()
+
+
+# ── WP-A (ADR-022 plan): the write path must record WHERE a value came from ────────────────────────
+# There is no derivable join key from a ledger row back to its capture, and workspace.db is never
+# rebuilt — so a link not written at apply time is lost permanently. These pin that it is written.
+
+
+def test_apply_links_a_text_only_capture(tmp_path):
+    """A text-only capture — the common case, a typed phone-call note — must cite its origin.
+    Before WP-A the link was gated on `media_paths`, so exactly this case stored source_mid=''."""
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="cliente confirmou 200 un")
+    assert cap.get(cid)["media_paths"] == []          # no media: the case the old ternary dropped
+    r = client.post(f"/api/captures/{cid}/apply", json={"project_id": pid, "kind": "note"})
+    assert r.status_code == 200
+    assert proj.timeline(pid)[0]["source_mid"] == f"capture:{cid}"
+    ws.close()
+
+
+def test_confirm_field_records_the_originating_capture(tmp_path):
+    """The highest-stakes path: an extracted value confirmed into a gate-affecting field. The server
+    used to silently DISCARD source_mid (it returned 200 and stored ''), so the value that moves the
+    estimable gate carried no origin at all."""
+    client, ws, cap, proj, pid = _setup(tmp_path)
+    cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="prazo 10 agosto")
+    r = client.post(f"/api/projects/{pid}/field",
+                    json={"field": "deadline", "value": "2026-08-10", "channel": "manual",
+                          "asserted_by": "Bruno", "source_mid": f"capture:{cid}"})
+    assert r.status_code == 200
+    hist = [h for h in proj.field_history(pid, "deadline")]
+    assert hist and hist[0]["source_mid"] == f"capture:{cid}", \
+        "the confirmed field must cite the capture it was extracted from"
+    ws.close()
+
+
+def test_an_unknown_capture_reference_is_refused_not_silently_dropped(tmp_path):
+    """A bad reference must fail loudly. Silently storing '' is what produced the unlinked rows."""
+    client, ws, _cap, proj, pid = _setup(tmp_path)
+    r = client.post(f"/api/projects/{pid}/field",
+                    json={"field": "deadline", "value": "2026-08-10",
+                          "source_mid": "capture:c-does-not-exist"})
+    assert r.status_code == 400
+    assert proj.field_history(pid, "deadline") == []       # nothing written
+    ws.close()
+
+
+def test_a_removal_is_attributable(tmp_path):
+    """clear_field logged with no provenance bundle at all, and participants() skips unattributed
+    rows — so a removal that can flip estimability was never attributed to anyone."""
+    client, ws, _cap, proj, pid = _setup(tmp_path)
+    client.post(f"/api/projects/{pid}/field",
+                json={"field": "deadline", "value": "2026-08-10", "asserted_by": "Bruno"})
+    r = client.post(f"/api/projects/{pid}/field",
+                    json={"field": "deadline", "value": "", "channel": "call",
+                          "asserted_by": "Bruno"})
+    assert r.status_code == 200
+    clears = [h for h in proj.field_history(pid, "deadline") if h["op"] == "clear"]
+    assert clears and clears[0]["asserted_by"] == "Bruno", "a removal must name who did it"
+    assert clears[0]["channel"] == "call"
     ws.close()

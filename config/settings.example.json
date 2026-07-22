@@ -1,8 +1,8 @@
 {
-  "_comment": "Copy to settings.json (gitignored) and fill in. Never commit real credentials.",
-  "_mail_server_note": "Host confirmed from materials-costing config: mail.lindoservico.pt (provider mail.pt). SMTP runs on 587/STARTTLS; IMAP is normally 993/SSL on the same host. Verify the IMAP port with the provider before first run.",
+  "_comment": "Copy to settings.json (gitignored) and fill in your real values. Never commit real credentials, hosts, addresses, or names.",
+  "_mail_server_note": "Set host to your mail provider's IMAP server. SMTP is not used (read-only). IMAP is normally 993/SSL. Verify the port with your provider before first run.",
   "imap": {
-    "host": "mail.lindoservico.pt",
+    "host": "mail.example.com",
     "port": 993,
     "use_ssl": true,
     "read_only": true,
@@ -10,12 +10,12 @@
     "accounts": [
       {
         "id": "geral",
-        "username": "geral@lindoservico.pt",
+        "username": "geral@example.com",
         "password_env": "EMAIL2DATA_GERAL_PASSWORD"
       },
       {
         "id": "cost-manager",
-        "username": "cost-manager@lindoservico.pt",
+        "username": "cost-manager@example.com",
         "password_env": "EMAIL2DATA_COSTMANAGER_PASSWORD"
       }
     ]
@@ -25,13 +25,14 @@
     "max_messages": 200
   },
   "sync": {
-    "_comment": "fetch + triage are incremental (UID watermark + results.jsonl gate); on_startup auto-runs one sync in the background each time `email2data serve` boots",
-    "on_startup": true
+    "_comment": "fetch + triage are incremental (UID watermark + results.jsonl gate); on_startup auto-runs one sync in the background each time `email2data serve` boots, then interval_minutes keeps pulling on a schedule so the lenses stay live (ADR-023) — set 0 to disable the periodic loop",
+    "on_startup": true,
+    "interval_minutes": 15
   },
   "llm": {
     "provider": "vertex_gemini",
     "_provider_options": "vertex_gemini (Google Gemini on Vertex, uses gcloud ADC) | anthropic (needs api_key_env)",
-    "vertex_project": "materials-492723",
+    "vertex_project": "your-gcp-project-id",
     "vertex_location": "global",
     "model": "gemini-2.5-flash",
     "api_key_env": "ANTHROPIC_API_KEY",
@@ -41,7 +42,13 @@
     "_context_cache": "Vertex/Gemini: cache the large stable playbook prefix so it is not re-billed every call. min_chars ~ the model's caching floor (~1024 tokens); best-effort, falls back to the plain path on any error.",
     "context_cache": true,
     "context_cache_ttl_s": 3600,
-    "context_cache_min_chars": 4096
+    "context_cache_min_chars": 4096,
+    "_tiers": "Per-call cost tiers (llm.with_tier, ADR-025). The Projetos UI labels these by COST — Leve/Normal/Profundo — for 'Reprocessar tudo com IA' (ADR-026) and 'Melhorar com IA' (ADR-027). REQUIRED for that choice to mean anything: with_tier is a deliberate no-op on an unknown or absent tier, so without this block every tier silently resolves to llm.model above and the picker would be a lie.",
+    "tiers": {
+      "light": {"model": "gemini-2.5-flash-lite", "max_tokens": 1024, "thinking_budget": 0},
+      "standard": {"model": "gemini-2.5-flash", "max_tokens": 1024, "thinking_budget": 0},
+      "heavy": {"model": "gemini-2.5-pro", "max_tokens": 8192, "thinking_budget": 4096}
+    }
   },
   "intake": {
     "_comment": "Conversational-intake Telegram worker (ADR-019/-020/-021). Disabled by default. The bot token lives in .env (never here); start the worker with `email2data intake-bot`.",
@@ -52,7 +59,11 @@
     "delete_after_scrub": true,
     "_allowlist_note": "Default-deny: only these Telegram user ids may use the bot. roster_owner feeds the capture's asserted_by provenance.",
     "allowlist": [
-      {"telegram_user_id": 123456789, "display_name": "Pedro", "roster_owner": "Pedro Ferreira"}
+      {
+        "telegram_user_id": 123456789,
+        "display_name": "Alice",
+        "roster_owner": "Alice Example"
+      }
     ]
   },
   "paths": {

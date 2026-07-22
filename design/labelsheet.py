@@ -1,7 +1,7 @@
 """Phase-1 labeling helper (throwaway tooling, not part of the package).
 
   build : body-aware classify all corpus/*.eml -> out/proposals.jsonl, then stratify-sample ~40
-          (forcing in corticoenetos + a Vision Box mail) -> labels/worksheet.csv with my proposals
+          (forcing in a couple of ambiguous client domains) -> labels/worksheet.csv with my proposals
           pre-filled. You then CORRECT the `counterparty` / `priority` columns in place.
   score : read the corrected labels/worksheet.csv and print the baseline (counterparty accuracy,
           CLIENT recall, real-clients-binned, priority accuracy).
@@ -27,14 +27,14 @@ from google.genai import types  # noqa: E402
 
 from email2data.envelope import parse_eml  # noqa: E402
 
-PROJECT, LOCATION, MODEL = "materials-492723", "global", "gemini-2.5-flash"
+PROJECT, LOCATION, MODEL = "example-gcp-project", "global", "gemini-2.5-flash"
 OURS, BODY_CAP = "lindoservico", 4000
 COUNTERPARTY = ["CLIENT", "SUPPLIER", "INTERNAL", "BULK", "OTHER"]
 PURPOSE = ["PO_FROM_CLIENT", "ESTIMATE_REQUEST_FROM_CLIENT", "OUR_ORDER_TO_SUPPLIER",
            "SUPPLIER_REPLY_OR_CONFIRMATION", "INVOICE_OR_ACCOUNTING", "FOLLOW_UP",
            "PUBLICITY", "INTERNAL_OPS", "OTHER"]
 QUOTA = {"CLIENT": 16, "SUPPLIER": 8, "INTERNAL": 6, "BULK": 5, "OTHER": 5}
-FORCE = ("cortico", "amadeus")  # always include these domains (the ambiguous cases)
+FORCE = ("client-a", "client-b")  # always include these domains (the ambiguous cases; put your own)
 
 SCHEMA = {
     "type": "object",
@@ -52,7 +52,7 @@ DECIDE PELO CORPO DO TEXTO, não pelo domínio.
 - CLIENT = compra-nos / envia-nos encomenda (PO) / pede orçamento de trabalho nosso.
 - SUPPLIER = compramos-lhe materiais/serviços (nós encomendamos).
 - INTERNAL = colega @lindoservico.pt. BULK = newsletter/publicidade.
-O domínio é pista fraca (ex.: Vision Box/Amadeus é CLIENTE). Se for um reencaminhamento/citação de um
+O domínio é pista fraca (ex.: um domínio corporativo pode ser CLIENTE). Se for um reencaminhamento/citação de um
 email externo, classifica pelo ORIGINAL externo, não pelo reencaminhador.
 purpose: PO_FROM_CLIENT, ESTIMATE_REQUEST_FROM_CLIENT, OUR_ORDER_TO_SUPPLIER,
 SUPPLIER_REPLY_OR_CONFIRMATION, INVOICE_OR_ACCOUNTING, FOLLOW_UP, PUBLICITY, INTERNAL_OPS, OTHER.

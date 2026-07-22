@@ -125,3 +125,32 @@ def test_identity_candidate_accept_payload():
     if items:  # the heuristic may or may not match — if it does, verify payload
         assert items[0]["accept"]["payload"]["account_key"] == "acme.pt"
         assert items[0]["accept"]["payload"]["email"] == "acmejohn@gmail.com"
+
+
+# ── Junk gate + dismissals (v8) ───────────────────────────────────────────────
+
+def test_propose_project_skips_automated_senders():
+    """A mailer-daemon bounce (or any no-reply sender) must NEVER be proposed as a client project,
+    even when content classification says ESTIMATE_REQUEST — machine mail is not a lead. The thread
+    stays in the Fila (nothing binned); it just loses the green 'Criar projeto' gate. Pins the
+    real-data defect where a delivery-failure notice got a primary quote-opportunity card."""
+    for sender in ("mailer-daemon@mailer-daemon.register.it", "noreply.odd@dhl.com",
+                   "no-reply@portal.pt", "postmaster@acme.pt", "do-not-reply@x.io"):
+        assert propose_project_items([_frow("t1", contact=sender)], set()) == [], sender
+    # a human sender still proposes
+    assert propose_project_items([_frow("t1", contact="maria@acme.pt")], set()) != []
+
+
+def test_all_items_filters_dismissed_and_stamps_keys():
+    """all_items drops persisted dismissals (matched by the SAME key the JS uses:
+    kind|thread_root-or-email) and stamps ``key`` on every survivor so the UI dismisses against the
+    exact key the next build will honour. This is the server half of the 'Ignorar must survive a
+    reload' fix — without the filter, every ignored proposal resurrected on every page load."""
+    from email2data.para_ti import all_items, item_key
+    rows = [_frow("t1", confidence=0.45), _frow("t2", confidence=0.9)]
+    items = all_items(rows, [], set())
+    assert items and all(it["key"] == item_key(it) for it in items)
+    victim = items[0]["key"]
+    left = all_items(rows, [], set(), dismissed={victim})
+    assert victim not in {it["key"] for it in left}
+    assert len(left) == len(items) - 1

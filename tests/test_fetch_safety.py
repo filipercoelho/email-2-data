@@ -32,13 +32,13 @@ def test_no_mutating_or_seen_setting_commands_in_executable_code():
 
 def test_account_mailboxes_uses_per_account_list():
     settings = {"imap": {"mailbox": "INBOX"}}
-    account = {"id": "pedro", "mailboxes": ["INBOX", "Enviados"]}
+    account = {"id": "diogo", "mailboxes": ["INBOX", "Enviados"]}
     assert fetch._account_mailboxes(settings, account) == ["INBOX", "Enviados"]
 
 
 def test_account_mailboxes_falls_back_to_imap_level():
     settings = {"imap": {"mailbox": "INBOX"}}
-    account = {"id": "pedro"}
+    account = {"id": "diogo"}
     assert fetch._account_mailboxes(settings, account) == ["INBOX"]
 
 

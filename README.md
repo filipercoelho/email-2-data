@@ -36,18 +36,33 @@ The classifier brain is **editable config, not code**: [config/triage_playbook.m
 ## Quick start
 
 ```bash
-pip install -e ".[dev,web,vertex]"                     # (repo also ships a .venv)
 cp config/settings.example.json config/settings.json   # set IMAP host/accounts + Vertex project
 cp .env.example .env                                    # fill secrets (gitignored, auto-loaded)
 
-email2data fetch       # read-only IMAP pull (incremental) → corpus/*.eml
-email2data triage      # Tier-0 signals → Tier-1 Gemini, only new emails → appends out/results.jsonl
-email2data sync        # fetch-new + triage-new in one shot (what the webapp runs on boot + button)
-email2data serve --port 8042   # local workspace UI on http://127.0.0.1:8042  (NEVER port 8000)
-email2data eval        # score counterparty/priority vs labels/worksheet.csv
+docker compose up -d --build   # THE deploy: webapp on http://127.0.0.1:8042 + the intake worker
+docker compose ps              # email2data (healthy) + intake-bot
+```
+
+**Docker is the only deployment target.** Both long-running processes are compose services —
+`email2data` (the UI, published to loopback only, **never port 8000**) and `intake-bot` (the
+Telegram capture worker, no port). **Do not run `email2data serve` or `email2data intake-bot` from
+the host:** the container already holds `127.0.0.1:8042`, so a host `serve` silently loses the bind
+and you end up testing the container's image while believing you are testing your working tree.
+A code change needs `docker compose up -d --build` to take effect (`src/` is baked into the image;
+`config/`, `corpus/`, `out/` and `.env` are mounted, so playbook edits are live immediately).
+
+The batch commands run inside the container (or in a dev shell for tests):
+
+```bash
+docker compose exec email2data email2data fetch    # read-only IMAP pull (incremental) → corpus/*.eml
+docker compose exec email2data email2data triage   # Tier-0 signals → Tier-1 Gemini, new mail only
+docker compose exec email2data email2data sync     # fetch-new + triage-new (also on boot + button)
+docker compose exec email2data email2data eval     # score counterparty/priority vs labels
 #   add --full to fetch/triage/sync to re-bootstrap / reclassify everything
 ```
 
-Docker, provider/auth options, and the stores model are documented in
+For the test suite and linting you still want a local dev install
+(`pip install -e ".[dev,web,vertex]"` — the repo also ships a `.venv`); that is development, not a
+deployment. Provider/auth options and the stores model are documented in
 [docs/07-operations/running.md](docs/07-operations/running.md) and
 [docs/05-reference/data-stores.md](docs/05-reference/data-stores.md).

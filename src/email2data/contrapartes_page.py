@@ -103,6 +103,9 @@ _DETAIL_BODY = """
   /* header */
   .chead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
   .ctitle{font-size:21px;font-weight:700;letter-spacing:-.01em}
+  .rename{border:1px solid var(--bd);background:var(--card);color:var(--mut);border-radius:8px;
+    width:28px;height:28px;cursor:pointer;font-size:13px;line-height:1}
+  .rename:hover{border-color:var(--ac);color:var(--ac)}
   .kv{font-size:11px;font-weight:700;color:var(--mut);background:var(--bg);border:1px solid var(--bd);border-radius:20px;padding:2px 9px}
   .cemails{font-size:12.5px;color:var(--mut);display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:10px}
   .emlink{color:var(--ac);text-decoration:none;border-bottom:1px dotted var(--bd)}
@@ -157,10 +160,12 @@ const GATEcls = {rever_classificacao:'rever', propor_projeto:'projeto', confirma
 function relTime(iso){ if(!iso) return '—'; const ms=Date.now()-Date.parse(iso); if(isNaN(ms)) return '—';
   const d=Math.floor(ms/86400000);
   return d<=0?'hoje':d===1?'ontem':d<30?('há '+d+' dias'):d<365?('há '+Math.floor(d/30)+' meses'):('há '+Math.floor(d/365)+' anos'); }
-/* deep-links to where the data lives */
-const inboxContact = e   => '/inbox#tab=contacts&sel='+encodeURIComponent(e);
-const inboxEmail   = mid => '/inbox#tab=emails&sel='+encodeURIComponent(mid);
-const filaThread   = root=> '/?thread='+encodeURIComponent(root);
+/* deep-links to where the data lives — everything stays inside the cockpit (the legacy /inbox is a
+   different app; sending 111 history links there dumped the user into a surface that contradicts
+   these pages). A thread link lands on the Fila, which falls back to the Tratados ledger when the
+   conversation was already decided. */
+const filaSearch = q    => '/?search='+encodeURIComponent(q);
+const filaThread = root => '/?thread='+encodeURIComponent(root);
 
 function statCard(v,l,cls){ return '<div class="stat'+(cls?' '+cls:'')+'"><div class="sv">'+esc(v)+'</div><div class="sl">'+esc(l)+'</div></div>'; }
 function seclabel(t,hint){ return '<div class="seclabel">'+esc(t)+(hint?' <span class="sh">'+esc(hint)+'</span>':'')+'</div>'; }
@@ -168,19 +173,36 @@ function seclabel(t,hint){ return '<div class="seclabel">'+esc(t)+(hint?' <span 
 function render(){
   const cp = cl.last_counterparty || 'OTHER';
 
-  // ── header: identity + email chips (→ inbox history) + quick actions ──
-  const emails = (cl.emails||[]).map(e=>'<a class="emlink" href="'+inboxContact(e)+'" title="histórico de '+esc(e)+' no inbox">'+esc(e)+'</a>')
+  // ── header: identity + email chips (→ this address in the Fila) + quick actions ──
+  const emails = (cl.emails||[]).map(e=>'<a class="emlink" href="'+filaSearch(e)+'" title="threads de '+esc(e)+' na Fila">'+esc(e)+'</a>')
                   .join('<span class="sep">·</span>');
   const nif = cl.nif ? '<span class="kv">NIF '+esc(cl.nif)+'</span>' : '';
+  /* "Abrir na Fila" filters THIS counterparty (domain, or the address we hear from most) — it used
+     to filter by counterparty TYPE, which opened the Fila showing every other CLIENT too. */
+  const filaHref = cl.kind==='domain' ? '/?domain='+encodeURIComponent(cl.key)
+                                      : filaSearch(st.primary_email||(cl.emails||[''])[0]);
   const acts = '<div class="cactions">'
-    + (st.primary_email?'<a class="act-btn" href="'+inboxContact(st.primary_email)+'">Histórico completo →</a>':'')
-    + (frows.length?'<a class="act-btn" href="/?counterparty='+encodeURIComponent(cp)+'">Abrir na Fila →</a>':'')
+    + (frows.length?'<a class="act-btn" href="'+filaHref+'">Abrir na Fila →</a>':'')
+    + (tl.length?'<a class="act-btn" href="#_timeline">Linha do tempo ↓</a>':'')
     + (proj.length?'<a class="act-btn" href="/projetos">Ver projetos →</a>':'')
     + '</div>';
   $('#_header').innerHTML =
       '<div class="chead"><span class="cp '+esc(cp)+'">'+esc(cp)+'</span>'
-    + '<span class="ctitle">'+esc(cl.display_name||cl.key)+'</span>'+nif+'</div>'
+    + '<span class="ctitle">'+esc(cl.display_name||cl.key)+'</span>'
+    + '<button id="_rename" class="rename" title="dar um nome a esta contraparte">✎</button>'+nif
+    + (cl.name_overridden?'<span class="kv" title="nome definido manualmente — ✎ para mudar ou limpar">nome teu</span>':'')
+    + '</div>'
     + '<div class="cemails">'+emails+'</div>'+acts;
+  const rn=$('#_rename');
+  if(rn) rn.addEventListener('click', async ()=>{
+    const cur=cl.name_overridden?(cl.display_name||''):'';
+    const nm=prompt('Nome desta contraparte (vazio volta ao automático):',cur);
+    if(nm===null) return;
+    try{
+      await post('/api/contrapartes/'+encodeURIComponent(cl.key)+'/name',{name:nm.trim()});
+      toast(nm.trim()?'nome guardado':'nome reposto'); setTimeout(()=>location.reload(),400);
+    }catch(e){ toast(S.falhou); }
+  });
 
   // ── insight strip ──
   $('#_stats').innerHTML =
@@ -207,10 +229,12 @@ function render(){
           +'<span class="clock '+esc(c.band||'none')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span></a>';
       }).join('');
 
-  // ── pending decisions → Para ti ──
+  // ── pending decisions → Para ti, ON the exact card (?item= deep-link). The old href used the
+  // accept.nav destination (/projetos), a page where the pending decision does not exist yet. ──
   $('#_gates').innerHTML = !gates.length ? '' : seclabel('Decisões pendentes','no Para ti')
-    + gates.map(g=>{ const acc=g.accept||{};
-        const href = acc.nav || acc.href || (g.thread_root?filaThread(g.thread_root):'/para-ti');
+    + gates.map(g=>{
+        const href = g.key ? '/para-ti?item='+encodeURIComponent(g.key)
+                           : (g.thread_root?filaThread(g.thread_root):'/para-ti');
         return '<a class="lrow" href="'+esc(href)+'">'
           +'<span class="gkind '+(GATEcls[g.kind]||'rever')+'">'+esc(GATEpt[g.kind]||g.kind)+'</span>'
           +'<div class="lmain"><div class="ltitle">'+esc(g.title||'')+'</div>'
@@ -224,8 +248,9 @@ function render(){
         +'<div class="lsub">'+esc(p.client_name||p.client_email||'')+'</div></div>'
         +'<span class="ststage">'+esc(p.stage||'')+'</span></a>').join('');
 
-  // ── full timeline → each message opens in the inbox report ──
-  $('#_timeline').innerHTML = seclabel('Linha do tempo', tl.length+' mensagem'+(tl.length===1?'':'s')+' · clica para ver no inbox')
+  // ── full timeline → each message opens its CONVERSATION in the Fila (or the Tratados ledger,
+  // when it was already decided) — never the legacy /inbox app. ──
+  $('#_timeline').innerHTML = seclabel('Linha do tempo', tl.length+' mensagem'+(tl.length===1?'':'s')+' · clica para abrir a conversa')
     + '<ul class="timeline list" style="padding:0 14px">'
     + tl.slice().reverse().map(item=>{          // newest-first
         const d=(item.date||'').slice(0,10);
@@ -233,7 +258,7 @@ function render(){
         const att=item.has_attachment?' 📎':'';
         const pur=item.purpose?' <span class="tp">· '+esc(purposeLabel(item.purpose))+'</span>':'';
         return '<li class="titem"><span class="td">'+esc(d)+'</span>'
-          +'<a class="tc tclick" href="'+inboxEmail(item.message_id)+'" title="ver no inbox">'
+          +'<a class="tc tclick" href="'+filaThread(item.thread_root||item.message_id)+'" title="abrir a conversa na Fila">'
           +'<span class="tdir" style="color:'+dir.c+'">'+esc(dir.t)+'</span>'
           +esc(item.subject||'(sem assunto)')+pur+att+'</a></li>';
       }).join('')+'</ul>';
@@ -243,12 +268,11 @@ function onKey(e){}
 function paletteItems(q){
   const items=[
     {kind:'ação',label:'← Contrapartes',run:()=>{location.href='/contrapartes';}},
-    {kind:'ação',label:'Histórico completo (inbox)',run:()=>{location.href=inboxContact(st.primary_email||(cl.emails||[''])[0]);}},
     {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
-  (cl.emails||[]).forEach(e=>items.push({kind:'email',label:e,sub:'histórico no inbox',run:()=>{location.href=inboxContact(e);}}));
+  (cl.emails||[]).forEach(e=>items.push({kind:'email',label:e,sub:'threads na Fila',run:()=>{location.href=filaSearch(e);}}));
   proj.forEach(p=>items.push({kind:'projeto',label:p.title||p.project_id,sub:p.stage,run:()=>{location.href='/projetos/'+encodeURIComponent(p.project_id);}}));
   return (q=q.toLowerCase().trim())?items.filter(it=>(it.label+' '+(it.sub||'')+' '+it.kind).toLowerCase().includes(q)):items;
 }

@@ -74,22 +74,34 @@ def _coerce_fields(raw: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def extract_fields_strict(text: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
+    """:func:`extract_fields`, but a failed call **raises** ``llm.LLMError`` instead of degrading.
+
+    Same contract otherwise, including the empty result for no text / no client (nothing was attempted,
+    so nothing failed). Exists for the widened project re-extraction (ADR-026), which reads a whole
+    timeline in one pass and must be able to tell "this note held no spec values" apart from "the model
+    could not read this note" — collapsing the two would report a silent failure as a clean run.
+    The capture path keeps the degrading wrapper: there, a dead LLM must never cost the user a capture.
+    """
+    if not (text or "").strip() or client is None:
+        return {"fields": {}, "confidence": 0.0}
+    raw = llm.call(client, cfg, _EXTRACT_SYSTEM, text,
+                   schema=GEMINI_CAPTURE_FIELDS_SCHEMA, tool=CAPTURE_FIELDS_TOOL)
+    raw = raw if isinstance(raw, dict) else {}
+    fields = _coerce_fields(raw)
+    return {"fields": fields, "confidence": _clamp01(raw.get("confidence")) if fields else 0.0}
+
+
 def extract_fields(text: str, client: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     """Extract the job-spec field VALUES explicitly stated in a capture's text/transcript.
 
     Returns ``{"fields": {project_field_addr: value}, "confidence": 0-1}``. The fields are coerced (only
     known keys, trimmed, addressed); they are STORED for the user to validate one-by-one — never applied
     here. Degrades to ``{"fields": {}, "confidence": 0.0}`` on no text / no client / any ``LLMError``."""
-    if not (text or "").strip() or client is None:
-        return {"fields": {}, "confidence": 0.0}
     try:
-        raw = llm.call(client, cfg, _EXTRACT_SYSTEM, text,
-                       schema=GEMINI_CAPTURE_FIELDS_SCHEMA, tool=CAPTURE_FIELDS_TOOL)
+        return extract_fields_strict(text, client, cfg)
     except llm.LLMError:
         return {"fields": {}, "confidence": 0.0}
-    raw = raw if isinstance(raw, dict) else {}
-    fields = _coerce_fields(raw)
-    return {"fields": fields, "confidence": _clamp01(raw.get("confidence")) if fields else 0.0}
 
 
 def infer_project(text: str, active_projects: list[dict[str, Any]], client: Any,

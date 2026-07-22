@@ -16,13 +16,29 @@ from typing import Any
 
 from .accounts import AccountCluster
 from .schema import HIGH_VALUE_PURPOSES
+from .signals import NO_REPLY_RE
 
 # Confidence below this → surface for human review (mirrors schema's IGNORE floor).
 CONFIDENCE_FLOOR: float = 0.60
 
 
+def item_key(item: dict[str, Any]) -> str:
+    """The stable content key of a decision item — MUST mirror the JS ``itemKey`` in para_ti_page
+    exactly (``kind|thread_root-or-email-or-title``), because dismissals are persisted under this
+    key from the browser and filtered here on the next build. A drift between the two silently
+    resurrects every dismissal."""
+    return (item.get("kind") or "") + "|" + (
+        item.get("thread_root") or item.get("email") or item.get("title") or "")
+
+
 def _thread_context(r: dict[str, Any]) -> dict[str, Any]:
-    """Thread context pulled from a Fila row — the information a human needs to act."""
+    """Thread context pulled from a Fila row — the information a human needs to act.
+
+    Carries the *action handles* too (``message_id``, the ``auto`` verdict, owners, the project the
+    thread already belongs to). Reclassification is keyed by message, not thread, so without
+    ``message_id`` the decision can only be judged here and must be acted on elsewhere — which is
+    the round-trip ADR-024 exists to remove.
+    """
     clock = r.get("clock") or {}
     trust = r.get("trust") or {}
     return {
@@ -36,6 +52,12 @@ def _thread_context(r: dict[str, Any]) -> dict[str, Any]:
         "reason": trust.get("reason") or "",         # AI's one-line summary of the email
         "confidence": trust.get("confidence") or 0.0,
         "decided_by": trust.get("decided_by") or "",
+        # -- action handles (ADR-024) --------------------------------------------------------
+        "message_id": r.get("message_id") or "",     # reclassify is per-message
+        "auto": dict(r.get("auto") or {}),           # the pre-correction verdict, for "↺ auto"
+        "owners": list(r.get("owners") or []),
+        "project": r.get("project") or None,
+        "subject": r.get("subject") or "",
     }
 
 
@@ -91,6 +113,13 @@ def propose_project_items(
             continue
         cp = r.get("counterparty") or ""
         if cp not in {"CLIENT", "LEAD"}:
+            continue
+        # Junk gate: an automated sender (mailer-daemon bounce, no-reply notification) must never be
+        # proposed as a client project — a bounce classified ESTIMATE_REQUEST by content is machine
+        # mail, not a lead. Deterministic sender check only (signals.NO_REPLY_RE, the same pattern
+        # Tier-0 uses); the thread itself STAYS in the Fila — nothing is binned, we just don't put a
+        # green "Criar projeto" button on top of a delivery-failure notice.
+        if NO_REPLY_RE.search(r.get("contact") or ""):
             continue
         items.append({
             "kind": "propor_projeto",
@@ -175,10 +204,24 @@ def all_items(
     project_threads: set[str],
     *,
     confidence_floor: float = CONFIDENCE_FLOOR,
+    dismissed: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Convenience: all three gates concatenated, ordered by kind priority."""
-    return (
+    """Convenience: all three gates concatenated, ordered by kind priority.
+
+    ``dismissed`` — persisted "Ignorar" keys (``Workspace.para_ti_dismissed()``); a dismissed item is
+    dropped here so it stays gone across reloads. Each surviving item carries its ``key`` so the UI
+    can dismiss/undo against the exact key this filter will honour next build."""
+    items = (
         low_confidence_items(fila_rows, floor=confidence_floor)
         + propose_project_items(fila_rows, project_threads)
         + identity_candidate_items(clusters)
     )
+    skip = dismissed or set()
+    out = []
+    for it in items:
+        k = item_key(it)
+        if k in skip:
+            continue
+        it["key"] = k
+        out.append(it)
+    return out

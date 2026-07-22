@@ -102,7 +102,7 @@ def test_events_are_appended_not_current_values(tmp_path):
     store = p.ProjectStore(ws._conn)
     pid = store.create("A")
     store.add_event(pid, "decision", "avançar em inox", channel="call",
-                    asserted_by="Pedro", acquired_at="2026-06-13")
+                    asserted_by="Diogo", acquired_at="2026-06-13")
     store.add_event(pid, "note", "cliente sem pressa", channel="meeting", acquired_at="2026-06-12")
     # events live in history only, never as a current field value
     assert store.fields_for(pid) == {}
@@ -133,7 +133,7 @@ def _make_v3_db(path):
     c.execute("INSERT INTO projects(project_id,title,stage,created_ts,updated_ts)"
               " VALUES ('p-0001','Velho','LEAD','2026-06-01','2026-06-01')")
     c.execute("INSERT INTO thread_state(thread_root,owner,handled,updated_ts)"
-              " VALUES ('t1','Pedro',0,'2026-06-01')")          # a pre-v4 single owner
+              " VALUES ('t1','Diogo',0,'2026-06-01')")          # a pre-v4 single owner
     c.execute("INSERT INTO thread_state(thread_root,owner,handled,updated_ts)"
               " VALUES ('t2','',1,'2026-06-01')")                # handled, no owner
     c.execute("PRAGMA user_version = 3")
@@ -153,21 +153,21 @@ def test_v3_to_v4_adds_closeout_columns_and_backfills_single_owner(tmp_path):
     assert {"close_party", "close_reason", "closed_at"} <= _cols(conn, "projects")
 
     # the single owner is carried forward into the multi-owner join table — no Fila assignment lost
-    assert ws.thread_owners() == {"t1": ["Pedro"]}
+    assert ws.thread_owners() == {"t1": ["Diogo"]}
     st = ws.thread_states()
-    assert st["t1"]["owners"] == ["Pedro"] and st["t1"]["owner"] == "Pedro"   # legacy single still readable
+    assert st["t1"]["owners"] == ["Diogo"] and st["t1"]["owner"] == "Diogo"   # legacy single still readable
     assert st["t2"]["owners"] == [] and st["t2"]["handled"] is True           # handled-only thread survives
     ws.close()
 
 
 def test_multi_owner_thread_roundtrip(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
-    ws.set_thread_owners("t1", ["Pedro", "Rita", "Pedro", " "])   # de-dupes + trims blanks
-    assert ws.thread_owners()["t1"] == ["Pedro", "Rita"]
-    ws.add_thread_owner("t1", "Filipe")
-    assert set(ws.thread_owners()["t1"]) == {"Pedro", "Rita", "Filipe"}
-    ws.remove_thread_owner("t1", "Pedro")
-    assert set(ws.thread_owners()["t1"]) == {"Rita", "Filipe"}
+    ws.set_thread_owners("t1", ["Diogo", "Marta", "Diogo", " "])   # de-dupes + trims blanks
+    assert ws.thread_owners()["t1"] == ["Diogo", "Marta"]
+    ws.add_thread_owner("t1", "Bruno")
+    assert set(ws.thread_owners()["t1"]) == {"Diogo", "Marta", "Bruno"}
+    ws.remove_thread_owner("t1", "Diogo")
+    assert set(ws.thread_owners()["t1"]) == {"Marta", "Bruno"}
     ws.set_thread_owners("t1", [])                                 # clear
     assert "t1" not in ws.thread_owners()
     ws.close()
@@ -228,7 +228,7 @@ def test_v4_to_v5_adds_capture_tables_and_preserves_projects(tmp_path):
     # a capture round-trips through the new store (would raise "no such table" if SCHEMA was not updated)
     cap = CaptureStore(conn)
     cid, created = cap.add(telegram_message_id=11, telegram_chat_id=99, raw_text="prazo 30 jun",
-                           channel="call", asserted_by="Pedro")
+                           channel="call", asserted_by="Diogo")
     assert created is True and cid == "c-99-11"
     assert [c["capture_id"] for c in cap.list_pending()] == ["c-99-11"]
     ws.close()
@@ -325,7 +325,7 @@ def test_v6_to_v7_adds_inference_columns_and_roundtrips(tmp_path):
     ws = Workspace(db).connect()
     conn = ws._conn
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     assert {"extracted_fields_json", "confidence"} <= _cols(conn, "captures")
 
     cap = CaptureStore(conn)
@@ -338,6 +338,32 @@ def test_v6_to_v7_adds_inference_columns_and_roundtrips(tmp_path):
     got = cap.get("c-99-11")
     assert got["extracted_fields"] == {"deadline": "2026-07-01", "material#0": "inox 304"}
     assert got["confidence"] == 0.9
+    ws.close()
+
+
+def test_v7_to_v8_adds_dismissals_and_names_tables_and_roundtrips(tmp_path):
+    """v8 delivers para_ti_dismissals + counterparty_names as NEW TABLES (SCHEMA's CREATE IF NOT
+    EXISTS, no ALTER). A populated pre-v8 DB must gain both, and the accessors must round-trip —
+    a dismissal that does not survive reconnect is exactly the resurrect-on-reload bug v8 fixes."""
+    db = tmp_path / "workspace.db"
+    _make_v6_db(db)   # any pre-v8 DB exercises the same additive path
+
+    ws = Workspace(db).connect()
+    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+
+    # dismissals: persist → survive a reconnect → undo removes
+    ws.dismiss_para_ti("propor_projeto|t-root-1", kind="propor_projeto")
+    ws.close()
+    ws = Workspace(db).connect()
+    assert "propor_projeto|t-root-1" in ws.para_ti_dismissed()
+    ws.undismiss_para_ti("propor_projeto|t-root-1")
+    assert ws.para_ti_dismissed() == {}
+
+    # counterparty names: set → read; empty name resets to automatic
+    ws.set_counterparty_name("nif:274023911", "Tempus Lda")
+    assert ws.counterparty_names() == {"nif:274023911": "Tempus Lda"}
+    ws.set_counterparty_name("nif:274023911", "")
+    assert ws.counterparty_names() == {}
     ws.close()
 
 

@@ -10,7 +10,7 @@ Results feed ``jobspec.build_jobspec(..., draft=...)`` with source ``llm``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from . import llm
 from .schema import (GEMINI_SPEC_SCHEMA, SPEC_ITEM_KEYS, SPEC_JOB_KEYS,
@@ -64,12 +64,16 @@ def coerce_spec(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def draft(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any]) -> dict[str, Any]:
+def draft(env: dict[str, Any], playbook: str, client: Any, settings: dict[str, Any], *,
+          tier: Optional[str] = None) -> dict[str, Any]:
     """Draft the semantic spec for one (job-relevant) email. Returns coerced {key: str|None}.
 
     ``env`` may carry ``attachment_texts``/``attachment_images`` (from ``envelope.attachment_media``);
-    the images are passed as multimodal input so the model can read drawing attachments directly."""
-    raw = llm.call(client, settings["llm"], playbook, build_spec_message(env),
+    the images are passed as multimodal input so the model can read drawing attachments directly.
+
+    ``tier`` (keyword-only, see :func:`llm.with_tier`) picks a heavier or cheaper model for THIS call
+    only — used by the on-demand re-extract. ``None`` keeps the configured default."""
+    raw = llm.call(client, llm.with_tier(settings["llm"], tier), playbook, build_spec_message(env),
                    schema=GEMINI_SPEC_SCHEMA, tool=SPEC_TOOL,
                    images=(env.get("attachment_images") or None))
     return coerce_spec(raw)

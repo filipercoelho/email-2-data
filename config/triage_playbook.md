@@ -28,12 +28,12 @@ which date is the deadline, resolving relative dates yourself.
 - **BULK** — newsletter / marketing / mass promotion.
 - **OTHER** — none of the above.
 
-**Decide by the body, not the domain.** Vision Box / Amadeus is a CLIENT despite its domain; Spandex
+**Decide by the body, not the domain.** TravelCo is a CLIENT despite its domain; Laminex
 is a SUPPLIER. The `known_counterparty_hint` is a prior only — if the body contradicts it, follow the body.
 
 ### Outbound emails (direction=outbound) — the sender is always Lindo; classify by the RECIPIENT
 
-When `direction=outbound` the email is from Lindo's **Sent folder** — Pedro, Rita, or a colleague
+When `direction=outbound` the email is from Lindo's **Sent folder** — Diogo, Marta, or a colleague
 wrote it. The sender address is always `@lindoservico.pt`, so it tells you nothing about counterparty.
 **Classify by who Lindo is writing TO** (look at the To:/recipient, the subject, and the body):
 
@@ -87,8 +87,12 @@ disappointment while seeking alternatives — only for a courteous, definitive c
 
 ## entities (null if absent)
 
-`client_name`, `client_email`, `deadline` (ISO `YYYY-MM-DD`; use the Received date in the input to
-resolve "até sexta"/"quinta"; null if not resolvable), `money`, `product_or_service`, `action_requested`.
+`client_name`, `client_email`, `deadline`, `money`, `product_or_service`, `action_requested`.
+
+`deadline` — ISO `YYYY-MM-DD`; use the Received date in the input to resolve "até sexta"/"quinta";
+null if not resolvable. Use the longer `YYYY-MM-DDTHH:MM` **only when the message states a time of
+day** ("entrega até às 14h de dia 12" → `2026-06-12T14:00`). Never invent an hour to fill the longer
+shape: a bare date is the correct, complete answer when no hour was given.
 
 ## reason
 
@@ -109,11 +113,11 @@ rules — be specific.
    "product_or_service":"corte laser acrílico 3mm, 50 peças","action_requested":"enviar orçamento"}}
 ```
 
-**Supplier confirming our order (Spandex / Oraguard)**
+**Supplier confirming our order (Laminex / Oraguard)**
 > Assunto: RES: Encomenda Oraguard 210 · "confirmamos o envio do material encomendado…"
 ```json
 {"counterparty":"SUPPLIER","purpose":"SUPPLIER_REPLY_OR_CONFIRMATION","urgency":40,"confidence":0.9,
- "reason":"Fornecedor (Spandex) confirma a NOSSA encomenda de Oraguard.","entities":{}}
+ "reason":"Fornecedor (Laminex) confirma a NOSSA encomenda de Oraguard.","entities":{}}
 ```
 
 **Ambiguous lead — do NOT bin**
@@ -127,20 +131,20 @@ rules — be specific.
 > `looks_forwarded=yes` · Assunto: FW: PO 2260101306 · body quotes an external client's purchase order
 ```json
 {"counterparty":"CLIENT","purpose":"PO_FROM_CLIENT","urgency":75,"confidence":0.85,
- "reason":"Reencaminhamento interno de uma PO de cliente (Vision Box) — conta como CLIENT.","entities":{}}
+ "reason":"Reencaminhamento interno de uma PO de cliente (TravelCo) — conta como CLIENT.","entities":{}}
 ```
 
 **Outbound proposal to a client (direction=outbound, sender is Lindo)**
-> `direction=outbound` · From: pedro@lindoservico.pt · To: contacto@panavideo.pt
-> Assunto: Proposta de Orçamento - Acrescento de Palco - Panavideo
+> `direction=outbound` · From: diogo@lindoservico.pt · To: contacto@eventco-example.pt
+> Assunto: Proposta de Orçamento - Acrescento de Palco - EventCo
 > "Exmo. Sr., conforme solicitado enviamos proposta para acrescento de palco…"
 ```json
 {"counterparty":"CLIENT","purpose":"FOLLOW_UP","urgency":50,"confidence":0.9,
- "reason":"Email da Sent box enviado pela Lindo ao cliente Panavideo com proposta de orçamento. direction=outbound: classificar pelo destinatário (cliente), não pelo remetente (@lindoservico.pt).","entities":{"client_name":"Panavideo","product_or_service":"acrescento de palco"}}
+ "reason":"Email da Sent box enviado pela Lindo ao cliente EventCo com proposta de orçamento. direction=outbound: classificar pelo destinatário (cliente), não pelo remetente (@lindoservico.pt).","entities":{"client_name":"EventCo","product_or_service":"acrescento de palco"}}
 ```
 
 **Outbound quote request to a supplier (direction=outbound, sender is Lindo)**
-> `direction=outbound` · From: pedro@lindoservico.pt · To: geral@ramofabril.pt
+> `direction=outbound` · From: diogo@lindoservico.pt · To: geral@ferragens-example.pt
 > Assunto: Pedido de Orçamento - perfis alumínio
 > "Bom dia, precisamos de cotação para 20m de perfil alumínio 40x40…"
 ```json
@@ -149,7 +153,7 @@ rules — be specific.
 ```
 
 **Lindo declines a job (direction=outbound, we refused)**
-> `direction=outbound` · From: orcamentos@lindoservico.pt · To: comunicacao@genesisdentalclinics.pt
+> `direction=outbound` · From: orcamentos@lindoservico.pt · To: comunicacao@cliente-exemplo.pt
 > Assunto: RE: pedido de cotação para produção de mascote
 > "Olá boa tarde, infelizmente não conseguimos produzir o que solicitou. Recomendamos que contacte…"
 ```json
@@ -158,7 +162,7 @@ rules — be specific.
 ```
 
 **Client closes conversation after our reply (inbound thank-you/closure)**
-> From: comunicacao@genesisdentalclinics.pt · To: orcamentos@lindoservico.pt
+> From: comunicacao@cliente-exemplo.pt · To: orcamentos@lindoservico.pt
 > Assunto: RE: pedido de cotação para produção de mascote
 > "Bom dia, agradeço a vossa atenção ao pedido e resposta. E agradeço a sugestão. Continuação de boa semana!"
 ```json

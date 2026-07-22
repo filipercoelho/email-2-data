@@ -109,3 +109,89 @@ def test_expired_cache_is_evicted_and_retried_uncached():
     assert getattr(calls[0], "cached_content", None)                       # first attempt used the cache
     assert getattr(calls[-1], "system_instruction", None) == system        # retry dropped it
     assert llm._gemini_cache_key(_cfg(), system) not in llm._GEMINI_CACHE  # and evicted the dead entry
+
+
+# ── llm.with_tier: per-call model overrides ──────────────────────────────────────────────────────
+#
+# A tier lets ONE call (the on-demand re-extract) pay for a heavier model without repointing the rest
+# of the process. ``settings`` is shared process state, so the copy is the whole point.
+
+TIERS = {
+    "light": {"model": "gemini-2.5-flash-lite", "max_tokens": 1024, "thinking_budget": 0},
+    "standard": {"model": "gemini-2.5-flash", "max_tokens": 1024, "thinking_budget": 0},
+    "heavy": {"model": "gemini-2.5-pro", "max_tokens": 8192, "thinking_budget": 4096},
+}
+
+
+def _settings():
+    return {"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash", "max_tokens": 1024,
+                    "max_retries": 5, "tiers": TIERS}}
+
+
+def test_with_tier_returns_a_copy_and_never_mutates_the_shared_settings():
+    settings = _settings()
+    cfg = settings["llm"]
+    heavy = llm.with_tier(cfg, "heavy")
+    assert heavy["model"] == "gemini-2.5-pro"
+    assert settings["llm"]["model"] == "gemini-2.5-flash"       # the shared dict is untouched
+    assert cfg["max_tokens"] == 1024 and settings["llm"]["tiers"] is TIERS
+    assert heavy is not cfg
+    heavy["model"] = "scribbled"                                # and the copy is not a shallow alias
+    assert settings["llm"]["model"] == "gemini-2.5-flash"
+
+
+def test_heavy_tier_applies_model_max_tokens_and_thinking_budget():
+    heavy = llm.with_tier(_settings()["llm"], "heavy")
+    assert heavy["model"] == "gemini-2.5-pro"
+    assert heavy["max_tokens"] == 8192
+    assert heavy["thinking_budget"] == 4096
+    assert heavy["provider"] == "vertex_gemini"                 # non-tier keys carry over
+
+
+def test_light_tier_downgrades_the_model():
+    assert llm.with_tier(_settings()["llm"], "light")["model"] == "gemini-2.5-flash-lite"
+
+
+@pytest.mark.parametrize("tier", [None, "", "nonexistent", "HEAVY"])
+def test_unknown_or_absent_tier_is_a_no_op(tier):
+    """An unknown tier must never be a surprise model switch — it keeps the configured default."""
+    cfg = _settings()["llm"]
+    assert llm.with_tier(cfg, tier)["model"] == "gemini-2.5-flash"
+    assert llm.with_tier(cfg, tier)["max_tokens"] == 1024
+
+
+def test_with_tier_on_a_config_without_tiers_is_a_no_op():
+    assert llm.with_tier(_cfg(), "heavy")["model"] == "gemini-2.5-flash"
+
+
+def test_cache_key_differs_per_tier_so_two_models_cannot_share_a_prefix():
+    cfg = _settings()["llm"]
+    system = "PLAYBOOK " * 50
+    keys = {llm._gemini_cache_key(llm.with_tier(cfg, t), system) for t in ("light", "standard", "heavy")}
+    assert len(keys) == 3
+    assert llm._gemini_cache_key(llm.with_tier(cfg, "standard"), system) == llm._gemini_cache_key(cfg, system)
+
+
+def test_thinking_budget_flows_from_cfg_and_defaults_to_zero():
+    client = FakeClient()
+    llm.call(client, _cfg(context_cache=False), "sys", "u", text=True)
+    assert client.models.calls[0].thinking_config.thinking_budget == 0    # default when unset
+
+    client = FakeClient()
+    heavy = llm.with_tier(_settings()["llm"], "heavy")
+    heavy.update(context_cache=False, max_retries=1)
+    llm.call(client, heavy, "sys", "u", text=True)
+    cfg_obj = client.models.calls[0]
+    assert cfg_obj.thinking_config.thinking_budget == 4096
+    assert cfg_obj.max_output_tokens == 8192
+
+
+def test_tier_model_is_the_one_actually_sent_to_the_provider():
+    client = FakeClient()
+    models: list[str] = []
+    client.models.generate_content = lambda *, model, contents, config: (
+        models.append(model) or _Resp())
+    heavy = llm.with_tier(_settings()["llm"], "heavy")
+    heavy.update(context_cache=False, max_retries=1)
+    llm.call(client, heavy, "sys", "u", text=True)
+    assert models == ["gemini-2.5-pro"]

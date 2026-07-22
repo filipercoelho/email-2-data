@@ -1,12 +1,12 @@
 """Knowledge store (SQLite) — Phase 2 lean: the hand-curated gazetteer.
 
 Per the red-teamed plan, the ONE thing worth maintaining at this scale is an exact-match
-``key -> counterparty`` map that encodes irreplaceable business facts (corticoenetos = CLIENT,
-Spandex = SUPPLIER). It is a **hint/prior attached to the LLM call — never a short-circuit** (the body
+``key -> counterparty`` map that encodes irreplaceable business facts (cork-example = CLIENT,
+Laminex = SUPPLIER). It is a **hint/prior attached to the LLM call — never a short-circuit** (the body
 always overrides; a sender can flip roles). The learning loop (reputation decay, verdict cache,
 exemplars, thread state) is Phase 4 and intentionally not built yet.
 
-A ``key`` is either a **full email** (``joao@gmail.com``) or a **domain** (``spandex.com``). Email keys
+A ``key`` is either a **full email** (``joao@gmail.com``) or a **domain** (``laminex.com``). Email keys
 matter for free-mail senders (gmail/sapo/hotmail/live) where the domain says nothing about the person —
 that gap caused a real misclassification in testing. ``lookup`` resolves most-specific first:
 exact email → exact domain → registrable parent domain.

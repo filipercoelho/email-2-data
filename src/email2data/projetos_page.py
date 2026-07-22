@@ -20,7 +20,8 @@ from . import jobspec as _js
 # Serialize the ONE field registry to the page so labels/questions/tiers/scope
 # all come from jobspec (no hand-maintained JS copy to drift out of sync).
 _FIELDS = [
-    {"key": k, "label": lbl, "tier": tier, "q": q, "scope": scope}
+    {"key": k, "label": lbl, "tier": tier, "q": q, "scope": scope,
+     "input": _js.INPUT_TYPE.get(k, "text")}
     for k, lbl, tier, q, scope in _js.FIELDS
 ]
 
@@ -35,6 +36,9 @@ _BODY = """
   <div id="_detail" class="hidden"></div>
 </div>
 <style>
+  .prename{border:1px solid var(--bd);background:var(--card);color:var(--mut);border-radius:8px;
+    width:26px;height:26px;cursor:pointer;font-size:12px;line-height:1;vertical-align:3px}
+  .prename:hover{border-color:var(--ac);color:var(--ac)}
   .pstage{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap}
   .pstage .st{padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid var(--bd);color:var(--mut);cursor:pointer}
   .pstage .st.on{background:var(--int);color:#fff;border-color:var(--int)}
@@ -58,6 +62,21 @@ _BODY = """
   .frow.miss-must .finput{border-color:#f3c9c9;background:#fffafa}
   .frow.miss-opt .finput{border-color:var(--bd);background:#fbfbfc;border-style:dashed}
   .finput::placeholder{color:var(--mut2);font-style:italic}
+  /* Native date picker: WebKit gives date inputs their own intrinsic width/height and inner padding,
+     which breaks the row rhythm next to the text inputs — pin them back to the .finput box. */
+  .finput[type=date],.finput[type=datetime-local]{-webkit-appearance:none;appearance:none;height:30px;line-height:16px}
+  .finput[type=date]::-webkit-datetime-edit,.finput[type=datetime-local]::-webkit-datetime-edit{padding:0}
+  .finput[type=date]::-webkit-calendar-picker-indicator,
+  .finput[type=datetime-local]::-webkit-calendar-picker-indicator{cursor:pointer;opacity:.55}
+  .finput[type=date]:hover::-webkit-calendar-picker-indicator,
+  .finput[type=datetime-local]:hover::-webkit-calendar-picker-indicator{opacity:1}
+  /* An empty picker shows the browser's own dd/mm/yyyy hint instead of our ::placeholder — mute it to
+     match. Keyed off the row's empty-state class, NOT :invalid: the field isn't `required`, so an
+     empty picker is perfectly valid and :invalid would never match. */
+  .frow.miss-must .finput[type=date]:not(:focus)::-webkit-datetime-edit,
+  .frow.miss-opt  .finput[type=date]:not(:focus)::-webkit-datetime-edit,
+  .frow.miss-must .finput[type=datetime-local]:not(:focus)::-webkit-datetime-edit,
+  .frow.miss-opt  .finput[type=datetime-local]:not(:focus)::-webkit-datetime-edit{color:var(--mut2)}
   /* brief confirmation that an inline edit committed (data-entry feedback) */
   .frow.saved .finput{animation:savedflash .9s ease}
   @keyframes savedflash{0%{box-shadow:0 0 0 3px #d1fae5}100%{box-shadow:none}}
@@ -85,6 +104,20 @@ _BODY = """
   .origem .tmsg:last-child{border-bottom:none}
   .hint2{color:var(--mut2);font-size:12.5px;padding:9px 2px}
   .dwarn{background:#fff7ed;border:1px solid #fed7aa;color:#b45309;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
+  /* re-extração (ADR-025 §4) */
+  .rexbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+  .rexbar select{border:1px solid var(--bd);border-radius:8px;padding:4px 8px;font-size:12.5px;
+    color:var(--tx);background:var(--card);font-family:inherit}
+  .rexbar select:focus{border-color:var(--ac);outline:none}
+  .rexbar button[disabled]{opacity:.55;cursor:default}
+  .rexnote{padding-top:2px}
+  .rexres{border:1px solid var(--bd);background:#fbfcfe;border-radius:10px;padding:9px 12px;margin:6px 0 10px}
+  .rexres.bad{border-color:#f3c9c9;background:#fbeaea}
+  .rexres .rexh{font-size:12.5px;font-weight:680}
+  .rexres.bad .rexh{color:var(--red)}
+  .rexres .rexsub{font-size:11.5px;color:var(--mut);margin-top:3px}
+  .rexerrs{margin:6px 0 0;padding-left:18px;font-size:11.5px;color:#7a2a2a}
+  .rexerrs code{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all}
   /* perguntas / ask */
   .qs li{margin-bottom:6px;font-size:13px;color:#3a4150}
   .qmail{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
@@ -108,6 +141,17 @@ _BODY = """
   .custq .rm:hover{color:var(--red)}
   .addq{border:1px dashed var(--bd);background:#fff;border-radius:8px;padding:5px 11px;cursor:pointer;font-size:12px;color:var(--mut);font-weight:600;margin-top:4px}
   .addq:hover{border-color:var(--ac);color:var(--ac);background:#f6f8ff}
+  /* ── purpose selector + per-purpose inputs (ADR-031) ── */
+  .psel{display:flex;align-items:center;gap:8px;margin:10px 0}
+  .psel label{flex:0 0 auto;font-size:12px;color:var(--mut)}
+  .psel select{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx);cursor:pointer}
+  .psel select:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .reasonsel{width:100%;box-sizing:border-box;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx);cursor:pointer;margin-bottom:8px}
+  .reasonsel:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .notebox{width:100%;box-sizing:border-box;min-height:90px;border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
+  .notebox:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .factschip{font-size:11.5px;color:var(--mut);margin:8px 0;min-height:1px}
+  .factschip .fv{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:6px;padding:1px 7px;margin:2px 3px 0 0;font-weight:600}
   .draftbox{margin-top:14px}
   .draftbox .dl{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;min-height:22px}
   .draftbox .dl h4{margin:0;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);font-weight:700}
@@ -116,6 +160,29 @@ _BODY = """
   .draftbox .dirty .regen:hover{background:#ffedd5}
   .draftbox textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
   .draftbox textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  /* ── AI polish (ADR-027) — visually SUBORDINATE to the draft above it: the deterministic text is
+     the product, this is an offer sitting beside it until the user adopts it. ── */
+  .aibar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .aibar select{border:1px solid var(--bd);border-radius:8px;padding:4px 8px;font-size:12.5px;
+    background:#fff;color:var(--tx);cursor:pointer}
+  .aibar select:focus{border-color:var(--ac);outline:none}
+  .aibar .hint2{margin:0}
+  .act-btn.ai{border-color:#c7d2fe;color:#4338ca;background:#eef2ff}
+  .act-btn.ai:hover{background:#e0e7ff}
+  .act-btn.ai[disabled]{opacity:.55;cursor:default}
+  .airesult{margin-top:12px;border:1px solid #c7d2fe;border-radius:10px;padding:11px 13px;background:#f8f9ff}
+  .airesult.bad{border-color:#f3c9c9;background:#fbeaea}
+  .airesult .aih{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#4338ca;font-weight:700;margin-bottom:7px}
+  .airesult.bad .aih{color:var(--red)}
+  .airesult .aih .c{text-transform:none;letter-spacing:0;color:var(--mut2);font-weight:500}
+  .airesult textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;
+    padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
+  .airesult textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .airesult .qmail{margin-top:9px}
+  .aiok{font-size:11.5px;color:var(--gr,#15803d);margin-bottom:7px}
+  .aiwarn{font-size:11.5px;color:#b45309;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;
+    padding:7px 10px;margin-bottom:7px}
+  .aiwarn ul{margin:5px 0 0;padding-left:18px}
   /* ── tab strip (ADR-015 — only the active panel shows; keeps the page from being one long wall) ── */
   .ptabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--bd);margin:14px 0 0}
   .ptab-btn{border:none;background:none;padding:8px 12px;font-size:12.5px;font-weight:600;color:var(--mut);
@@ -208,6 +275,20 @@ const CLOSED_STAGES = new Set(['CANCELLED','LOST']);     // carry a close-out (p
 const STAGEpt = {LEAD:'Lead',GATHERING:'A reunir',ESTIMABLE:'Orçamentável',QUOTED:'Orçamentado',WON:'Ganho',LOST:'Perdido',CANCELLED:'Cancelado',ARCHIVED:'Arquivado'};
 const PARTYpt = {client:'Cliente',supplier:'Fornecedor',our:'Nós'};
 
+/* ── scoped re-extraction (ADR-025 §4) ────────────────────────────────────
+   Tier = which model re-reads THIS project's emails. Values are the llm.tiers keys in
+   settings.json; the labels are pt-PT. Default 'standard' — same model as the normal sync,
+   so the obvious click is not the expensive one. */
+const TIERS = [['light','Leve · custo baixo'],['standard','Normal · custo médio'],['heavy','Profundo · custo alto']];
+let reTier = 'standard', reBusy = false;
+// The email polish (ADR-027) picks its tier independently: it is one short call, so 'standard' being
+// the obvious click here costs nothing like a whole-project reprocess at the same tier.
+let aiTier = 'standard';
+// Output languages for the client email (ADR-032). PT is deterministic; EN/FR/ES are produced by the
+// polish pass translating the PT draft (numbers stay verbatim; the result is marked review-required).
+const LANGS = [['pt','Português'],['en','English'],['fr','Français'],['es','Español']];
+function langLabel(c){const x=LANGS.find(l=>l[0]===c);return x?x[1]:(c||'Português');}
+
 /* ── field registry (from jobspec.FIELDS — single source of truth) ────── */
 const byKey = {}; FIELDS.forEach(f=>byKey[f.key]=f);
 const JOB_F  = FIELDS.filter(f=>f.scope==='job'  && f.tier!=='context');
@@ -245,11 +326,15 @@ function renderList(){
   if(focus>=projects.length) focus=Math.max(0,projects.length-1);
   $('#_list').innerHTML=projects.map((p,i)=>{
     const cov=p.coverage||0, est=p.estimable||false;
+    /* WHO the project is for, never a bare enum: a client_name that is just the counterparty enum
+       ("LEAD") produced the unreadable "LEAD · LEAD" meta line — suppress it like the detail view
+       does, fall back to the email, and speak pt-PT for the stage. */
+    const ENUM_NM={CLIENT:1,LEAD:1,SUPPLIER:1,INTERNAL:1,BULK:1,OTHER:1};
+    const who=(p.client_name&&!ENUM_NM[p.client_name])?p.client_name:(p.client_email||'');
     return '<div class="row'+(i===focus?' on':'')+'" data-i="'+i+'" data-pid="'+esc(p.project_id)+'">'
       +ringHTML(cov,est)
       +'<div class="rmain"><div class="subj">'+esc(p.title)+'</div>'
-      +'<div class="rmeta">'+esc(p.client_name||p.client_email||'')
-      +' · '+esc(p.stage)
+      +'<div class="rmeta">'+(who?esc(who)+' · ':'')+esc(STAGEpt[p.stage]||p.stage)
       +(p.n_threads?' · '+p.n_threads+' thread'+(p.n_threads===1?'':'s'):'')+'</div></div>'
       +'</div>';
   }).join('');
@@ -283,6 +368,38 @@ function closeDetail(push){
   render();
 }
 
+/* A native date/datetime input can only *hold* a value it can parse: hand it "meados de agosto" (a
+   vague deadline the client genuinely gave, or an LLM/legacy value) and the browser silently shows an
+   empty box — on a required field that reads as "no deadline" when one exists. So a picker-typed
+   field degrades to a plain text input whenever the stored value isn't ISO-parseable, and only offers
+   the picker when it is (or when the field is empty). Never blank a value we can't render natively. */
+const _PICKERS={'date':1,'datetime-local':1};
+function _isoDate(v){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d=new Date(v+'T00:00:00Z');
+  return !isNaN(d.getTime()) && d.toISOString().slice(0,10)===v;   // rejects 2026-02-30
+}
+function _isoDateTime(v){
+  const m=/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})$/.exec(v);
+  return !!m && _isoDate(m[1]) && +m[2]<24 && +m[3]<60;
+}
+/* `deadline` accepts BOTH stored shapes — date-only (the extractor, the LLM without a stated hour,
+   and every deadline written before the clock existed) and date+time. A datetime-local field renders
+   either; a date-only field renders only the former. */
+function inputType(f, val){
+  if(!_PICKERS[f.input]) return 'text';
+  if(!val) return f.input;
+  const ok = f.input==='datetime-local' ? (_isoDate(val)||_isoDateTime(val)) : _isoDate(val);
+  return ok ? f.input : 'text';
+}
+/* A datetime-local input cannot hold a bare date, so a date-only value is widened to midnight FOR
+   DISPLAY ONLY. The store is untouched: no change event fires unless the user actually edits, so we
+   never write back a midnight nobody stated. Showing an invented 00:00 is the lesser evil — the
+   alternative is an empty box, which claims the deadline is missing. */
+function pickerValue(f, val){
+  return (inputType(f,val)==='datetime-local' && _isoDate(val)) ? val+'T00:00' : val;
+}
+
 /* ── one editable field row ───────────────────────────────────────────── */
 function fieldRow(f, addr, fobj){
   const val=(fobj&&fobj.value)||'';
@@ -294,10 +411,16 @@ function fieldRow(f, addr, fobj){
   const stcls = val ? 'filled' : (f.tier==='must' ? 'miss-must' : 'miss-opt');
   const badge=src?'<span class="fsrc s-'+esc(src)+'" title="origem do valor">'+srcLabel(src)+'</span>':'';
   const cw=conflicted?'<span class="cwarn" title="fontes de igual autoridade divergem — ver Linha do tempo">⚠</span>':'';
+  // A picker renders its own dd/mm/yyyy hint and ignores placeholder, so carry the PT clarifying
+  // question on title= instead — the question stays reachable on hover either way.
+  const ityp=inputType(f,val);
+  const hint=_PICKERS[ityp] ? 'title="'+esc(f.q||'')+'"'
+                            : 'placeholder="'+esc(f.q||'…')+'"';
   return '<div class="frow '+stcls+(conflicted?' conflict':'')+'" data-addr="'+esc(addr)+'">'
     +'<label>'+esc(f.label)+'</label>'
-    +'<div class="fctl"><input class="finput" data-addr="'+esc(addr)+'" value="'+esc(val)+'" '
-    +'placeholder="'+esc(f.q||'…')+'" autocomplete="off" spellcheck="false"/>'+chanChip(addr)+badge+cw+'</div>'
+    +'<div class="fctl"><input type="'+ityp+'" class="finput" data-addr="'+esc(addr)+'" '
+    +'value="'+esc(pickerValue(f,val))+'" '
+    +hint+' autocomplete="off" spellcheck="false"/>'+chanChip(addr)+badge+cw+'</div>'
     +'</div>';
 }
 
@@ -321,17 +444,34 @@ async function loadDraft(){
   try{
     const d=await (await fetch('/api/projects/'+selected.project_id+'/draft')).json();
     const asks=d.askables||[];
+    const reasons=d.reject_reasons||[];
     draft={to:d.to||'', subject:d.subject||'', askables:asks,
-           selected:new Set(asks.filter(a=>a.default).map(a=>a.key)),
-           custom:[], body:d.body||'', dirty:false};
+           purposes:d.purposes||[], reasons:reasons, purpose:d.purpose||'ask',
+           selected:new Set(asks.filter(a=>a.default).map(a=>a.key)), custom:[],  // questions
+           reason:reasons[0]||'', reasonNote:'',                                  // reason
+           content:'', facts:[],                                                  // text + protected tokens
+           lang:'pt',                                                             // output language (ADR-032)
+           body:d.body||'', dirty:false,
+           ai:null, aiBusy:false};   // ai = the polish result, only ever set by an explicit click
     renderComposer();
   }catch(e){ box.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao preparar o email</div>'; }
 }
 
-function composerHTML(){
+/* Per-purpose hints for the free-text box (ADR-031). The user writes the substance (costs, dates);
+   the AI polish only improves the prose and is barred from touching any number (missing_values). */
+const CONTENT_PLACEHOLDER = {
+  quote:'Ex.: 2x placa inox 2mm, corte laser — 120€\ngravação logótipo — 40€\nTOTAL — 160€\nValidade 30 dias · Prazo 10 dias úteis',
+  payment:'Ex.: Sinal de 50% — 80€\nIBAN PT50 …\nRestante 80€ na entrega',
+  approval:'Ex.: Segue a arte final em anexo. Confirmam as cores e o texto antes de produzirmos?',
+  deadline:'Ex.: Novo prazo previsto: 30/09. Motivo: rutura de material no fornecedor.',
+  ready:'Ex.: O trabalho está pronto. Recolha na oficina de 2ª a 6ª, das 9h às 18h.',
+};
+
+function purposeKind(id){ const p=(draft.purposes||[]).find(x=>x.id===id); return p?p.input_kind:'questions'; }
+
+/* the missing must-haves checklist (the original `ask` input) + custom questions */
+function askInputHTML(){
   const d=draft;
-  if(!d.askables.length)
-    return '<div class="psec"><span class="ready">✓ Todos os obrigatórios estão preenchidos.</span></div>';
   const must=d.askables.filter(a=>a.tier==='must'&&!a.internal);
   const should=d.askables.filter(a=>a.tier==='should'&&!a.internal);
   const intern=d.askables.filter(a=>a.internal);
@@ -342,36 +482,287 @@ function composerHTML(){
   const custom=d.custom.length?'<div class="askgrp"><div class="gl">As tuas perguntas</div>'
     +d.custom.map((c,i)=>'<div class="custq"><input type="checkbox" checked disabled/><span>'+esc(c)
       +'</span><button class="rm" data-ci="'+i+'" title="remover">×</button></div>').join('')+'</div>':'';
+  const empty=(!d.askables.length&&!d.custom.length)
+    ? '<div class="hint2"><span class="ready">✓ sem obrigatórios em falta</span> — adiciona uma pergunta ou muda o tipo de email.</div>' : '';
+  return empty
+    +grp('must','Em falta',must)+grp('should','Opcionais',should)+custom+grp('intern','Internos',intern)
+    +'<button class="addq" id="_addq">+ pergunta personalizada</button>';
+}
+
+/* reject: a reason chosen from the editable list + an optional free note */
+function reasonInputHTML(){
+  const d=draft;
+  const opts=(d.reasons||[]).map(r=>'<option value="'+esc(r)+'"'+(r===d.reason?' selected':'')+'>'+esc(r)+'</option>').join('');
+  return '<div class="askgrp"><div class="gl">Motivo da recusa</div>'
+    +'<select id="_reason" class="reasonsel">'+opts+'</select>'
+    +'<textarea id="_reasonnote" class="notebox" spellcheck="false" placeholder="Nota opcional para o cliente (ex.: alternativa, prazo futuro)…">'+esc(d.reasonNote||'')+'</textarea></div>';
+}
+
+/* quote / payment / approval / deadline / ready: a free-text box the user writes; the AI refines it */
+function contentInputHTML(){
+  const d=draft, ph=CONTENT_PLACEHOLDER[d.purpose]||'Escreve o conteúdo do email…';
+  return '<div class="askgrp"><div class="gl">Conteúdo — escreves tu; a IA melhora o texto mas nunca altera os números</div>'
+    +'<textarea id="_content" class="notebox" spellcheck="false" placeholder="'+esc(ph)+'">'+esc(d.content||'')+'</textarea></div>';
+}
+
+/* the money/number/date tokens the server extracted, echoed so the user sees exactly what the
+   AI polish is barred from changing. Own container id so typing can patch it without a re-render. */
+function factsInner(){
+  const f=draft.facts||[];
+  return f.length?('valores protegidos: '+f.map(v=>'<span class="fv">'+esc(v)+'</span>').join(' ')):'';
+}
+
+function composerHTML(){
+  const d=draft;
+  const kind=purposeKind(d.purpose);
+  const inputArea=kind==='reason'?reasonInputHTML():kind==='text'?contentInputHTML():askInputHTML();
+  const chip=(kind==='reason'||kind==='text')?'<div id="_factschip" class="factschip">'+factsInner()+'</div>':'';
+  const psel='<div class="psel"><label>Tipo de email</label><select id="_purpose">'
+    +(d.purposes||[]).map(p=>'<option value="'+esc(p.id)+'"'+(p.id===d.purpose?' selected':'')+'>'+esc(p.label)+'</option>').join('')
+    +'</select></div>';
   const dirty=d.dirty?'<span class="dirty">✎ editado <button class="regen" id="_regenq">Regenerar</button></span>':'';
-  return '<div class="psec"><h3>Email para o cliente <span class="c">escolhe o que perguntar, revê e copia</span></h3>'
+  return '<div class="psec"><h3>Email para o cliente <span class="c">escolhe o tipo, revê e copia</span></h3>'
     +'<div class="cmp">'
     +'<div class="hdr"><div class="to">Para: <b>'+esc(d.to||'sem email')+'</b></div>'
     +'<div class="subj"><label>Assunto</label><input id="_subj" value="'+esc(d.subject)+'" autocomplete="off" spellcheck="false"/></div></div>'
-    +grp('must','Em falta',must)
-    +grp('should','Opcionais',should)
-    +custom
-    +grp('intern','Internos',intern)
-    +'<button class="addq" id="_addq">+ pergunta personalizada</button>'
+    +psel
+    +inputArea
+    +chip
     +'<div class="draftbox"><div class="dl"><h4>Rascunho</h4>'+dirty+'</div>'
     +'<textarea id="_draftbody" spellcheck="false">'+esc(d.body)+'</textarea></div>'
+    +aiBarHTML()+aiResultHTML()
     +'<div class="qmail"><button class="act-btn" id="_copyq">Copiar email</button>'
     +'<button class="act-btn" id="_openq">Abrir no email</button></div>'
     +'</div></div>';
 }
 
+/* ── AI polish (ADR-027) ───────────────────────────────────────────────────
+   Sits ON TOP of the deterministic draft, never replacing it: the server rewrites the same body
+   through the LLM using the email thread + confirmed facts, and re-checks that every ticked question
+   survived. The result is shown BESIDE the draft — adopting it is a second, separate click, so the
+   deterministic text is never silently swapped out from under the user (ADR-013). Button only: no
+   page-load, checkbox-toggle or keystroke path reaches this. */
+function aiBarHTML(){
+  const d=draft, busy=d.aiBusy, nonPt=(d.lang&&d.lang!=='pt');
+  const hint=nonPt
+    ? 'traduz para '+esc(langLabel(d.lang))+' + melhora (os números ficam intactos; gasta tokens, 1 chamada)'
+    : 'lê a thread do cliente + os factos confirmados (gasta tokens, 1 chamada)';
+  return '<div class="aibar">'
+    +'<select id="_ailang" aria-label="Idioma do email"'+(busy?' disabled':'')+'>'
+    +  LANGS.map(l=>'<option value="'+l[0]+'"'+(l[0]===d.lang?' selected':'')+'>'+esc(l[1])+'</option>').join('')
+    +'</select>'
+    +'<select id="_aitier" aria-label="Custo do melhoramento"'+(busy?' disabled':'')+'>'
+    +  TIERS.map(t=>'<option value="'+t[0]+'"'+(t[0]===aiTier?' selected':'')+'>'+esc(t[1])+'</option>').join('')
+    +'</select>'
+    +'<button class="act-btn ai" id="_aibtn"'+(busy?' disabled':'')+'>'
+    +  (busy?'A escrever…':(nonPt?'✨ Traduzir e melhorar':'✨ Melhorar com IA'))+'</button>'
+    +'<span class="hint2">'+hint+'</span>'
+    +'</div>';
+}
+
+function aiResultHTML(){
+  const a=draft.ai;
+  if(!a) return '';
+  if(a.error) return '<div class="airesult bad"><div class="aih">✕ não deu</div>'
+    +'<div class="hint2">'+esc(a.error)+'</div></div>';
+  // The one failure that matters: for a question-email a dropped question means the client is never
+  // asked; for a money/text-email an altered number is a wrong commitment. Both block the version.
+  const isVal=(purposeKind(draft.purpose)!=='questions');
+  const n=(a.missing||[]).length, one=(n===1);
+  const kept=isVal?(a.n_facts||0):(a.n_questions||0);
+  // For a translated (non-PT) email the server checks ONLY the numbers — a translated sentence can't
+  // be verified word-for-word — so we mark it review-required and never claim question coverage.
+  const trans=a.translated
+    ? '<div class="aiwarn">🌐 traduzido para <b>'+esc(langLabel(a.lang))+'</b> — <b>revê o texto</b>: '
+      +'a tradução das frases não é verificada palavra a palavra (só os números e datas são).</div>'
+    : '';
+  let miss;
+  if(a.translated){
+    miss=n
+      ? '<div class="aiwarn">⚠ o modelo alterou ou removeu '+n+' valor'+(one?'':'es')
+        +' (preços/números/datas) — <b>não uses esta versão</b>:<ul>'
+        +a.missing.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ul></div>'
+      : '<div class="aiok">✓ '+(kept===0?'tradução pronta':(kept===1?'o valor foi mantido'
+          :('os '+kept+' valores foram mantidos')))+'</div>';
+  } else {
+    miss=n
+      ? '<div class="aiwarn">⚠ o modelo '+(isVal?'alterou ou removeu ':'não manteve ')+n+' '
+        +(isVal?('valor'+(one?'':'es')+' (preços/números/datas)'):('pergunta'+(one?'':'s')))
+        +' — <b>não uses esta versão</b>'+(isVal?'':' sem as acrescentar')+':<ul>'
+        +a.missing.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ul></div>'
+      : '<div class="aiok">✓ '+(isVal
+          ?(kept===0?'versão pronta (sem números a proteger)':kept===1?'o valor foi mantido':('os '+kept+' valores foram mantidos'))
+          :(kept===1?'a pergunta foi mantida':('as '+kept+' perguntas foram mantidas')))+'</div>';
+  }
+  return '<div class="airesult"><div class="aih">Versão da IA'
+    +'<span class="c"> · leu '+a.used_thread+' mensagem'+(a.used_thread===1?'':'s')
+    +' e '+a.used_facts+' facto'+(a.used_facts===1?'':'s')+(a.tier?' · tier '+esc(a.tier):'')
+    +(a.translated?' · '+esc(langLabel(a.lang)):'')+'</span></div>'
+    +trans+miss
+    +'<textarea id="_aibody" spellcheck="false">'+esc(a.body)+'</textarea>'
+    +'<div class="qmail"><button class="act-btn accept" id="_aiuse">Usar esta versão</button>'
+    +'<button class="act-btn" id="_aidrop">Descartar</button></div></div>';
+}
+
+/* the full per-purpose input set — only the fields the purpose uses are read server-side */
+function draftPayload(){
+  return {purpose:draft.purpose, selected:[...draft.selected], custom:draft.custom,
+          reason:draft.reason, reason_note:draft.reasonNote, content:draft.content};
+}
+
+async function polishDraft(){
+  if(!draft||!selected||draft.aiBusy) return;
+  draft.aiBusy=true; draft.ai=null; renderComposer();
+  announce('a melhorar o email com IA');
+  try{
+    const r=await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/draft/polish',
+      {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify(Object.assign(draftPayload(),{tier:aiTier, lang:draft.lang}))});
+    const d=await r.json().catch(()=>({}));
+    draft.ai = r.ok ? d : {error:d.error||('HTTP '+r.status)};
+  }catch(e){ draft.ai={error:'sem resposta do servidor'}; }
+  finally{
+    draft.aiBusy=false; renderComposer();
+    const a=draft.ai;
+    toast(a&&!a.error?'versão da IA pronta':'melhoramento falhou');
+    announce(a&&!a.error?'versão da IA pronta':'melhoramento falhou');
+  }
+}
+
+/* Adopting the AI version = the user's own edit of the draft: it becomes the body and is marked
+   dirty, so a later checkbox toggle offers Regenerar instead of silently overwriting their choice. */
+function useAIDraft(){
+  const a=draft.ai; if(!a||a.error) return;
+  const ta=$('#_aibody');
+  draft.body=(ta?ta.value:a.body); draft.dirty=true; draft.ai=null;
+  renderComposer(); toast('versão da IA aplicada ao rascunho');
+}
+
 function renderComposer(){ const box=$('#_ask'); if(box) box.innerHTML=composerHTML(); }
 
-/* Rebuild the generated body from the current selection. While dirty we keep the
-   user's manual edits and just re-render (the Regenerar button is their way back). */
+/* ── Descritivo composer (ADR-030) ─────────────────────────────────────────
+   The proposta/fatura DESCRIÇÃO text, assembled server-side from the CONFIRMED spec fields in the
+   corpus-average style. Deterministic first; the optional AI polish sits on top and is fact-checked,
+   exactly like the email composer. Loaded lazily when the tab opens (loadDescription). */
+let descr = null;
+
+async function loadDescription(){
+  const box=$('#_desc'); if(!box||!selected) return;
+  box.innerHTML='<div class="hint2">a preparar descritivo…</div>';
+  try{
+    const d=await (await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/description')).json();
+    descr={body:d.body||'', gaps:d.gaps||[], unconfirmed:d.unconfirmed||[],
+           complete:!!d.complete, nFacts:d.n_facts||0, ai:null, aiBusy:false};
+  }catch(e){ box.innerHTML='<div class="hint2">falhou a preparação do descritivo</div>'; return; }
+  renderDescription();
+}
+
+function renderDescription(){ const box=$('#_desc'); if(box) box.innerHTML=descriptionHTML(); }
+
+function descriptionHTML(){
+  const d=descr; if(!d) return '';
+  // Gaps are un-sendable holes; unconfirmed are candidates the model drafted but nobody ticked.
+  const gapWarn=d.gaps.length
+    ? '<div class="aiwarn">⚠ '+d.gaps.length+' campo'+(d.gaps.length===1?'':'s')+' por confirmar — '
+      +'os marcadores <code>[[…?]]</code> têm de ser resolvidos na Especificação antes de usar:'
+      +'<ul>'+d.gaps.map(g=>'<li>'+esc(g)+'</li>').join('')+'</ul></div>'
+    : '<div class="aiok">✓ descritivo completo — '+d.nFacts+' facto'+(d.nFacts===1?'':'s')+' confirmado'+(d.nFacts===1?'':'s')+'</div>';
+  const unconf=d.unconfirmed.length
+    ? '<div class="hint2">há sugestões da IA por confirmar ('+d.unconfirmed.map(esc).join(', ')
+      +') — confirma-as na Especificação para entrarem no descritivo.</div>' : '';
+  return '<div class="psec"><h3>Descritivo <span class="c">o texto da coluna DESCRIÇÃO da proposta/fatura — estilo médio da casa</span></h3>'
+    +'<div class="cmp">'+gapWarn+unconf
+    +'<div class="draftbox"><div class="dl"><h4>Rascunho</h4></div>'
+    +'<textarea id="_descbody" spellcheck="false">'+esc(d.body)+'</textarea></div>'
+    +descAiBarHTML()+descAiResultHTML()
+    +'<div class="qmail"><button class="act-btn" id="_desccopy">Copiar descritivo</button></div>'
+    +'</div></div>';
+}
+
+function descAiBarHTML(){
+  const busy=descr.aiBusy;
+  return '<div class="aibar">'
+    +'<select id="_descaitier" aria-label="Custo do melhoramento"'+(busy?' disabled':'')+'>'
+    +  TIERS.map(t=>'<option value="'+t[0]+'"'+(t[0]===aiTier?' selected':'')+'>'+esc(t[1])+'</option>').join('')
+    +'</select>'
+    +'<button class="act-btn ai" id="_descaibtn"'+(busy?' disabled':'')+'>'
+    +  (busy?'A escrever…':'✨ Melhorar com IA')+'</button>'
+    +'<span class="hint2">redige a frase mantendo os factos palavra por palavra (gasta tokens, 1 chamada)</span>'
+    +'</div>';
+}
+
+function descAiResultHTML(){
+  const a=descr.ai; if(!a) return '';
+  if(a.error) return '<div class="airesult bad"><div class="aih">✕ não deu</div>'
+    +'<div class="hint2">'+esc(a.error)+'</div></div>';
+  // A dropped/altered fact is the failure that matters — these are priced legal documents.
+  const miss=(a.missing||[]).length
+    ? '<div class="aiwarn">⚠ o modelo não manteve '+a.missing.length+' facto'+(a.missing.length===1?'':'s')
+      +' — <b>não uses esta versão</b>:<ul>'+a.missing.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ul></div>'
+    : '<div class="aiok">✓ todos os factos foram mantidos palavra por palavra</div>';
+  const dropped=(a.dropped_gaps||0)>0
+    ? '<div class="aiwarn">⚠ o modelo apagou '+a.dropped_gaps+' marcador de lacuna — reveja, uma lacuna invisível é pior.</div>' : '';
+  return '<div class="airesult"><div class="aih">Versão da IA'
+    +(a.tier?'<span class="c"> · tier '+esc(a.tier)+'</span>':'')+'</div>'
+    +miss+dropped
+    +'<textarea id="_descaibody" spellcheck="false">'+esc(a.body)+'</textarea>'
+    +'<div class="qmail"><button class="act-btn accept" id="_descaiuse">Usar esta versão</button>'
+    +'<button class="act-btn" id="_descaidrop">Descartar</button></div></div>';
+}
+
+async function polishDescription(){
+  if(!descr||!selected||descr.aiBusy) return;
+  descr.aiBusy=true; descr.ai=null; renderDescription();
+  announce('a melhorar o descritivo com IA');
+  try{
+    const r=await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/description/polish',
+      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tier:aiTier})});
+    const d=await r.json().catch(()=>({}));
+    descr.ai = r.ok ? d : {error:d.error||('HTTP '+r.status)};
+  }catch(e){ descr.ai={error:'sem resposta do servidor'}; }
+  finally{
+    descr.aiBusy=false; renderDescription();
+    const a=descr.ai;
+    toast(a&&!a.error?'versão da IA pronta':'melhoramento falhou');
+    announce(a&&!a.error?'versão da IA pronta':'melhoramento falhou');
+  }
+}
+
+/* Adopting the AI version = the user's own edit: it becomes the body. */
+function useAIDescription(){
+  const a=descr.ai; if(!a||a.error) return;
+  const ta=$('#_descaibody');
+  descr.body=(ta?ta.value:a.body); descr.ai=null;
+  renderDescription(); toast('versão da IA aplicada ao descritivo');
+}
+
+/* Rebuild the generated body from the current purpose + inputs and re-render the whole composer.
+   Used when the STRUCTURE changes (purpose switch, checkbox toggle, reason pick, custom question).
+   While dirty we keep the user's manual edits and just re-render (Regenerar is their way back). */
 async function resyncDraft(){
   if(!draft||!selected) return;
   if(draft.dirty){ renderComposer(); return; }
   try{
-    const r=await post('/api/projects/'+selected.project_id+'/draft',
-      {selected:[...draft.selected], custom:draft.custom});
-    draft.body=r.body; renderComposer();
+    const r=await post('/api/projects/'+selected.project_id+'/draft', draftPayload());
+    draft.body=r.body; draft.facts=r.facts||[]; renderComposer();
   }catch(e){ toast(S.revertido); }
 }
+
+/* Rebuild only the draft body + the protected-values chip IN PLACE (no re-render), so the
+   free-text box the user is typing into keeps focus/caret. Used by the debounced input handler. */
+async function resyncBody(){
+  if(!draft||!selected||draft.dirty) return;
+  try{
+    const r=await post('/api/projects/'+selected.project_id+'/draft', draftPayload());
+    draft.body=r.body; draft.facts=r.facts||[];
+    const ta=$('#_draftbody'); if(ta) ta.value=draft.body;
+    const chip=$('#_factschip'); if(chip) chip.innerHTML=factsInner();
+    // a live edit invalidates any AI version shown from a previous state — drop it, no re-render
+    if(draft.ai){ draft.ai=null; const air=$('#_detail').querySelector('.airesult'); if(air) air.remove(); }
+  }catch(e){ /* transient: the next keystroke retries */ }
+}
+let _resyncT=null;
+function debouncedResyncBody(){ clearTimeout(_resyncT); _resyncT=setTimeout(resyncBody,300); }
 
 /* contested-on-top: genuine contradictions (equal-authority sources disagree) sit ABOVE the tabs
    so they're never buried (ADR-015). merge_job_fields only flags real ties now, so this is signal. */
@@ -386,7 +777,10 @@ function contestedBanner(){
   return '<div class="contested">⚠ Valores em conflito (fontes de igual autoridade divergem) — confirma o correto na Especificação:'+rows+'</div>';
 }
 
-/* Registar — deterministic capture of off-email knowledge (no LLM, stored verbatim) */
+/* Registar — deterministic capture of off-email knowledge. STORED verbatim, never rewritten by a
+   model. Since ADR-026 a model may LATER *read* what is stored here, but only when the user clicks
+   Reprocessar in Origem — so the placeholder promises "sem IA" about the write, not about all time,
+   which is the honest version of the older "guardado tal e qual, sem IA". */
 function captureHTML(){
   const chans=[['call','📞 Chamada'],['meeting','🤝 Reunião'],['whatsapp','💬 WhatsApp'],['sms','✉ SMS'],['email','✉ Email'],['manual','✎ Outro']];
   const kinds=[['note','Nota'],['decision','Decisão'],['opinion','Opinião'],['todo','To-do']];
@@ -397,7 +791,7 @@ function captureHTML(){
     +'<input id="_capwhen" type="date" title="quando foi adquirido"/></div>'
     +'<div class="lbl">Tipo</div><div class="chips" id="_capkinds">'
     +kinds.map(k=>'<span class="chip'+(k[0]===capKind?' on':'')+'" data-kind="'+k[0]+'">'+k[1]+'</span>').join('')+'</div>'
-    +'<textarea id="_captext" placeholder="O que aconteceu? Conclusão da chamada, decisão, opinião… (guardado tal e qual, sem IA)" spellcheck="false"></textarea>'
+    +'<textarea id="_captext" placeholder="O que aconteceu? Conclusão da chamada, decisão, opinião… (guardado tal e qual — a IA só lê isto se pedires Reprocessar)" spellcheck="false"></textarea>'
     +'<div style="margin-top:8px"><button class="act-btn accept" id="_capsave">Registar</button></div>'
     +'</div>';
 }
@@ -479,7 +873,7 @@ async function loadParticipants(){
 function detailHTML(){
   const p=selected.project, rd=selected.readiness||{};
   const job=selected.job_fields||{}, items=selected.items||[], customs=selected.custom_fields||{};
-  const stages=STAGES.map(s=>'<span class="st'+(p.stage===s?' on':'')+(TERMINAL.has(s)&&p.stage===s?' terminal':'')+'" data-stage="'+s+'">'+s+'</span>').join('');
+  const stages=STAGES.map(s=>'<span class="st'+(p.stage===s?' on':'')+(TERMINAL.has(s)&&p.stage===s?' terminal':'')+'" data-stage="'+s+'">'+esc(STAGEpt[s]||s)+'</span>').join('');
   const nmiss=(rd.missing||[]).length;
 
   /* Relationship axis (counterparty) — its own color-coded .cp badge from the real source
@@ -495,8 +889,18 @@ function detailHTML(){
   const dangling=(selected.dangling_threads||[]).length;
   const dwarn=dangling?'<div class="dwarn">⚠ '+dangling+' thread'+(dangling===1?'':'s')+' sem contexto no CRM — reconstrói o crm ou volta a ligar o email.</div>':'';
   const nthreads=(selected.threads||[]).length;
-  const origem='<div style="display:flex;justify-content:flex-end;margin-bottom:6px">'
+  const nev=selected.n_events||0;
+  const scope=nthreads+' email'+(nthreads===1?'':'s')+(nev?' + '+nev+' registo'+(nev===1?'':'s')+' da linha do tempo':'');
+  const origem='<div class="rexbar">'
+    +'<select id="_retier" aria-label="Custo da re-extração">'
+    +   TIERS.map(t=>'<option value="'+t[0]+'"'+(t[0]===reTier?' selected':'')+'>'+esc(t[1])+'</option>').join('')
+    +'</select>'
+    +'<button class="item-rm" id="_rexbtn">Reprocessar tudo com IA</button>'
+    +'<span class="grow"></span>'
     +'<button class="item-rm" id="_attachbtn">+ ligar email</button></div>'
+    +'<div class="hint2 rexnote">Volta a ler <b>'+esc(scope)+'</b> com o LLM (gasta tokens: '
+    +'uma chamada por email + uma por registo). Nunca apaga nem substitui um campo que tu confirmaste.</div>'
+    +'<div id="_rexres"></div>'
     +'<div id="_origem" class="origem"><div class="hint2">a carregar contexto…</div></div>'+dwarn;
 
   /* Especificação panel — named, bounded sections; required-first; composer lives in its own tab */
@@ -523,15 +927,20 @@ function detailHTML(){
   /* Email ao cliente panel — the composer is a distinct OUTBOUND task; one tab = one task. */
   const emailTab='<div class="ppanel hidden" data-panel="email"><div id="_ask"><div class="hint2">a preparar email…</div></div></div>';
 
+  /* Descritivo panel — the proposta/fatura DESCRIÇÃO text (ADR-030), a second distinct outbound task. */
+  const descTab='<div class="ppanel hidden" data-panel="descritivo"><div id="_desc"><div class="hint2">a preparar descritivo…</div></div></div>';
+
   const tabs='<div class="ptabs">'
     +'<button class="ptab-btn on" data-tab="espec">Especificação</button>'
     +'<button class="ptab-btn" data-tab="origem">Origem'+(nthreads?' <span class="bdg">'+nthreads+'</span>':'')+'</button>'
     +'<button class="ptab-btn" data-tab="timeline">Linha do tempo</button>'
     +'<button class="ptab-btn" data-tab="email">Email ao cliente'+(nmiss?' <span class="bdg warn">'+nmiss+'</span>':'')+'</button>'
+    +'<button class="ptab-btn" data-tab="descritivo">Descritivo</button>'
     +'<button class="ptab-btn" data-tab="registar">Registar</button></div>';
 
   return '<button class="hbtn" id="_backbtn" style="margin-bottom:14px">← Projetos</button>'
-    +'<h2 style="margin:0 0 8px;font-size:20px;letter-spacing:-.01em">'+esc(p.title)+'</h2>'
+    +'<h2 style="margin:0 0 8px;font-size:20px;letter-spacing:-.01em">'+esc(p.title)
+    +' <button id="_ptitle" class="prename" title="mudar o nome do projeto — o assunto do email é identidade, não um nome">✎</button></h2>'
     +'<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:4px">'
     +'<span id="_ring">'+ringHTML(rd.coverage||0,rd.estimable||false)+'</span>'
     +'<div class="pstage">'+stages+'</div>'
@@ -545,6 +954,7 @@ function detailHTML(){
     +'<div class="ppanel hidden" data-panel="origem">'+origem+'</div>'
     +'<div class="ppanel hidden" data-panel="timeline"><div id="_timeline"><div class="hint2">a carregar histórico…</div></div></div>'
     +emailTab
+    +descTab
     +'<div class="ppanel hidden" data-panel="registar">'+captureHTML()+'</div>';
 }
 
@@ -554,6 +964,7 @@ function showTab(name){
   root.querySelectorAll('.ptab-btn').forEach(b=>b.classList.toggle('on', b.dataset.tab===name));
   root.querySelectorAll('.ppanel').forEach(pl=>pl.classList.toggle('hidden', pl.dataset.panel!==name));
   if(name==='timeline') loadTimeline();
+  if(name==='descritivo') loadDescription();
   try{
     const want=name==='registar'?(location.pathname+'?registar=nota'):location.pathname;
     if(location.pathname+location.search!==want) history.replaceState(null,'',want);
@@ -618,9 +1029,10 @@ function refreshSummary(){
     gj.classList.toggle('done', !nmiss); }
   const et=$('#_detail').querySelector('.ptab-btn[data-tab="email"]');
   if(et) et.innerHTML='Email ao cliente'+(nmiss?' <span class="bdg warn">'+nmiss+'</span>':'');
-  // a field save changes the gaps → refresh the composer's prompt list, but only when the
-  // user hasn't started hand-editing the draft (we must not wipe their wording).
-  if(draft&&!draft.dirty) loadDraft();
+  // a field save changes the gaps → refresh the composer's prompt list, but only for the gap-driven
+  // `ask` purpose, and only when the user hasn't started hand-editing (never wipe their wording or an
+  // in-progress quote/reject that doesn't depend on the gap list at all).
+  if(draft&&!draft.dirty&&draft.purpose==='ask') loadDraft();
   const ew=$('#_exportwrap');
   if(ew) ew.innerHTML=rd.estimable?'<div class="psec"><button class="act-btn accept" id="_exportbtn">Exportar para custeio</button></div>':'';
   announce(rd.estimable?'projeto estimável':(nmiss+' campos obrigatórios em falta'));
@@ -668,6 +1080,69 @@ async function loadSource(){
   }
 }
 
+/* ── scoped re-extraction (ADR-025 §4) ────────────────────────────────────
+   Re-reads only this project's emails with the chosen tier. The whole point of the result block
+   below is that a FAILURE stops being invisible: a message whose spec_error is set is listed by
+   name, in red, instead of quietly looking like a thin email that had nothing to extract. */
+function rexResultHTML(d){
+  const msgs=d.messages||[], c=d.counts||{}, ev=d.events||{};
+  const bad=msgs.filter(m=>m.spec_error), evbad=ev.failed||[], evapp=ev.applied||[];
+  const nb=c.built||0, nk=c.kept||0, nev=ev.read||0;
+  let head='<b>'+nb+'</b> '+(nb===1?'mensagem re-extraída':'mensagens re-extraídas')
+    +' · <b>'+nk+'</b> '+(nk===1?'intacta':'intactas');
+  // The timeline half (ADR-026) is reported separately: "read" is what was PAID for, "applied" is
+  // what actually changed — a note can be read in full and still legitimately yield no spec field.
+  if(nev) head+=' · <b>'+nev+'</b> registo'+(nev===1?'':'s')+' lido'+(nev===1?'':'s')
+    +' → <b>'+evapp.length+'</b> campo'+(evapp.length===1?'':'s');
+  head+=(d.tier?' · tier '+esc(d.tier):'');
+  const errs=bad.length
+    ? '<ul class="rexerrs">'+bad.map(m=>'<li><code>'+esc(m.message_id)+'</code> — '+esc(m.spec_error)+'</li>').join('')+'</ul>'
+    : '';
+  const everrs=evbad.length
+    ? '<ul class="rexerrs">'+evbad.map(e=>'<li>registo '+esc(e.kind||'')+' #'+esc(String(e.rowid))+' — '+esc(e.error||'')+'</li>').join('')+'</ul>'
+    : '';
+  const nfail=bad.length+evbad.length;
+  const cls=nfail?'rexres bad':'rexres';
+  const title=nfail?('⚠ '+nfail+' falha'+(nfail===1?'':'s')+' na extração'):'✓ reprocessamento concluído';
+  return '<div class="'+cls+'"><div class="rexh">'+title+'</div><div class="rexsub">'+head+'</div>'+errs+everrs+'</div>';
+}
+
+async function reextract(){
+  if(!selected||reBusy) return;
+  const pid=selected.project_id, box=$('#_rexres');
+  reBusy=true;
+  const btn=$('#_rexbtn'); if(btn){btn.disabled=true;btn.textContent='A reprocessar…';}
+  if(box) box.innerHTML='<div class="rexres"><div class="rexsub">a re-ler os emails e os registos com o LLM…</div></div>';
+  announce('re-extração iniciada');
+  try{
+    const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/reextract',
+      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tier:reTier})});
+    if(r.status===409){ if(box) box.innerHTML='<div class="rexres bad"><div class="rexh">sync em curso</div>'
+        +'<div class="rexsub">espera que a sincronização termine e tenta outra vez.</div></div>';
+      toast(S.syncEmCurso); return; }
+    if(!r.ok){ const e=await r.json().catch(()=>({}));
+      if(box) box.innerHTML='<div class="rexres bad"><div class="rexh">falhou</div><div class="rexsub">'
+        +esc(e.error||('HTTP '+r.status))+'</div></div>';
+      toast(S.revertido); return; }
+    const d=await r.json();
+    if(d.project) selected=d.project;
+    delete _srcCache[pid];          // provenance moved → the cached thread render is stale
+    renderDetail();
+    const b2=$('#_rexres'); if(b2) b2.innerHTML=rexResultHTML(d);
+    showTab('origem');
+    toast(d.ok?'re-extração concluída':'re-extração com falhas');
+    announce(d.ok?'re-extração concluída':'re-extração com falhas');
+  }catch(err){
+    const b2=$('#_rexres');
+    if(b2) b2.innerHTML='<div class="rexres bad"><div class="rexh">falhou</div>'
+      +'<div class="rexsub">sem resposta do servidor</div></div>';
+    toast(S.revertido);
+  }finally{
+    reBusy=false;
+    const b3=$('#_rexbtn'); if(b3){b3.disabled=false;b3.textContent='Reprocessar tudo com IA';}
+  }
+}
+
 function render(){ if(selected) renderDetail(); else renderList(); }
 
 /* ── keyboard ─────────────────────────────────────────────────────────── */
@@ -689,6 +1164,8 @@ function paletteItems(q){
     {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
     {kind:'ação',label:'Novo projeto',run:promptNew},
     {kind:'ação',label:'Registar conhecimento',run:()=>{ if(selected) showTab('registar'); else toast('abre um projeto primeiro'); }},
+    {kind:'ação',label:'Re-extrair este projeto',sub:'gasta tokens',run:()=>{ if(selected) reextract(); else toast('abre um projeto primeiro'); }},
+    {kind:'ação',label:'Admin',run:()=>{location.href='/admin';}},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
   projects.forEach(p=>base.push({kind:'projeto',label:p.title,sub:p.stage,run:()=>loadDetail(p.project_id)}));
@@ -710,11 +1187,33 @@ $('#_list').addEventListener('click',e=>{
 
 /* ── detail: save a field on change (blur/Enter), keep the user's place ── */
 $('#_detail').addEventListener('change', async e=>{
+  // composer: the purpose selector — switching rebuilds the input area + draft for the new kind.
+  // A hand-edited draft is confirmed first so we never wipe wording without asking (ADR-013 spirit).
+  const psel=e.target.closest('#_purpose');
+  if(psel&&draft){
+    const np=psel.value; if(np===draft.purpose) return;
+    if(draft.dirty && !confirm('Mudar o tipo de email substitui o rascunho atual. Continuar?')){
+      psel.value=draft.purpose; return; }
+    draft.purpose=np; draft.dirty=false; draft.ai=null; resyncDraft(); return; }
+  // reject: a different reason → rebuild the body in place (keeps the note textarea's focus)
+  const rsel=e.target.closest('#_reason');
+  if(rsel&&draft){ draft.reason=rsel.value; resyncBody(); return; }
   // composer: a prompt checkbox toggled → update selection + re-assemble the draft
   const cb=e.target.closest('.ask-opt input[data-key]');
   if(cb&&draft){ const k=cb.dataset.key;
     if(cb.checked) draft.selected.add(k); else draft.selected.delete(k);
     resyncDraft(); return; }
+  // tier pickers — view preferences; nothing is POSTed until the matching button is clicked
+  const tsel=e.target.closest('#_retier');
+  if(tsel){ reTier=tsel.value; return; }
+  const asel=e.target.closest('#_aitier');
+  if(asel){ aiTier=asel.value; return; }
+  // output language for the email (ADR-032) — a view pref; nothing is POSTed until the button, but
+  // re-render so the AI bar's button/hint reflect PT vs a translation.
+  const lsel=e.target.closest('#_ailang');
+  if(lsel&&draft){ draft.lang=lsel.value; renderComposer(); return; }
+  const dsel=e.target.closest('#_descaitier');
+  if(dsel){ aiTier=dsel.value; return; }
   const inp=e.target.closest('.finput'); if(!inp||!selected) return;
   const addr=inp.dataset.addr, value=inp.value.trim();
   try{
@@ -723,10 +1222,30 @@ $('#_detail').addEventListener('change', async e=>{
   }catch(err){ toast(S.revertido); }
 });
 
+/* ── date fields: the whole box opens the picker, not just the glyph ─────
+   By default only the ~14px calendar indicator opens the picker; the rest of the input looks
+   clickable but merely parks a cursor on a segment, which reads as broken. showPicker() requires
+   user activation — a real click supplies it. Registered as its OWN listener (not folded into the
+   main click handler below) because that one early-returns on a dozen branches before it would ever
+   reach a field. Anything that can't open a picker (older browser, cross-origin frame, the text
+   fallback for a non-ISO value) is left alone and stays keyboard-typeable. */
+$('#_detail').addEventListener('click', e=>{
+  const d=e.target.closest('.finput[type=date],.finput[type=datetime-local]');
+  if(!d||d.disabled||d.readOnly||typeof d.showPicker!=='function') return;
+  try{ d.showPicker(); }catch(_){}   // NotAllowedError / SecurityError → plain typing still works
+});
+
 /* composer: hand-editing the draft marks it dirty (keep edits; offer Regenerar). We mutate the
    DOM in place rather than re-render, so the textarea keeps focus while typing. */
 $('#_detail').addEventListener('input', e=>{
-  if(e.target.id!=='_draftbody'||!draft) return;
+  if(!draft) return;
+  // the free-text inputs (reason note / content) are what the draft is BUILT from, not a hand-edit:
+  // update state and rebuild the body in place (debounced), WITHOUT marking dirty.
+  if(e.target.id==='_content'){ draft.content=e.target.value; debouncedResyncBody(); return; }
+  if(e.target.id==='_reasonnote'){ draft.reasonNote=e.target.value; debouncedResyncBody(); return; }
+  // hand-editing the assembled draft itself marks it dirty (keep edits; offer Regenerar). We mutate
+  // the DOM in place rather than re-render, so the textarea keeps focus while typing.
+  if(e.target.id!=='_draftbody') return;
   draft.body=e.target.value;
   if(!draft.dirty){
     draft.dirty=true;
@@ -740,6 +1259,17 @@ $('#_detail').addEventListener('input', e=>{
 $('#_detail').addEventListener('click', async e=>{
   if(!selected) return;
   if(e.target.closest('#_backbtn')){closeDetail();return;}
+  /* rename: the title a project is born with is the raw email subject — machine identity */
+  if(e.target.closest('#_ptitle')){
+    const nm=prompt('Nome do projeto:', selected.project.title||'');
+    if(nm===null||!nm.trim()) return;
+    try{
+      await post('/api/projects/'+selected.project_id+'/rename',{title:nm.trim()});
+      selected.project.title=nm.trim();
+      const pl=projects.find(x=>x.project_id===selected.project_id); if(pl) pl.title=nm.trim();
+      renderDetail(); toast('nome guardado');
+    }catch(err){ toast(S.falhou); }
+    return; }
   const st=e.target.closest('.pstage .st');
   if(st){ const stage=st.dataset.stage;
     // CANCELLED/LOST open an inline close-out form (party + reason) instead of posting immediately.
@@ -756,6 +1286,7 @@ $('#_detail').addEventListener('click', async e=>{
   if(coc){ _coParty=coc.dataset.party; coc.parentElement.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===coc)); return; }
   if(e.target.closest('#_coconfirm')){ await confirmCloseout(); return; }
   if(e.target.closest('#_cocancel')){ const b=$('#_closeform'); if(b){b.classList.add('hidden');b.innerHTML='';} return; }
+  if(e.target.closest('#_rexbtn')){ await reextract(); return; }
   if(e.target.closest('#_attachbtn')){
     const ref=prompt('Cola o thread_root ou message_id do email a ligar:'); if(!ref||!ref.trim()) return;
     try{ selected=await post('/api/projects/'+selected.project_id+'/attach',{ref:ref.trim()});
@@ -775,10 +1306,13 @@ $('#_detail').addEventListener('click', async e=>{
   if(crm&&draft){ draft.custom.splice(parseInt(crm.dataset.ci,10),1); resyncDraft(); return; }
   if(e.target.closest('#_regenq')&&draft){
     draft.dirty=false;
-    try{ const r=await post('/api/projects/'+selected.project_id+'/draft',
-      {selected:[...draft.selected], custom:draft.custom});
-      draft.body=r.body; renderComposer(); }
+    try{ const r=await post('/api/projects/'+selected.project_id+'/draft', draftPayload());
+      draft.body=r.body; draft.facts=r.facts||[]; renderComposer(); }
     catch(err){ toast(S.revertido); } return; }
+  /* AI polish (ADR-027) — the ONLY path that triggers the model for this email. */
+  if(e.target.closest('#_aibtn')&&draft){ polishDraft(); return; }
+  if(e.target.closest('#_aiuse')&&draft){ useAIDraft(); return; }
+  if(e.target.closest('#_aidrop')&&draft){ draft.ai=null; renderComposer(); return; }
   if(e.target.closest('#_copyq')){
     const txt=(($('#_draftbody')||{}).value)||'';
     try{ await navigator.clipboard.writeText(txt); toast('email copiado'); }
@@ -788,6 +1322,14 @@ $('#_detail').addEventListener('click', async e=>{
     const body=(($('#_draftbody')||{}).value)||'';
     location.href='mailto:'+encodeURIComponent(draft.to||'')
       +'?subject='+encodeURIComponent(subj)+'&body='+encodeURIComponent(body); return; }
+  /* ── descritivo composer (ADR-030) — mirrors the email composer's AI-polish contract ── */
+  if(e.target.closest('#_descaibtn')&&descr){ polishDescription(); return; }
+  if(e.target.closest('#_descaiuse')&&descr){ useAIDescription(); return; }
+  if(e.target.closest('#_descaidrop')&&descr){ descr.ai=null; renderDescription(); return; }
+  if(e.target.closest('#_desccopy')){
+    const txt=(($('#_descbody')||{}).value)||'';
+    try{ await navigator.clipboard.writeText(txt); toast('descritivo copiado'); }
+    catch(err){ toast('copia manual: '+txt.slice(0,40)+'…'); } return; }
   if(e.target.closest('#_exportbtn')){ try{
     const r=await post('/api/projects/'+selected.project_id+'/export',{adapter:'json'});
     toast(r.ok?'exportado: '+(r.external_id||'ok'):S.revertido);}

@@ -48,9 +48,9 @@ def test_aliases_expand_the_capture_text():
 
 
 def test_gazetteer_note_adds_needles_for_the_clients_domain():
-    projs = [{"project_id": "p-1", "title": "Obra Norte", "client_email": "x@corticoenetos.com",
+    projs = [{"project_id": "p-1", "title": "Obra Norte", "client_email": "x@cork-example.com",
               "stage": "LEAD"}]
-    gaz = {"corticoenetos.com": "supplies cork rolls AND pays us to cut to measure"}
+    gaz = {"cork-example.com": "supplies cork rolls AND pays us to cut to measure"}
     # a capture mentioning "cork" matches via the gazetteer note for the client's domain
     assert cr.best_project("the cork order is ready", projs, gazetteer=gaz) == "p-1"
 

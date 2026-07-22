@@ -150,7 +150,7 @@ def test_extracted_fields_render_as_individually_confirmable_rows(tmp_path):
     # field address maps to its pt-PT label (material#0 -> "material").
     client, ws, cap, _proj, _pid = _setup(tmp_path)
     cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="inox 3mm, prazo 1 jul",
-                     channel="call", asserted_by="Pedro")
+                     channel="call", asserted_by="Diogo")
     cap.set_extracted_fields(cid, {"material#0": "inox 304", "deadline": "2026-07-01"}, 0.9)
     html = client.get("/capturas").text
     # the values are embedded (escaped) + the field UI + per-field confirm wired to /field
@@ -169,15 +169,15 @@ def test_field_confirm_writes_only_that_field_via_the_field_endpoint(tmp_path):
     # and does NOT touch the others (no bulk apply — the estimable-gate safety property).
     client, ws, cap, proj, pid = _setup(tmp_path)
     cid, _ = cap.add(telegram_message_id=1, telegram_chat_id=2, raw_text="inox", channel="call",
-                     asserted_by="Pedro Ferreira")
+                     asserted_by="Diogo Costa")
     cap.set_extracted_fields(cid, {"material#0": "inox 304", "deadline": "2026-07-01"}, 0.9)
     # the UI would POST this for the 'material#0' row only:
     r = client.post(f"/api/projects/{pid}/field",
                     json={"field": "material#0", "value": "inox 304", "channel": "call",
-                          "asserted_by": "Pedro Ferreira", "acquired_at": ""})
+                          "asserted_by": "Diogo Costa", "acquired_at": ""})
     assert r.status_code == 200
     prov = proj.field_provenance(pid)
-    assert "material#0" in prov and prov["material#0"]["asserted_by"] == "Pedro Ferreira"
+    assert "material#0" in prov and prov["material#0"]["asserted_by"] == "Diogo Costa"
     assert "deadline" not in prov                 # the un-confirmed field was NOT applied
     assert cap.get(cid)["status"] == "stored"     # confirming a field doesn't resolve the capture
     ws.close()

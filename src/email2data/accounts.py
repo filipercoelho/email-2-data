@@ -126,6 +126,20 @@ def cluster(
         cl.from_count += c_row.get("from_count", 0)
         _update_last(cl, c_row)
 
+    # Display-name fallback: a machine key ("nif:274023911", "free:someone@gmail.com") is cluster
+    # IDENTITY, not a label a person can scan a client list for. When no gazetteer hint named the
+    # cluster, borrow the best contact display name observed in the mail itself (the address with
+    # the most messages wins — deterministic, no invention). Domain keys ("acme.pt") stay: they are
+    # already readable. A human override (workspace counterparty_names) still beats both upstream.
+    for cl in clusters.values():
+        if cl.display_name == cl.key and cl.kind != "domain":
+            named = [((by_email.get(e) or {}).get("display_name") or "",
+                      (by_email.get(e) or {}).get("msg_count") or 0) for e in cl.emails]
+            # mail headers often quote the display name ('Margarida Reis') — strip the wrapping
+            named = [(n.strip().strip("'\""), m) for n, m in named if n and n.strip().strip("'\"")]
+            if named:
+                cl.display_name = max(named, key=lambda t: t[1])[0]
+
     result = [cl for cl in clusters.values() if cl.emails]
     result.sort(key=lambda c: -c.msg_count)
     return result

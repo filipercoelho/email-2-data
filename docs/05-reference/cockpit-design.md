@@ -62,6 +62,16 @@ the app at *zero* misses** — the inverse of dark-pattern design.
 4. **AI proposes in dashed ink; the human commits in solid.** A visible grammar of trust.
 5. **Never a fake number.** Missing certainty is shown as gaps and questions, never invented confidence.
 6. **Calm, not loud.** Rewards are a colour shift and a slide, never confetti.
+7. **A lens is live, and says how live.** The queue converges without being asked ([ADR-023](../03-decisions/adr-023-live-decision-queue-freshness.md)): the server keeps ingesting on a schedule and the page refreshes itself **in place** — never a reload, which would throw away the user's position mid-decision. Anything the page remembers about an item (dismissed, focused, expanded) is keyed by **content, not list index**, because a refresh reorders the queue. The age of the data is displayed, so a stalled pipeline is visible rather than silently trusted.
+8. **A decision persists, is undoable, and stays reviewable** ([ADR-028](../03-decisions/adr-028-decisions-persist-and-stay-reviewable.md), 2026-07-20).
+   Principle 2's "always undoable" is now *enforced*, not aspirational: every disposition
+   (Ignorar, Tratado, reabrir) persists to `workspace.db` and pushes a revert onto the `Z` stack;
+   failure copy distinguishes *failed* from *reverted*. Decided threads stay reviewable in the
+   Fila's **Tratados** ledger (`?include=resolved`) — decided ≠ deleted. Same review shipped: the
+   `em risco` chip is a filter, ordering is sticky, only critical red (≥ 72 h) pulses, the owner
+   filter is visible, machine keys never render as names, automated senders never reach a decision
+   gate, and the queue can start the reply it says is owed (`can_draft` rows).
+9. **A decision carries its evidence, and is actionable where it is made** ([ADR-024](../03-decisions/adr-024-decision-carries-its-evidence.md)). Anything that looks clickable expands — a `cursor:pointer` that does nothing is worse than a plainly static row, because it invites the click and discards it. Expanding shows the *source* (the thread, its attachments, what extraction knows), not a longer summary of it, and the correction lives on the card rather than in another lens. Two rules keep the panel honest: a repeated label is not signal (group and count instead of repeating a badge), and a summary folds **per fact, never per row** — 25 identical "em falta" lines are technically complete and practically unreadable, which is its own kind of dishonesty.
 
 ## The shape: one spine, three lenses + Para ti
 
@@ -83,8 +93,11 @@ Enter by mood (*what's urgent / who is this / which job*); pivot between lenses 
 ### The component kit (build once, reuse everywhere)
 
 `Counterparty badge` (semantic colour, identical everywhere) · `Response clock` (green→amber→red + age +
-text) · `Owner chip` (`sem dono` = subtle warning) · `Confidence tag` (`regra·NIF` / `Gemini·0.91` →
-"Porquê?") · `Source dot` (● offline / ◐ llm / ● user-green) · `Readiness ring` · `Action bar`
+text; **filled dot = we owe, hollow dot = waiting on them** — colour carries urgency, fill carries
+obligation, [ADR-029](../03-decisions/adr-029-fila-groups-by-obligation.md)) · `Owner chip` (`sem dono`
+= subtle warning) · `Confidence tag` (`regra·NIF` / `Gemini·0.91` →
+"Porquê?") · `Source dot` (● offline / ◐ llm / ● user-green) · `Readiness ring` · `Action bar` ·
+`Obligation section header` (sticky, label + count; the Fila's primary partition)
 (one action, three entry points: key + button + ⌘K). Building this kit *is* the unit of work.
 
 ---

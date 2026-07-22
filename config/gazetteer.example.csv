@@ -1,0 +1,8 @@
+domain,counterparty,note
+# Hand-curated domain -> counterparty (your POV). A HINT passed to the LLM, never a hard verdict;
+# the body always overrides. Copy this to config/gazetteer.csv (gitignored) and fill in your own
+# real domains — keep the real list OUT of version control (it names your actual clients/suppliers).
+client-example.com,CLIENT,example client — short note on the relationship
+supplier-example.com,SUPPLIER,example supplier — what you buy from them
+# free-mail domains (gmail.com, hotmail.com, …) are intentionally NOT listed — too generic.
+# Use the reclassify UI for specific individual contacts instead.

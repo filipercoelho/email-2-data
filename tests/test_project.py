@@ -152,6 +152,140 @@ def test_seed_items_from_message_then_locked(tmp_path):
     assert p.seed_items_from(store, ws, jobspecs, pid, "m2") is False
 
 
+def _seeded_project(tmp_path, product="troféus"):
+    """A project whose item#0 was seeded by the MACHINE from message m1 (the p-0002 shape)."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    store = p.ProjectStore(ws._conn)
+    src = js.build_jobspec(
+        {"message_id": "m1", "subject": "s", "counterparty": "CLIENT",
+         "entities": {"product_or_service": product}},
+        {"attachments": [], "subject": "s", "body_text": ""}).to_dict()
+    pid = store.create("Troféus")
+    assert p.seed_items_from(store, ws, {"m1": src}, pid, "m1") is True
+    return ws, store, pid
+
+
+def _richer_jobspec(mid="m1", **item_fields):
+    """A re-extracted jobspec for ``mid`` carrying more per-item fields than the first pass."""
+    spec = js.JobSpec(message_id=mid, subject="s",
+                      job_fields={k: js.SpecField() for k in js.JOB_KEYS},
+                      items=[{k: js.SpecField() for k in js.ITEM_KEYS}])
+    for k, v in item_fields.items():
+        spec.items[0][k] = js.SpecField(v, "llm", False)
+    return {mid: spec.to_dict()}
+
+
+def test_force_reseed_off_by_default_still_no_ops(tmp_path):
+    # Pins the existing seed-once contract: without force=True a second seed must NOT touch a
+    # project that already has item fields, however much better the new extraction is.
+    ws, store, pid = _seeded_project(tmp_path)
+    better = _richer_jobspec("m2", item="estrutura em aço Corten", material="Aço Corten")
+    assert p.seed_items_from(store, ws, better, pid, "m2") is False
+    assert store.fields_for(pid)["item#0"][0] == "troféus"      # untouched
+    assert "material#0" not in store.fields_for(pid)
+    ws.close()
+
+
+def test_force_reseed_updates_machine_seeded_fields(tmp_path):
+    # The bug this exists for: a correct re-extract could never reach the project view, because
+    # seed_items_from no-ops the moment ONE machine-seeded item#0 row exists (p-0002).
+    ws, store, pid = _seeded_project(tmp_path)
+    better = _richer_jobspec("m1", item="estrutura em aço Corten", material="Aço Corten",
+                             thickness="entre 5 e 8 mm", dimensions="Altura total: 200 cm",
+                             colour_finish="Natural (sem pintura)")
+    assert p.seed_items_from(store, ws, better, pid, "m1", force=True) is True
+    fields = store.fields_for(pid)
+    assert fields["item#0"][0] == "estrutura em aço Corten"     # machine value refreshed
+    assert fields["material#0"][0] == "Aço Corten"              # and the new ones landed
+    assert fields["colour_finish#0"][0] == "Natural (sem pintura)"
+    ws.close()
+
+
+def test_force_reseed_never_overwrites_a_human_set_field(tmp_path):
+    # THE critical property (CLAUDE.md non-negotiable 6): a re-extract must never destroy a human
+    # decision. The human's item#0 survives verbatim while the machine-only fields are refreshed.
+    ws, store, pid = _seeded_project(tmp_path)
+    store.set_field(pid, "item#0", "pórtico em Corten (confirmado ao telefone)",
+                    channel="call", asserted_by="Bruno")
+    store.set_field(pid, "material#0", "inox 304")             # workbench inline edit: no bundle at all
+    better = _richer_jobspec("m1", item="estrutura em aço Corten", material="Aço Corten",
+                             thickness="entre 5 e 8 mm")
+    assert p.seed_items_from(store, ws, better, pid, "m1", force=True) is True
+    fields = store.fields_for(pid)
+    assert fields["item#0"][0] == "pórtico em Corten (confirmado ao telefone)"   # attributed: kept
+    assert fields["material#0"][0] == "inox 304"               # unattributed hand edit: also kept
+    assert fields["thickness#0"][0] == "entre 5 e 8 mm"        # untouched by a human: refreshed
+    ws.close()
+
+
+def test_force_reseed_does_not_resurrect_a_human_cleared_field(tmp_path):
+    # A deliberate deletion is a decision too: re-seeding a field the human removed would silently
+    # undo it. human_touched_fields reads the ledger, so the cleared address stays protected.
+    ws, store, pid = _seeded_project(tmp_path)
+    store.set_field(pid, "material#0", "inox 304", channel="manual", asserted_by="Bruno")
+    store.clear_field(pid, "material#0", channel="manual", asserted_by="Bruno")
+    better = _richer_jobspec("m1", item="troféus", material="Aço Corten")
+    assert p.seed_items_from(store, ws, better, pid, "m1", force=True) is True
+    assert "material#0" not in store.fields_for(pid)
+    ws.close()
+
+
+def test_force_reseed_is_idempotent_and_never_shrinks_items(tmp_path):
+    # Re-running with the same jobspec must write nothing (no history churn), and a re-extract that
+    # now sees FEWER line items must not shrink n_items — that would hide every field on the dropped
+    # indices, human ones included, since canonical_spec only builds n_items items.
+    ws, store, pid = _seeded_project(tmp_path)
+    store.set_item_count(pid, 3)
+    same = _richer_jobspec("m1", item="troféus")
+    assert p.seed_items_from(store, ws, same, pid, "m1", force=True) is True
+    assert store.get(pid)["n_items"] == 3                       # grown-only, never shrunk
+    n_hist = len(store.field_history(pid, "item#0"))
+    assert p.seed_items_from(store, ws, same, pid, "m1", force=True) is True
+    assert len(store.field_history(pid, "item#0")) == n_hist    # identical value -> no new row
+    ws.close()
+
+
+# ---------------------------------------------------------------------------
+# Zero-hallucination: a machine seed is never a human confirmation
+# ---------------------------------------------------------------------------
+
+def test_machine_seeded_field_is_not_marked_confirmed(tmp_path):
+    # canonical_spec used to push EVERY project_field through js.confirm(), stamping
+    # SpecField(value, "user", True). So a machine-seeded item#0 rendered as src=user and counted in
+    # readiness["confirmed"] — an INFERENCE auto-promoted to a human-confirmed FACT nobody signed.
+    ws, store, pid = _seeded_project(tmp_path)
+    spec, rd, _prov, _c = p.build_canonical(store, ws, {}, pid, None)
+    fld = spec.items[0]["item"]
+    assert fld.value == "troféus"
+    assert (fld.source, fld.confirmed) == ("llm", False)
+    assert "item#0" not in rd["confirmed"]
+    assert "item#0" in rd["present"] and "item#0" in rd["unconfirmed"]
+    assert rd["estimable"] is False
+    ws.close()
+
+
+def test_human_confirmation_still_confirms(tmp_path):
+    # The other half of the property: an explicit human write DOES confirm the field.
+    ws, store, pid = _seeded_project(tmp_path)
+    store.set_field(pid, "item#0", "troféus em acrílico", channel="call", asserted_by="Bruno")
+    spec, rd, _prov, _c = p.build_canonical(store, ws, {}, pid, None)
+    fld = spec.items[0]["item"]
+    assert (fld.value, fld.source, fld.confirmed) == ("troféus em acrílico", "user", True)
+    assert "item#0" in rd["confirmed"]
+    ws.close()
+
+
+def test_is_machine_provenance_discriminator():
+    # The single rule everything above depends on, stated directly.
+    assert p.is_machine_provenance("mid:abc@x.pt", "", "") is True       # seed_items_from
+    assert p.is_machine_provenance("mid:abc@x.pt", "email", "João") is False   # attributed
+    assert p.is_machine_provenance("mid:abc@x.pt", "", "João") is False        # somebody stated it
+    assert p.is_machine_provenance("", "", "") is False                  # workbench inline edit
+    assert p.is_machine_provenance("user", "", "") is False              # explicit user sentinel
+    assert p.is_machine_provenance("capture:c-1", "", "") is False       # capture confirmation
+    assert p.is_machine_provenance(None, None, None) is False            # legacy NULL columns
+
+
 def test_build_canonical_merges_across_threads(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     store = p.ProjectStore(ws._conn)
@@ -368,10 +502,10 @@ def test_project_owners_set_and_clear():
     store = p.ProjectStore(_conn())
     pid = store.create("Z")
     assert store.owners_for(pid) == []
-    store.set_owners(pid, ["Pedro", "Rita", "Pedro", ""])    # de-duped + blank trimmed
-    assert store.owners_for(pid) == ["Pedro", "Rita"]
-    store.set_owners(pid, ["Filipe"])                         # replace semantics
-    assert store.owners_for(pid) == ["Filipe"]
+    store.set_owners(pid, ["Diogo", "Marta", "Diogo", ""])    # de-duped + blank trimmed
+    assert store.owners_for(pid) == ["Diogo", "Marta"]
+    store.set_owners(pid, ["Bruno"])                         # replace semantics
+    assert store.owners_for(pid) == ["Bruno"]
     store.set_owners(pid, [])
     assert store.owners_for(pid) == []
 
@@ -380,6 +514,80 @@ def test_delete_project_also_clears_owners():
     conn = _conn()
     store = p.ProjectStore(conn)
     pid = store.create("Del")
-    store.set_owners(pid, ["Pedro"])
+    store.set_owners(pid, ["Diogo"])
     assert store.delete(pid) is True
     assert conn.execute("SELECT COUNT(*) FROM project_owners WHERE project_id=?", (pid,)).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# ADR-026 — the timeline half of the widened re-extraction
+# ---------------------------------------------------------------------------
+
+def test_knowledge_events_returns_only_events_oldest_first_with_rowids():
+    """The pass needs the rowid (to cite the note a value came from) and oldest-first order (so a
+    later note wins), and it must NOT re-read field edits — those are extraction OUTPUT, not
+    knowledge. ``timeline()`` gives neither, which is why this is its own query."""
+    store = p.ProjectStore(_conn())
+    pid = store.create("Corten")
+    store.add_event(pid, "note", "cliente quer inox", acquired_at="2026-03-02")
+    store.add_event(pid, "decision", "avançamos a 4mm", acquired_at="2026-03-01")
+    store.set_field(pid, "deadline", "2026-04-01")          # a field edit, not knowledge
+
+    evs = store.knowledge_events(pid)
+    assert [e["text"] for e in evs] == ["avançamos a 4mm", "cliente quer inox"]   # oldest first
+    assert [e["kind"] for e in evs] == ["decision", "note"]
+    assert all(isinstance(e["rowid"], int) for e in evs)
+    assert all("deadline" not in e["text"] for e in evs)
+
+
+def test_apply_event_fields_writes_machine_provenance_so_it_stays_refreshable():
+    """The load-bearing property: a value the model READ OUT OF a note is an unconfirmed extraction,
+    not the human decision the note itself is. It must land as machine provenance — otherwise it
+    would enter human_touched_fields and freeze a model guess as if a person had signed it off."""
+    store = p.ProjectStore(_conn())
+    pid = store.create("Corten")
+    store.add_event(pid, "note", "prazo 15 de março", channel="call", asserted_by="Diogo")
+    rowid = store.knowledge_events(pid)[0]["rowid"]
+
+    written = p.apply_event_fields(store, pid, rowid, {"deadline": "2026-03-15"})
+    assert written == ["deadline"]
+    prov = store.field_provenance(pid)["deadline"]
+    assert prov["source_mid"] == f"event:{rowid}"
+    # the note's OWN attribution must not be copied onto the parsed field
+    assert prov["channel"] == "" and prov["asserted_by"] == ""
+    assert "deadline" in store.machine_fields(pid)
+    assert "deadline" not in store.human_touched_fields(pid)
+
+
+def test_apply_event_fields_never_overwrites_a_human_decision():
+    """A note that merely MENTIONS a deadline must not undo the deadline a person typed."""
+    store = p.ProjectStore(_conn())
+    pid = store.create("Corten")
+    store.set_field(pid, "deadline", "2026-04-01", channel="email", asserted_by="Diogo")
+    assert "deadline" in store.human_touched_fields(pid)
+
+    written = p.apply_event_fields(store, pid, 1, {"deadline": "2026-03-15", "material": "inox"})
+    assert written == ["material"]                                  # the human value stood
+    assert store.fields_for(pid)["deadline"][0] == "2026-04-01"
+
+
+def test_apply_event_fields_is_idempotent_and_skips_blanks():
+    """Re-running over unchanged notes must write no history rows (the idempotency convention), and
+    a blank/whitespace value is never a fact."""
+    store = p.ProjectStore(_conn())
+    pid = store.create("Corten")
+    assert p.apply_event_fields(store, pid, 1, {"material": "inox"}) == ["material"]
+    before = len(store.field_history(pid))
+
+    assert p.apply_event_fields(store, pid, 1, {"material": "inox"}) == []     # identical → no-op
+    assert p.apply_event_fields(store, pid, 2, {"material": "   ", "deadline": ""}) == []
+    assert len(store.field_history(pid)) == before
+
+
+def test_event_ref_is_machine_provenance_but_a_capture_ref_is_not():
+    """``event:<rowid>`` joins the frozen source_mid vocabulary (ADR-022 §7 → ADR-026) on the MACHINE
+    side; ``capture:<cid>`` stays human — it is a person confirming a capture."""
+    assert p.event_ref(12) == "event:12"
+    assert p.is_machine_provenance("event:12", "", "") is True
+    assert p.is_machine_provenance("capture:12", "", "") is False
+    assert p.is_machine_provenance("event:12", "call", "Diogo") is False

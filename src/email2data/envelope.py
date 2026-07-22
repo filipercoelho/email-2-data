@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import struct
 from email import message_from_bytes
 from email.header import decode_header
 from email.message import Message
 from email.utils import getaddresses, parsedate_to_datetime
 from html import unescape
-from typing import Any
+from typing import Any, Optional
 
 from .identity import canonical_id
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_CHARS = 20_000
 
@@ -423,7 +427,7 @@ def clean_email_body(text: str) -> str:
         if _CLOSING.match(s):
             # Look ahead: if ALL following non-blank lines until the next quoted header block
             # are signature elements, suppress the whole block (closing included). This handles
-            # the common "Melhores cumprimentos\n\nANA MATOS\n..." pattern.
+            # the common "Melhores cumprimentos\n\nSOFIA DIAS\n..." pattern.
             lookahead = i + 1
             while lookahead < len(lines) and _is_sig_element(lines[lookahead]):
                 lookahead += 1
@@ -477,22 +481,128 @@ def clean_email_body(text: str) -> str:
     return result.strip()
 
 
-# ── Outlook embeds signature logos as image001.png, image002.gif, … — almost never job content, so the
-# small ones are skipped before sending attachments to the spec model (drawings, not logos).
+# ── Outlook rewrites *every* inline image to image001.png, image002.gif, … — a signature logo and a
+# photo of the client's product are indistinguishable by name alone, so the name only makes an image a
+# *candidate* for dropping; :func:`_is_signature_image` decides. See that function for why.
 _SIG_IMG = re.compile(r"^image\d{3,}\.(png|gif|jpe?g|bmp)$", re.I)
+
+
+def _gif_frames(data: bytes) -> int:
+    """Frame count of a GIF, counted from Graphic Control Extension headers — never decodes.
+
+    Only used to keep the density test honest: an animated banner's bytes are spread over N frames, so
+    whole-file bytes-per-pixel overstates its detail by a factor of N (real case: a 102-frame 500x234
+    signature banner scoring 1.61 B/px — 0.016 per frame). Under-counting is the safe direction: it
+    can only make an image look denser, i.e. more likely to be kept.
+    """
+    return max(1, data.count(b"\x00\x21\xf9\x04")) if data[:3] == b"GIF" else 1
+
+
+def _is_signature_image(payload: bytes, size: Optional[tuple[int, int]], *,
+                        min_density: float, max_aspect: float, keep_bytes: int) -> bool:
+    """Is this ``imageNNN.ext`` attachment *provably* a signature logo/banner rather than job content?
+
+    Outlook renames all inline images, so the name proves nothing. Filtering on bytes alone silently
+    binned the single most informative artifact of a real lead (``p-0003`` "almofadas bordadas": a
+    235x240 / 74 KB photo of the embroidered cushion — the whole subject of the quote — dropped as a
+    "logo" because it sat under the byte threshold).
+
+    The costs here are asymmetric, so this deliberately answers "no" when unsure. A false *drop* loses
+    the drawing the spec model most needed and is invisible downstream; a false *admit* costs a few
+    cents and is squeezed out anyway by the ``max_images`` size ranking below, since logos are small.
+    That is the same principle as the never-silently-bin-a-client rule applied to attachments.
+
+    Two signals are decisive on the real corpus (see tests); everything else is admitted:
+      * **density** — a logo is a flat export with few colours (0.01–0.05 bytes/px for the recurring
+        Outlook logos), a photo or render is dense (0.98–1.78). Below ``min_density`` it is not a
+        photo. Measured *per frame*, so an animated banner cannot inflate its way past the test.
+      * **aspect** — a signature *banner* is a wide strip (up to 9.8:1); job photos measured 1.0–1.7:1.
+
+    Known false admits on the corpus, accepted as the cheap side of the trade: a Bureau Veritas cert
+    badge (0.81 B/px, 2.7:1) and the Lindo Serviço logo itself (0.58 B/px, 2.2:1).
+    """
+    if len(payload) >= keep_bytes:
+        return False                      # big enough to be real content whatever it is named
+    if size is None:
+        return False                      # unmeasurable: never drop a readable drawing on a guess
+    w, h = size
+    if w <= 0 or h <= 0:
+        return False
+    if len(payload) / (w * h * _gif_frames(payload)) < min_density:
+        return True                       # flat export — a photo cannot compress this well
+    return max(w, h) / min(w, h) > max_aspect   # wide strip — a signature banner, not a drawing
 
 
 def _is_pdf(name: str, ctype: str) -> bool:
     return (ctype or "").lower() == "application/pdf" or (name or "").lower().endswith(".pdf")
 
 
+def _is_svg(name: str, ctype: str) -> bool:
+    return (ctype or "").lower() == "image/svg+xml" or (name or "").lower().endswith(".svg")
+
+
+def _image_size(data: bytes) -> Optional[tuple[int, int]]:
+    """``(width, height)`` in pixels, read from the file *header* only — never decodes the image.
+
+    A vector export compresses to very few bytes per pixel, so a byte-size filter alone cannot tell a
+    normal drawing from a 283-megapixel one (real case: ``portico.png``, 1 MB / 17975x15776, which
+    Vertex rejects with ``400 INVALID_ARGUMENT: Provided image is not valid``). Decoding to measure
+    would defeat the purpose, hence the header parse. Returns ``None`` for formats we cannot measure —
+    the caller must let those through rather than drop a readable drawing on a guess.
+    """
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", data[16:24])
+            return int(w), int(h)
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", data[6:10])
+            return int(w), int(h)
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            if data[12:16] == b"VP8X":
+                w = int.from_bytes(data[24:27], "little") + 1
+                h = int.from_bytes(data[27:30], "little") + 1
+                return w, h
+            if data[12:16] == b"VP8 ":
+                w, h = struct.unpack("<HH", data[26:30])
+                return int(w) & 0x3FFF, int(h) & 0x3FFF
+        if data[:2] == b"\xff\xd8":  # JPEG — walk the segment chain to the frame header
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                # SOF0-SOF15 carry the dimensions; C4/C8/CC are Huffman/arithmetic tables, not frames.
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return int(w), int(h)
+                i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    except Exception:  # noqa: BLE001 — a truncated/corrupt header must not be fatal
+        return None
+    return None
+
+
 def _pdf_text(payload: bytes, max_chars: int) -> str:
     """Extract text from a PDF (pure-Python pypdf). Best-effort: returns "" on any failure or for
-    scanned/image-only PDFs (which carry no text layer — those go through the image path instead)."""
+    scanned/image-only PDFs (which carry no text layer — those go through the image path instead).
+
+    A *missing* pypdf is not "best-effort" — it is a broken install that silently turns every PDF into
+    an empty string, which looks exactly like a scanned PDF and is therefore invisible. pypdf is a
+    hard dependency (``pyproject.toml``), so that case is logged loudly rather than swallowed; it is
+    still not raised, because ``attachment_media`` must never fail a whole email over one attachment.
+    ``tests/test_envelope.py`` asserts the dependency is importable so a stale venv fails the suite.
+    """
     try:
         import io
-
+    except ImportError:  # pragma: no cover — stdlib
+        return ""
+    try:
         from pypdf import PdfReader
+    except ImportError:
+        logger.error("pypdf is not installed — PDF attachments cannot be read and are being skipped "
+                     "silently. It is a required dependency: install it (pip install -e .).")
+        return ""
+    try:
         reader = PdfReader(io.BytesIO(payload))
         chunks: list[str] = []
         total = 0
@@ -511,13 +621,27 @@ def _pdf_text(payload: bytes, max_chars: int) -> str:
 
 def attachment_media(raw: bytes, *, max_images: int = 4, min_image_bytes: int = 20_000,
                      max_image_bytes: int = 6_000_000, total_image_budget: int = 12_000_000,
-                     max_pdf_chars: int = 6_000) -> dict[str, Any]:
+                     max_pdf_chars: int = 6_000, max_image_pixels: int = 33_177_600,
+                     max_image_side: int = 8_192, max_svg_chars: int = 6_000,
+                     sig_min_density: float = 0.5, sig_max_aspect: float = 3.0,
+                     sig_keep_bytes: int = 200_000) -> dict[str, Any]:
     """Best-effort *content* extraction from attachments, for the spec LLM (NOT for display).
 
     Returns ``{"texts": [{"filename","text"}], "images": [{"filename","mime","data": bytes}]}``:
       * PDFs   → extracted text (pypdf).
-      * images → the raw bytes, so a multimodal model can read the drawing directly. Tiny inline
-        signature logos are skipped; the largest real images win within a byte budget.
+      * SVGs   → their XML source as text. An SVG is machine-readable geometry, and it is usually
+        far *smaller* than ``min_image_bytes`` — sending it down the image path meant the byte floor
+        silently discarded the most precise drawing in the email (real case: ``portico.svg``, 580 B).
+      * images → the raw bytes, so a multimodal model can read the drawing directly. Inline images
+        that are *provably* signature logos are skipped (see :func:`_is_signature_image` — the test is
+        deliberately conservative, because a wrongly dropped drawing is invisible downstream); the
+        largest survivors win within a byte budget.
+
+    Oversized images are dropped by *pixel* count as well as bytes: Vertex rejects them outright and
+    ``llm`` then burns every retry on the same deterministic 400, which surfaces as an empty spec
+    rather than an error (see :func:`_image_size`). Dropping the image keeps the rest of the email
+    extractable — a partial spec beats no spec.
+
     Never raises — a bad/unreadable attachment simply contributes nothing.
     """
     texts: list[dict[str, str]] = []
@@ -538,11 +662,22 @@ def attachment_media(raw: bytes, *, max_images: int = 4, min_image_bytes: int = 
             t = _pdf_text(payload, max_pdf_chars)
             if t:
                 texts.append({"filename": name, "text": t})
+        elif _is_svg(name, ctype):
+            t = payload.decode("utf-8", "replace").strip()[:max_svg_chars]
+            if t:
+                texts.append({"filename": name, "text": t})
         elif ctype.startswith("image/"):
             if not (min_image_bytes <= len(payload) <= max_image_bytes):
                 continue
-            if _SIG_IMG.match(name or "") and len(payload) < 200_000:
+            size = _image_size(payload)
+            if _SIG_IMG.match(name or "") and _is_signature_image(
+                    payload, size, min_density=sig_min_density,
+                    max_aspect=sig_max_aspect, keep_bytes=sig_keep_bytes):
                 continue
+            if size is not None:
+                w, h = size
+                if w * h > max_image_pixels or max(w, h) > max_image_side:
+                    continue
             imgs.append({"filename": name, "mime": ctype, "data": payload})
     imgs.sort(key=lambda x: len(x["data"]), reverse=True)  # biggest = most likely the real drawing
     picked: list[dict[str, Any]] = []

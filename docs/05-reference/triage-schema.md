@@ -62,7 +62,8 @@ and `tier1:error` — a Tier-1 failure (e.g. LLM/auth down) that **escalated** t
 `NEEDS_REVIEW` instead of dropping it, so client mail never silently vanishes from the Fila; clear it
 with `triage --full` once the LLM is back ([ADR-016](../03-decisions/adr-016-post-audit-resilience-hardening.md)).
 
-**`Entities`**: `client_name`, `client_email`, `deadline` (ISO `YYYY-MM-DD`), `money`,
+**`Entities`**: `client_name`, `client_email`, `deadline` (ISO `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM`
+when a time of day was stated — see [Editor input types](#editor-input-types-jobspecinput_type)), `money`,
 `product_or_service`, `action_requested` — drafted by the LLM, nullable; plus `nif` (PT taxpayer
 id, 9 digits, mod-11 valid) and `iban` — filled **deterministically** by `extract.py`,
 checksum-validated, authoritative ([ADR-007](../03-decisions/adr-007-nif-iban-authoritative-rest-candidates.md)).
@@ -88,3 +89,32 @@ nullable, model told to return `null` not guess (the spec is often in an unreada
 Per-piece fields are a **list** of line items: `SPEC_ITEM_KEYS` = `item, material, dimensions,
 thickness, quantity, colour_finish`; job-level `SPEC_JOB_KEYS` = `material_supplied_by`
 (coerced to `client|us|unclear|None`), `delivery`. `process` is internal — the LLM never drafts it.
+
+### Editor input types (`jobspec.INPUT_TYPE`)
+
+Spec values are stored as plain strings whatever the editor looks like. `INPUT_TYPE` maps a field
+key to the HTML input the Projetos workbench renders; anything unlisted is free text. Today:
+`deadline → datetime-local`, so `prazo` offers a native calendar + clock.
+
+**`deadline` accepts two stored shapes**, both first-class:
+
+| Shape | Written by | Renders as |
+| --- | --- | --- |
+| `2026-09-02` | `extract.py`, the LLM when no hour was stated, every pre-clock deadline | picker, widened to `T00:00` for display |
+| `2026-09-02T14:30` | the LLM when the client named an hour; the user picking a time | picker, verbatim |
+| anything else (`meados de agosto`) | LLM/user free text | **text input, value shown verbatim** |
+
+Two invariants the renderer must keep — both are load-bearing, and both have a regression test:
+
+1. **Never hide a stored value the widget can't display.** A picker can only hold a value it can
+   parse; given anything else the browser renders an *empty* box, which on a required field reads as
+   "no deadline" when one exists. So `inputType()` (`projetos_page.py`) degrades to a text input for
+   any unparseable value. Applies to every future `INPUT_TYPE` entry, not just this one.
+2. **Display widening must not reach the store.** A `datetime-local` input cannot hold a bare date,
+   so `pickerValue()` widens `2026-09-02` → `2026-09-02T00:00` *for rendering only*. That midnight is
+   invented; nobody stated it. It is never written back — no `change` event fires unless the user
+   actually edits the field, and only a real edit persists a time.
+
+The LLM side of the contract lives in `config/triage_playbook.md` §entities, which instructs the
+model to use the longer shape **only** when the message states a time of day — never to invent an
+hour to fill it.

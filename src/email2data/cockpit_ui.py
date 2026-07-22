@@ -33,6 +33,9 @@ _NAV = [
     ("projetos",     "Projetos",      "/projetos"),
     ("para-ti",      "Para ti",       "/para-ti"),
     ("capturas",     "Capturas",      "/capturas"),
+    # Administração (/admin) — IMAP account inventory + force-sync. Last in the strip: it is a
+    # configuration surface, not a decision lens, so it must never sit between the queues.
+    ("admin",        "Admin",         "/admin"),
 ]
 
 
@@ -58,7 +61,7 @@ def page(
 ) -> str:
     """Assemble a full cockpit lens page.
 
-    ``active``     — one of "fila" | "contrapartes" | "projetos" | "para-ti"
+    ``active``     — one of "fila" | "contrapartes" | "projetos" | "para-ti" | "capturas" | "admin"
     ``body_html``  — the main content area (everything below the header)
     ``embeds``     — {NAME: value} → ``const NAME = <json>;`` injected before lens_js
     ``lens_js``    — lens-specific JS; must define render(), paletteItems(q), onKey(e)
@@ -89,7 +92,8 @@ def _nav_html(active: str, counts: dict[str, int]) -> str:
             f' <span class="nbadge">{n}</span>' if n else ""
         )
         cls = "nlink on" if key == active else "nlink"
-        links.append(f'<a class="{cls}" href="{href}">{label}{badge}</a>')
+        # data-nav lets a lens refresh its badges in place from a poll, without a page reload.
+        links.append(f'<a class="{cls}" data-nav="{key}" href="{href}">{label}{badge}</a>')
     return (
         "<header>\n<div class='htop'>"
         + "<span class='logo'>email-2-data</span>"
@@ -168,7 +172,9 @@ _HEAD = """<!doctype html>
     vertical-align:middle;background:currentColor;aria-hidden:true}
   .clock.red{color:var(--red)} .clock.amber{color:var(--amber)}
   .clock.green{color:var(--green)} .clock.none{color:var(--mut2)}
-  .clock.red .d{animation:beat 2s ease-in-out infinite}
+  /* Only the CRITICAL tier pulses. When most of a real queue is red (email latency ≥ a day is
+     normal here), animating every red dot destroys the signal — reserve motion for the oldest. */
+  .clock.red.crit .d{animation:beat 2s ease-in-out infinite}
   /* ── component kit: owner chip ───────────────────────────────────────── */
   .owner{flex:0 0 auto;font-size:12px;color:var(--int);background:#f0fdfa;
     border:1px solid #bfe6e0;border-radius:20px;padding:2px 10px;cursor:pointer;white-space:nowrap}
@@ -210,6 +216,12 @@ _HEAD = """<!doctype html>
   .qtoggle,.rawtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0;display:block}
   .qtoggle:hover,.rawtoggle:hover{color:var(--ac)}
   .rawbody{margin-top:4px;border-top:1px dashed var(--bd);padding-top:6px}
+  /* translate-to-English reading aid (ADR-032) */
+  .tract{margin-top:6px}
+  .trbtn{font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0}
+  .trbtn:hover{color:var(--ac)} .trbtn[disabled]{opacity:.55;cursor:default}
+  .trbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;border-left:2px solid var(--ac);padding-left:8px}
+  .trbody.trerr{border-left-color:var(--red,#dc2626);color:var(--red,#dc2626)}
   .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
   .tatt{display:inline-block;font-size:11px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
   .tatt:hover{background:#dfe8ff}
@@ -254,7 +266,7 @@ _HEAD = """<!doctype html>
   .hint{margin-top:14px;color:var(--mut2);font-size:11.5px;text-align:center}
   .hint b{color:var(--mut);font-weight:680}
   /* ── toast / menu / palette / help ──────────────────────────────────── */
-  .toast{position:fixed;bottom:22px;left:50%%;transform:translateX(-50%%);background:var(--tx);color:#fff;
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--tx);color:#fff;
     padding:9px 16px;border-radius:9px;font-size:13px;box-shadow:var(--shadow);z-index:80}
   .menu{position:absolute;background:#fff;border:1px solid var(--bd);border-radius:10px;
     box-shadow:0 4px 16px rgba(20,24,28,.14);z-index:60;min-width:170px;padding:4px}
@@ -272,7 +284,7 @@ _HEAD = """<!doctype html>
   .card .kr:first-of-type{border-top:none}
   .pcard{background:#fff;border-radius:14px;box-shadow:0 10px 40px rgba(20,24,28,.22);
     width:min(560px,92vw);margin-top:12vh;overflow:hidden}
-  #_pq{width:100%%;border:0;border-bottom:1px solid var(--bd);padding:15px 18px;font-size:15px;outline:none}
+  #_pq{width:100%;border:0;border-bottom:1px solid var(--bd);padding:15px 18px;font-size:15px;outline:none}
   #_presults{max-height:50vh;overflow:auto;padding:6px}
   .pi{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;cursor:pointer}
   .pi.on{background:#eef2ff}
@@ -320,7 +332,9 @@ function toast(m){const t=$('#_toast');if(!t)return;t.textContent=m;t.classList.
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
 function decidedShort(d){d=(d||'').toLowerCase();if(!d)return '';if(d.startsWith('tier0'))return 'regra';if(d.includes('gemini'))return 'Gemini';if(d.includes('claude'))return 'Claude';if(d.startsWith('tier1'))return 'IA';return d.split(':').pop();}
 const S={
-  nadaDesfazer:'nada para desfazer',desfeito:'desfeito',revertido:'falhou — revertido',
+  /* Two failure strings, honestly distinct: `revertido` ONLY where the optimistic change was in fact
+     rolled back; `falhou` where the action simply did not happen (nothing was reverted). */
+  nadaDesfazer:'nada para desfazer',desfeito:'desfeito',revertido:'falhou — revertido',falhou:'falhou',
   semResultados:'sem resultados',
   sincronizando:'a sincronizar…',sincronizado:'sincronizado',
   syncEmCurso:'sync já em curso',syncFalhou:'sync falhou',
@@ -412,6 +426,12 @@ function msgHTML(m, opts){
     provBadges='<div class="tprov">'+labels.map(l=>'<span class="tprovbadge" title="campo extraído desta mensagem">'+esc(l)+'</span>').join('')+'</div>';
   }
   const embeddedBadge=m.embedded?'<span class="tembedded">via reencaminhamento</span>':'';
+  // Translate-to-English reading aid (ADR-032): button-only, only where there is a visible body.
+  // The delegated handler (translateMsg) reads this message's .tbody text and fills .trbody.
+  const trHTML=vis
+    ?'<div class="tract"><button class="trbtn" type="button" data-mid="'+esc(m.message_id||'')
+       +'">traduzir (EN)</button></div><div class="trbody hidden"></div>'
+    :'';
   return '<div class="tmsg'+(m.embedded?' embedded':'')+'">'
     +'<div class="tmeta">'
     +'<span class="taddr">'+esc(m.from_email||'?')+'</span>'
@@ -423,13 +443,40 @@ function msgHTML(m, opts){
     +(atts?'<span class="tatts">'+atts+'</span>':'')
     +'</div>'
     +provBadges
-    +visHTML+quoteHTML+rawToggle
+    +visHTML+quoteHTML+rawToggle+trHTML
     +'</div>';
 }
 /* Render a full thread panel (summary line + all messages). */
 function msgThreadHTML(msgs, opts){
   const head='<div class="thead"><span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
   return '<div class="texp">'+head+msgs.map(m=>msgHTML(m,opts)).join('')+'</div>';
+}
+/* Translate-to-English reading aid (ADR-032). Reads THIS message's visible .tbody, POSTs it to
+   /api/translate, and shows the English in the sibling .trbody. Once translated, re-clicking just
+   toggles between the original and the translation (no second call). Never sends, never stored. */
+async function translateMsg(btn){
+  const msg=btn.closest('.tmsg'); if(!msg) return;
+  const slot=msg.querySelector('.trbody'); if(!slot) return;
+  if(slot.dataset.done){                         // already have it — just toggle original/translation
+    const hid=slot.classList.toggle('hidden');
+    btn.textContent=hid?'traduzir (EN)':'ver original';
+    return;
+  }
+  const src=((msg.querySelector('.tbody')||{}).textContent||'').trim();
+  if(!src) return;
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='a traduzir…';
+  slot.classList.remove('trerr');
+  try{
+    const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message_id:btn.dataset.mid||'', text:src})});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){ slot.textContent=d.text||''; slot.dataset.done='1'; slot.classList.remove('hidden');
+      btn.textContent='ver original'; }
+    else { slot.textContent='tradução falhou: '+esc(d.error||('HTTP '+r.status));
+      slot.classList.remove('hidden'); slot.classList.add('trerr'); btn.textContent=orig; }
+  }catch(err){ slot.textContent='tradução falhou: sem resposta do servidor';
+    slot.classList.remove('hidden'); slot.classList.add('trerr'); btn.textContent=orig; }
+  finally{ btn.disabled=false; }
 }
 /* Quote + raw-toggle wiring — attach once to a container. */
 function msgWireQuoteToggles(container){
@@ -466,6 +513,13 @@ async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sy
 
 # ── shell event wiring (runs after lens JS, calls lens functions) ─────────────
 _SHELL_EVENTS = r"""
+/* Translate-to-English (ADR-032): one delegated, CAPTURE-phase handler covers every page that renders
+   msgHTML (Fila, Projetos-Origem, Para-ti) without per-page wiring. Capture + stopPropagation so a
+   click on the button never also triggers the ancestor row/detail click handlers underneath it. */
+document.addEventListener('click',e=>{
+  const b=e.target.closest('.trbtn'); if(!b) return;
+  e.preventDefault(); e.stopPropagation(); translateMsg(b);
+}, true);
 $('#_pq').addEventListener('input',e=>{_pi=paletteItems(e.target.value);_pf=0;_rp();});
 $('#_presults').addEventListener('click',e=>{const el=e.target.closest('.pi');if(el)_runP(parseInt(el.dataset.i,10));});
 $('#_palette').addEventListener('click',e=>{if(e.target.id==='_palette')closePalette();});

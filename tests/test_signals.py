@@ -4,22 +4,22 @@ from email2data.schema import DIRECTION
 from email2data.signals import detect_forward, header_signals
 
 INBOUND = b"From: Cliente <joao@cliente.pt>\r\nSubject: orcamento\r\n\r\nola\r\n"
-INTERNAL = b"From: Pedro <pedro.ferreira@lindoservico.pt>\r\nSubject: RE: x\r\n\r\nola\r\n"
+INTERNAL = b"From: Diogo <diogo.costa@lindoservico.pt>\r\nSubject: RE: x\r\n\r\nola\r\n"
 BULK = (b"From: news@shop.com\r\nSubject: promo\r\nList-Unsubscribe: <https://x/u>\r\n\r\nbuy\r\n")
 AUTO = b"From: noreply@bank.pt\r\nSubject: aviso\r\nAuto-Submitted: auto-generated\r\n\r\nx\r\n"
-SENT = b"X-Email2Data-Source: Enviados\r\nFrom: Pedro <pedro.ferreira@lindoservico.pt>\r\nTo: joao@cliente.pt\r\nSubject: RE: orcamento\r\n\r\nSegue o orcamento.\r\n"
-SENT_PLAIN = b"X-Email2Data-Source: Sent\r\nFrom: Pedro <pedro.ferreira@lindoservico.pt>\r\nTo: supplier@acme.pt\r\nSubject: Pedido\r\n\r\nBoa tarde.\r\n"
+SENT = b"X-Email2Data-Source: Enviados\r\nFrom: Diogo <diogo.costa@lindoservico.pt>\r\nTo: joao@cliente.pt\r\nSubject: RE: orcamento\r\n\r\nSegue o orcamento.\r\n"
+SENT_PLAIN = b"X-Email2Data-Source: Sent\r\nFrom: Diogo <diogo.costa@lindoservico.pt>\r\nTo: supplier@acme.pt\r\nSubject: Pedido\r\n\r\nBoa tarde.\r\n"
 # Colleague reply CC'd to orcamentos — FROM our domain, To: external client (no Sent folder header)
 COLLEAGUE_REPLY_TO_CLIENT = (
-    b"From: Ana Matos <ana.matos@lindoservico.pt>\r\n"
-    b"To: comunicacao@genesisdentalclinics.pt\r\n"
+    b"From: Sofia Dias <sofia.dias@lindoservico.pt>\r\n"
+    b"To: comunicacao@cliente-exemplo.pt\r\n"
     b"Cc: orcamentos@lindoservico.pt\r\n"
     b"Subject: Re: pedido de cotacao para producao de mascote\r\n\r\nBoa tarde.\r\n"
 )
 # Internal forward — FROM our domain, To: also our domain only
 INTERNAL_FORWARD = (
-    b"From: Ana Matos <ana.matos@lindoservico.pt>\r\n"
-    b"To: pedro.ferreira@lindoservico.pt\r\n"
+    b"From: Sofia Dias <sofia.dias@lindoservico.pt>\r\n"
+    b"To: diogo.costa@lindoservico.pt\r\n"
     b"Subject: Fwd: pedido de cotacao\r\n\r\nVe isto.\r\n"
 )
 
@@ -56,7 +56,7 @@ def test_schema_direction_constant_covers_every_emitted_value():
 
 def test_our_domain_reply_to_external_client_is_outbound():
     # A colleague's reply CC'd to orcamentos — FROM @lindoservico.pt, To: external → outbound.
-    # This is the "ana.matos replied to the client" case; the thread clock must flip to AWAITING.
+    # This is the "sofia.dias replied to the client" case; the thread clock must flip to AWAITING.
     assert _sig(COLLEAGUE_REPLY_TO_CLIENT).direction == "outbound"
 
 

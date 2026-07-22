@@ -3,7 +3,7 @@
 Theory under test:
   * direction + bulk  -> decidable from HEADERS (cheap, reliable)
   * counterparty + purpose -> need the BODY TEXT read by the LLM (domain is only a weak hint;
-    e.g. Vision Box/Amadeus is a CLIENT despite the domain).
+    e.g. a corporate domain can be a CLIENT despite the domain).
 
 Run: .venv/bin/python design/poc-diagnose.py
 """
@@ -23,7 +23,7 @@ from google.genai import types  # noqa: E402
 
 from email2data.envelope import parse_eml  # noqa: E402
 
-PROJECT, LOCATION, MODEL = "materials-492723", "global", "gemini-2.5-flash"
+PROJECT, LOCATION, MODEL = "example-gcp-project", "global", "gemini-2.5-flash"
 OURS = "lindoservico"
 BODY_CAP = 4000
 
@@ -53,8 +53,8 @@ Definições:
 - SUPPLIER = alguém a quem NÓS compramos materiais ou serviços (nós é que encomendamos).
 - INTERNAL = colega interno (@lindoservico.pt).
 - BULK = newsletter / publicidade / promoção em massa.
-O domínio é só uma pista fraca: tanto clientes como fornecedores têm qualquer domínio. Ex.: Vision Box / Amadeus
-é CLIENTE nosso, apesar do domínio. Lê o corpo: quem pede o quê a quem?
+O domínio é só uma pista fraca: tanto clientes como fornecedores têm qualquer domínio. Ex.: um domínio
+corporativo pode ser CLIENTE nosso, apesar do domínio. Lê o corpo: quem pede o quê a quem?
 
 purpose: PO_FROM_CLIENT, ESTIMATE_REQUEST_FROM_CLIENT, OUR_ORDER_TO_SUPPLIER, SUPPLIER_REPLY_OR_CONFIRMATION,
 INVOICE_OR_ACCOUNTING, FOLLOW_UP, PUBLICITY, INTERNAL_OPS, OTHER.
@@ -109,7 +109,7 @@ for r in sorted(clients, key=lambda x: -x["urgency"]):
     print(f"  u{r['urgency']:>3} {r['purpose']:<28} {r['dom']:<22} {r['subject']}")
 
 print("\n--- validation: specific domains (body should override domain) ---")
-for needle in ("amadeus", "vision", "cortico", "spandex", "festool", "toconline"):
+for needle in ("client-a", "client-b", "supplier-a"):   # put your own ambiguous domains here
     for r in rows:
         if needle in r["dom"]:
             print(f"  {needle:<9} -> {r['counterparty']:<8} {r['purpose']:<28} u{r['urgency']:<3} {r['subject']}")

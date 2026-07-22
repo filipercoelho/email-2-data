@@ -1,4 +1,11 @@
-# email-2-data — one-command local deploy:  docker compose up --build
+# email-2-data — one-command local deploy:  docker compose up -d --build
+#
+# DOCKER IS THE ONLY DEPLOYMENT TARGET. Every long-running process for this project runs as a service
+# here — the webapp AND the intake worker. Do not run `email2data serve` or `email2data intake-bot`
+# straight from the host: the container already holds 127.0.0.1:8042, so a host `serve` silently loses
+# the bind and you end up verifying stale image code against a page the container is really serving.
+# To see a source change, rebuild:  docker compose up -d --build
+#
 # Secrets come from .env (never committed). Data dirs are mounted so the image stays clean.
 services:
   email2data:
@@ -13,8 +20,14 @@ services:
       # collapses `$$` -> `$`, which silently corrupts any password containing `$` (and would differ
       # from local runs). Mounting the file keeps one parser and identical behavior everywhere.
       - ./.env:/app/.env:ro
-      # settings.json + gazetteer.csv (read-only): runtime config, not baked into the image.
-      - ./config:/app/config:ro
+      # settings.json + gazetteer.csv: runtime config, not baked into the image.
+      # READ-WRITE (was :ro) because the Admin page (/admin → POST /api/admin/accounts) edits the
+      # IMAP account list, and that write lands in config/settings.json. With :ro the route returns
+      # a 500 inside the container while working fine on a local run — the deploy would contradict
+      # the UI. The trade-off is deliberate and worth stating: the container can now write anything
+      # under config/, including the playbooks. What lives there is version-controlled config, not
+      # precious data — and the secrets are NOT here: .env stays mounted :ro above.
+      - ./config:/app/config
       # Persisted across restarts: the .eml corpus, results.jsonl, and the sync.db UID watermark.
       - ./corpus:/app/corpus
       - ./out:/app/out
@@ -29,4 +42,38 @@ services:
       # mounted config/ dir, so no extra volume is needed.
     # environment:
     #   - GOOGLE_APPLICATION_CREDENTIALS=/app/config/sa-key.json
+    restart: unless-stopped
+
+  # ── Conversational-intake Telegram worker (ADR-019/-021) ──────────────────────────────────────
+  # Was the one process still deployed outside Docker; now a service, so "everything runs in Docker"
+  # is true of the whole project and not just the web tier.
+  #
+  # It binds NO port and publishes none — by design (ADR-021): it long-polls Telegram OUTBOUND and
+  # writes captures through the store seam, never through the HTTP API, which is exactly why 8042 can
+  # stay closed. Adding a port here would undo that.
+  intake-bot:
+    build: .
+    command: ["email2data", "intake-bot"]
+    # THE ordering constraint, not a convenience: the worker opens workspace.db with migrate=False
+    # (cli.py) and exits with WorkspaceVersionError rather than upgrade a schema behind the webapp's
+    # back — ADR-021's single-migrator gate. service_healthy means the webapp has already booted and
+    # migrated, so a fresh volume or a schema bump starts in the right order instead of crash-looping.
+    depends_on:
+      email2data:
+        condition: service_healthy
+    # The image's HEALTHCHECK probes /healthz on 8042 — right for the webapp, meaningless here, since
+    # this service deliberately serves no HTTP. Left inherited it fails forever and reports a healthy
+    # worker as "unhealthy", which is worse than no signal: it trains you to ignore `docker ps`.
+    # Liveness is the main process itself — if the poller dies the container exits and `restart:
+    # unless-stopped` brings it back, which is the real signal.
+    healthcheck:
+      disable: true
+    # Same mounts as the webapp: it shares the one precious workspace.db, reads the same settings +
+    # .env (bot token), and needs the ADC mount because voice captures are transcribed on Vertex.
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./config:/app/config
+      - ./corpus:/app/corpus
+      - ./out:/app/out
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
     restart: unless-stopped

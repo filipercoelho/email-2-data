@@ -7,6 +7,8 @@ in-memory/tmp Workspace; no network, no LLM.
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from email2data.cockpit import (AWAITING, HANDLED, INTERNAL, WE_OWE, _age_hours, _parse_dt,
                                  build_fila, fold_threads, thread_clock)
 from email2data.workspace import Workspace
@@ -54,7 +56,7 @@ def test_we_owe_turns_red_after_a_day():
 
 def test_we_replied_is_awaiting():
     rows = [_row("t1", "m1", ago(10)),
-            _row("t1", "m2", ago(2), direction="outbound", from_email="pedro@lindoservico.pt")]
+            _row("t1", "m2", ago(2), direction="outbound", from_email="diogo@lindoservico.pt")]
     _, c = _clock_for(rows)
     assert c["state"] == AWAITING and c["label"].startswith("à espera")
 
@@ -166,18 +168,83 @@ def test_fila_sort_we_owe_client_first_then_awaiting():
         [_row("owe_client_old", "a", ago(30))] +                                 # WE_OWE CLIENT 30h
         [_row("owe_client_new", "b", ago(2))] +                                  # WE_OWE CLIENT 2h
         [_row("owe_supplier", "c", ago(40), counterparty="SUPPLIER",
-              purpose="SUPPLIER_REPLY_OR_CONFIRMATION", from_email="x@spandex.com")] +  # WE_OWE SUPPLIER
+              purpose="SUPPLIER_REPLY_OR_CONFIRMATION", from_email="x@laminate-example.com")] +  # WE_OWE SUPPLIER
         [_row("await", "d", ago(50)),
-         _row("await", "e", ago(5), direction="outbound", from_email="pedro@lindoservico.pt")]  # AWAITING
+         _row("await", "e", ago(5), direction="outbound", from_email="diogo@lindoservico.pt")]  # AWAITING
     )
-    order = [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    order = [r["thread_root"] for r in build_fila(rows, now=NOW, order="risk")]
     assert order == ["owe_client_old", "owe_client_new", "owe_supplier", "await"]
+
+
+def test_fila_default_order_is_most_recent_first():
+    """The DEFAULT queue order is newest activity first — the mailbox-shaped view people expect when
+    they open the Fila. Response risk deliberately does NOT apply here: the oldest WE_OWE thread, which
+    the risk order puts on top, must sink to the bottom."""
+    rows = [_row("old", "a", ago(30)),
+            _row("newest", "b", ago(2)),
+            _row("middle", "c", ago(9))]
+    assert [r["thread_root"] for r in build_fila(rows, now=NOW)] == ["newest", "middle", "old"]
+
+
+def test_recent_order_uses_last_activity_not_thread_start():
+    """A long-running thread that got a message 1h ago beats a thread that started later but went
+    quiet — the queue tracks the conversation's LAST move, not its birth."""
+    rows = [_row("old_thread_fresh_msg", "a", ago(50)),
+            _row("old_thread_fresh_msg", "b", ago(1)),
+            _row("started_later", "c", ago(20))]
+    order = [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    assert order == ["old_thread_fresh_msg", "started_later"]
+
+
+def test_risk_order_still_available_and_really_differs():
+    """The response-risk order is the documented core of this module — the new default must not delete
+    it. Same rows, two orders, genuinely different answers."""
+    rows = [_row("owe_client_old", "a", ago(30)),
+            _row("owe_client_new", "b", ago(2)),
+            _row("await", "d", ago(50)),
+            _row("await", "e", ago(5), direction="outbound", from_email="diogo@lindoservico.pt")]
+    recent = [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    risk = [r["thread_root"] for r in build_fila(rows, now=NOW, order="risk")]
+    assert recent == ["owe_client_new", "await", "owe_client_old"]   # by last activity
+    assert risk == ["owe_client_old", "owe_client_new", "await"]     # by who owes, and for how long
+
+
+def test_rows_carry_both_order_keys_so_the_ui_can_flip_locally():
+    """Both keys ride on every row: the lens toggles order client-side without a round-trip AND
+    without re-implementing the risk tuple in JS (where it would drift from this definition)."""
+    [r] = build_fila([_row("t1", "m1", ago(6))], now=NOW)
+    assert set(r["order_keys"]) == {"recent", "risk"}
+    assert r["order_keys"]["risk"] == [3, 1, r["clock"]["age_hours"]]   # WE_OWE + high-value CLIENT
+    assert r["order_keys"]["recent"] == _parse_dt(ago(6)).timestamp()
+    assert r["last_date"] == _parse_dt(ago(6)).isoformat()
+
+
+def test_undated_thread_sinks_to_the_bottom_of_the_recent_order():
+    """A thread with no parseable date must not float to the TOP of a newest-first queue (it would
+    look like the most urgent thing in the shop). It sorts as epoch 0."""
+    rows = [_row("dated", "a", ago(30)), _row("undated", "b", "not a date")]
+    assert [r["thread_root"] for r in build_fila(rows, now=NOW)] == ["dated", "undated"]
+
+
+def test_recent_order_is_deterministic_on_identical_timestamps():
+    """The Fila is rebuilt on every request; two threads with the same last activity must not shuffle
+    between builds or rows would move under the cursor mid-decision."""
+    rows = [_row("t1", "a", ago(3)), _row("t2", "b", ago(3), subject="Outro")]
+    first = [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    assert first == [r["thread_root"] for r in build_fila(rows, now=NOW)]
+
+
+def test_unknown_order_raises_instead_of_silently_falling_back():
+    """A typo'd order must fail loudly — silently serving a different queue than asked for is exactly
+    the kind of quiet wrongness this codebase refuses."""
+    with pytest.raises(ValueError):
+        build_fila([_row("t1", "m1", ago(2))], now=NOW, order="urgencia")
 
 
 def test_owner_is_surfaced_and_sem_dono_is_blank():
     rows = [_row("t1", "m1", ago(3)), _row("t2", "m2", ago(4), subject="Outro")]
-    by_root = {r["thread_root"]: r for r in build_fila(rows, {"t1": {"owner": "pedro"}}, now=NOW)}
-    assert by_root["t1"]["owner"] == "pedro"
+    by_root = {r["thread_root"]: r for r in build_fila(rows, {"t1": {"owner": "diogo"}}, now=NOW)}
+    assert by_root["t1"]["owner"] == "diogo"
     assert by_root["t2"]["owner"] == ""                          # sem dono
 
 
@@ -247,12 +314,12 @@ def test_future_date_clamps_age_to_zero():
 def test_thread_state_persists_across_reconnect(tmp_path):
     db = tmp_path / "w.db"
     ws = Workspace(db).connect()
-    ws.set_thread_owner("t1", "pedro")
+    ws.set_thread_owner("t1", "diogo")
     ws.set_thread_handled("t1", True)
     ws.close()
     ws2 = Workspace(db).connect()                                # == the pipeline re-ran
     st = ws2.thread_states()["t1"]
-    assert st["owner"] == "pedro" and st["handled"] is True and st["handled_ts"]
+    assert st["owner"] == "diogo" and st["handled"] is True and st["handled_ts"]
     ws2.close()
 
 

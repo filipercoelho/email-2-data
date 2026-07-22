@@ -43,6 +43,24 @@ FIELDS: list[tuple[str, str, str, str, str]] = [
 _TIER = {k: t for k, _, t, _, _ in FIELDS}
 _SCOPE = {k: s for k, _, _, _, s in FIELDS}
 _QUESTION = {k: q for k, _, _, q, _ in FIELDS}
+
+# Editor input type per field, for the UI only — the stored value stays a plain string either way.
+# Everything not listed here is free text.
+#
+# ``deadline`` is a *widened* ISO contract: **either** ``YYYY-MM-DD`` **or** ``YYYY-MM-DDTHH:MM`` when
+# a time of day was actually stated (schema.Entities.deadline, triage_playbook §entities). Date-only
+# is still first-class — it is what the deterministic extractor emits, what the LLM emits unless the
+# client named an hour, and what every deadline stored before this existed looks like.
+#
+# TWO constraints any renderer must honour, both learned the hard way:
+#   1. These widgets can only *display* a value they can parse. A vague or legacy value
+#      ("meados de agosto") must fall back to a text box that still SHOWS it, never an empty picker —
+#      an empty box on a required field reads as "no deadline" when one exists.
+#   2. A ``datetime-local`` input cannot hold a bare date, so a date-only value has to be widened to
+#      midnight *for display*. That is a rendering artifact: never write the invented ``T00:00`` back
+#      to the store on its own. See ``pickerValue`` in projetos_page.
+INPUT_TYPE: dict[str, str] = {"deadline": "datetime-local"}
+
 MUST = [k for k, _, t, _, _ in FIELDS if t == "must"]
 SHOULD = [k for k, _, t, _, _ in FIELDS if t == "should"]
 # Per-item vs job-level split (registry order).

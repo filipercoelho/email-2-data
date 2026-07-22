@@ -11,18 +11,123 @@ the route signatures (the future-import would make it an unresolved string -> 42
 
 import hashlib
 import json
+import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import (accounts as _accounts, capture_resolve, captures, captures_page, classifier,
-               clientdraft, cockpit, contrapartes_page, crm as _crm, export as _export, fila_page,
-               jobspec as js, para_ti, para_ti_page, project as _project, projetos_page, replydraft,
-               report)
+from . import (accounts as _accounts, admin_page, capture_resolve, captures, captures_page,
+               classifier, clientdraft, cockpit, contrapartes_page, crm as _crm, descdraft,
+               export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
+               project as _project, projetos_page, replydraft, report, translate as _translate)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
+
+# ── Admin: the account-editor contract (see /api/admin/accounts) ────────────────────────────────
+# A plausible POSIX environment-variable NAME. ``password_env`` names the variable; the value never
+# enters this process through HTTP.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Keys whose PRESENCE in an account-editor body means the client tried to send a secret VALUE. The
+# request is rejected outright rather than filtered: silently dropping it would teach the caller that
+# posting a password is acceptable, and the next writer might not filter. ``*_env`` names are fine —
+# they are identifiers, not secrets — so they are absent from this set by construction.
+_SECRET_BODY_KEYS = frozenset({
+    "password", "passwd", "pwd", "pass", "secret", "credential", "credentials",
+    "token", "api_key", "apikey", "auth", "authorization",
+})
+
+# The cost tiers (llm.tiers in settings.json), pt-PT-labelled in the Projetos UI. Shared by the two
+# explicitly-paid-for LLM actions on the Projetos page: re-extraction and the client-email polish.
+_REEXTRACT_TIERS = ("light", "standard", "heavy")
+
+# Internal flags, not facts we would ever confirm back to a client (mirrors replydraft._HIDE).
+_POLISH_HIDE = {"client_identity", "design_ready", "process"}
+
+
+def _find_secret_key(node: Any, depth: int = 0) -> str | None:
+    """Walk a decoded JSON body and return the first key that looks like a secret VALUE slot.
+
+    Depth-bounded so a deeply-nested body cannot blow the stack before it is rejected."""
+    if depth > 6:
+        return None
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if str(k).strip().lower() in _SECRET_BODY_KEYS:
+                return str(k)
+            found = _find_secret_key(v, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for v in node[:200]:
+            found = _find_secret_key(v, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def validate_accounts(raw: Any) -> tuple[list[dict[str, Any]], str]:
+    """Validate an account-editor payload BEFORE anything is written.
+
+    Returns ``(accounts, "")`` on success or ``([], "<mensagem pt-PT>")`` on the first failure.
+    Module-level (not a closure) so the rules are testable without standing up an app.
+
+    Every account is rebuilt from an allowlist — id / username / host / port / password_env /
+    mailboxes — so no extra key from the request body can reach ``settings.json``.
+    """
+    if not isinstance(raw, list) or not raw:
+        return [], "É preciso pelo menos uma conta."
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for i, a in enumerate(raw, start=1):
+        if not isinstance(a, dict):
+            return [], f"Conta {i}: formato inválido."
+        aid = str(a.get("id", "") or "").strip()
+        if not aid:
+            return [], f"Conta {i}: o id é obrigatório."
+        if aid in seen:
+            return [], f"Conta {i}: id duplicado ({aid})."
+        seen.add(aid)
+        username = str(a.get("username", "") or "").strip()
+        if not username:
+            return [], f"Conta {aid}: o utilizador é obrigatório."
+        env = str(a.get("password_env", "") or "").strip()
+        if not env:
+            return [], f"Conta {aid}: falta o nome da variável de ambiente (password_env)."
+        if not _ENV_NAME_RE.match(env):
+            return [], (f"Conta {aid}: 'password_env' tem de ser um NOME de variável de ambiente "
+                        "(letras, dígitos e _). Nunca a password.")
+        host = str(a.get("host", "") or "").strip()
+        if not host:
+            return [], f"Conta {aid}: falta o servidor IMAP."
+        try:
+            port = int(a.get("port", 993))
+        except (TypeError, ValueError):
+            return [], f"Conta {aid}: porta inválida."
+        if not 0 < port < 65536:
+            return [], f"Conta {aid}: porta fora do intervalo (1–65535)."
+        mbs_raw = a.get("mailboxes")
+        if not isinstance(mbs_raw, list) or not mbs_raw:
+            return [], f"Conta {aid}: indica pelo menos uma caixa de correio."
+        mailboxes: list[str] = []
+        for m in mbs_raw:
+            name = str(m or "").strip()
+            if not name:
+                return [], f"Conta {aid}: caixa de correio vazia na lista."
+            if name not in mailboxes:
+                mailboxes.append(name)
+        out.append({"id": aid, "username": username, "host": host, "port": port,
+                    "password_env": env, "mailboxes": mailboxes})
+    hosts = {(a["host"], a["port"]) for a in out}
+    if len(hosts) > 1:
+        # Honest limitation, not a stylistic rule: fetch._connect reads imap.host/imap.port ONCE for
+        # every account. Accepting per-account servers here would persist a setting the fetcher
+        # ignores — a silent lie on the page. Rejected instead.
+        return [], "Todas as contas têm de usar o mesmo servidor e porta IMAP."
+    return out, ""
 
 
 def _load_jobspecs(out_dir: Path) -> dict[str, Any]:
@@ -34,6 +139,41 @@ def _load_jobspecs(out_dir: Path) -> dict[str, Any]:
                 j = json.loads(line)
                 m[j["message_id"]] = j
     return m
+
+
+# ── periodic sync (ADR-023) ──────────────────────────────────────────────────────────────────────
+# Module-level so the schedule is testable without standing up a whole app: the loop takes the
+# already-locked ``run_sync`` as a parameter rather than closing over it.
+
+SYNC_INTERVAL_DEFAULT_MIN: float = 15.0
+
+
+def resolve_sync_interval(settings: dict[str, Any]) -> float:
+    """Seconds between background syncs. ``sync.interval_minutes`` <= 0 (or unparseable) disables the
+    periodic loop, leaving startup + the manual button as the only ingestion points."""
+    try:
+        mins = float(settings.get("sync", {}).get("interval_minutes", SYNC_INTERVAL_DEFAULT_MIN))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, mins) * 60.0
+
+
+def periodic_sync_loop(run_sync, interval_s: float, stop: threading.Event, log=print) -> None:
+    """Tick ``run_sync`` every ``interval_s`` until ``stop`` is set.
+
+    Uses ``Event.wait`` rather than ``sleep`` so shutdown is immediate instead of blocking a whole
+    interval. A tick that finds a manual sync already holding the lock is skipped, not queued — the
+    next tick covers it. ``run_sync`` never raises by contract, but we guard anyway: this runs on a
+    daemon thread where an escaping exception would kill auto-refresh silently for the whole session.
+    """
+    while not stop.wait(interval_s):
+        try:
+            r = run_sync() or {}
+        except Exception as exc:  # noqa: BLE001 — a dead thread means silent staleness; keep ticking
+            log(f"  periodic sync failed — {type(exc).__name__}: {exc}")
+            continue
+        if r.get("error"):
+            log(f"  periodic sync skipped — {r['error']}")
 
 
 def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply_pb=None,
@@ -107,7 +247,14 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # startup must rebind them or the new emails never show. _rebuild_state re-reads the (now-larger)
     # results.jsonl/jobspecs.jsonl and resets the lazy corpus index. A lock serializes the startup
     # background thread against a "Sync now" click; single-user, but the race is real.
-    _sync = {"running": False, "last_counts": None, "last_ts": None, "last_error": None}
+    _sync = {"running": False, "last_counts": None, "last_ts": None, "last_error": None,
+             # Per-account detail (sync.run_sync's additive keys) so the Admin panel can tell
+             # "0 fetched because idle" from "0 fetched because this account is down".
+             "per_account": {}, "account_failures": {}, "stages": None}
+    # Recent per-account failures, newest-first, for the Admin cards. Bounded — a permanently broken
+    # account must not grow the process's memory or turn the page into a log dump.
+    _account_errors: dict[str, list[dict[str, str]]] = {}
+    _MAX_ACCOUNT_ERRORS = 10
     _sync_lock = threading.Lock()
 
     # Reply-draft memo (regenerable, in-process): keyed by (message_id, hash of the EXACT reply
@@ -115,6 +262,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # costs 0 tokens; any spec/readiness change (sync, confirm, item edit) changes the prompt -> new
     # key -> regenerate. Cold on restart by design — it caches LLM output, not precious state.
     _reply_cache: dict[tuple[str, str], str] = {}
+
+    # Translate-to-English memo (ADR-032), same discipline as _reply_cache: keyed by (message_id, hash
+    # of the exact text). Re-clicking the same message is served from here at 0 tokens; different text
+    # -> different key -> re-translate. Cold on restart — it caches LLM output, not precious state, and
+    # persisting derived personal data would be a new store we deliberately don't create.
+    _translate_cache: dict[tuple[str, str], str] = {}
 
     def _reply_key(mid: str, spec_d: dict, rd: dict) -> tuple[str, str]:
         prompt = replydraft.build_reply_message(spec_d, rd)
@@ -140,29 +293,54 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         except Exception:  # noqa: BLE001 — summary upkeep must never break a sync
             pass
 
-    def _run_sync(full: bool = False) -> dict:
+    def _record_account_errors(failures: dict[str, str], ts: str) -> None:
+        """Remember the per-account failure detail so /admin can show WHY an account is at 0.
+
+        ``failures`` values come from ``fetch._imap_detail`` — the server's own tagged reply, which
+        never echoes the credential. Nothing else from the account is stored."""
+        for acc, detail in (failures or {}).items():
+            lst = _account_errors.setdefault(str(acc), [])
+            lst.insert(0, {"ts": ts, "mailbox": "", "message": str(detail)})
+            del lst[_MAX_ACCOUNT_ERRORS:]
+
+    def _run_sync(full: bool = False, *, do_fetch: bool = True, do_triage: bool = True,
+                  do_crm: bool = True, account_ids: list[str] | None = None) -> dict:
         """Fetch new mail + triage new emails, then rebuild render state. Returns counts, a
         ``{"running": True}`` marker if a sync is already in flight, or ``{"error": msg}`` on a clean
         failure (e.g. the IMAP password isn't set) — never raises, so a daemon thread can't crash and
-        the button gets a tidy message instead of a 500."""
+        the button gets a tidy message instead of a 500.
+
+        The ``do_*`` switches and ``account_ids`` are forwarded to ``sync.run_sync`` (see its
+        docstring). ``do_fetch=True, do_triage=False`` is the "pull mail, spend zero Tier-1 tokens"
+        mode the Admin panel defaults to — which is why the jobspec rebuild below is gated on
+        ``do_triage`` too: it drafts specs through the LLM, so running it unconditionally would have
+        billed tokens on exactly the run that promised not to."""
         from . import specbuild
         from . import sync as _syncmod
         if not _sync_lock.acquire(blocking=False):
             return {"running": True}
         _sync["running"] = True
         try:
-            counts = _syncmod.run_sync(settings, full=full)
+            counts = _syncmod.run_sync(settings, full=full, do_fetch=do_fetch, do_triage=do_triage,
+                                       do_crm=do_crm, account_ids=account_ids)
             # Keep the spec layer fresh: newly-triaged leads get jobspecs (incremental → only new
             # message_ids pay the LLM cost). Without this, jobspecs.jsonl silently goes stale and
             # projects created from new leads arrive empty. Degrades to offline if no LLM client.
-            try:
-                counts["jobspecs"] = specbuild.rebuild_jobspecs(
-                    settings, draft=True, incremental=True, log=lambda m: print(f"  {m}"))
-            except Exception as exc:  # noqa: BLE001 — never let a spec-build error fail the sync
-                print(f"  jobspec rebuild skipped — {type(exc).__name__}: {exc}")
+            # Skipped entirely on a triage-less run — see the docstring.
+            if do_triage:
+                try:
+                    counts["jobspecs"] = specbuild.rebuild_jobspecs(
+                        settings, draft=True, incremental=True, log=lambda m: print(f"  {m}"))
+                except Exception as exc:  # noqa: BLE001 — never let a spec-build error fail the sync
+                    print(f"  jobspec rebuild skipped — {type(exc).__name__}: {exc}")
             _rebuild_state()
+            ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             _sync["last_counts"] = counts
-            _sync["last_ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            _sync["last_ts"] = ts
+            _sync["per_account"] = dict(counts.get("per_account") or {})
+            _sync["account_failures"] = dict(counts.get("account_failures") or {})
+            _sync["stages"] = counts.get("stages")
+            _record_account_errors(_sync["account_failures"], ts)
             return counts
         except Exception as exc:  # noqa: BLE001 — surface a clean message, keep serving
             msg = f"{type(exc).__name__}: {exc}"
@@ -171,6 +349,15 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         finally:
             _sync["running"] = False
             _sync_lock.release()
+
+    # Periodic background sync (ADR-023). Without it the startup sync is the ONLY ingestion point, so
+    # a long-lived server serves mail as of boot time and the decision lenses silently go stale — the
+    # page was never "cached", the data behind it just stopped moving. Interval from
+    # settings.sync.interval_minutes (default 15); <= 0 disables. Re-uses _run_sync, so it inherits
+    # the non-blocking lock (a tick that lands on a manual "Sincronizar" is skipped, not queued) and
+    # the never-raises contract. Cost stays bounded: the fetch watermark means an idle tick spends no
+    # Tier-1 tokens, only a read-only IMAP check.
+    _stop_periodic = threading.Event()
 
     @asynccontextmanager
     async def _lifespan(_app):
@@ -184,11 +371,22 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 print(f"  startup sync skipped — {r['error']}")
         if not _injected and settings.get("sync", {}).get("on_startup", True):
             threading.Thread(target=_bg, name="email2data-startup-sync", daemon=True).start()
-        yield
+        interval_s = resolve_sync_interval(settings)
+        if not _injected and interval_s > 0:
+            threading.Thread(target=periodic_sync_loop,
+                             args=(_run_sync, interval_s, _stop_periodic),
+                             name="email2data-periodic-sync", daemon=True).start()
+            print(f"  auto-sync every {interval_s / 60:g} min")
+        try:
+            yield
+        finally:
+            _stop_periodic.set()
 
     app = FastAPI(title="email-2-data workspace", lifespan=_lifespan)
     app.state.client = None
     app.state.sync_lock = _sync_lock  # exposed for tests to force the "already running" path
+    app.state.periodic_stop = _stop_periodic      # tests: assert the loop is wired + stoppable
+    app.state.periodic_interval_s = resolve_sync_interval(settings)
 
     def _spec_payload(mid: str) -> dict:
         """Merged spec + readiness in the wire shape the report renders (job_fields + items[])."""
@@ -217,14 +415,33 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     @app.post("/api/sync")
     async def api_sync(request: Request):
         """Pull new mail + triage new emails, then refresh the page state. Synchronous: the user
-        clicked and waits. A concurrent call (e.g. the startup thread still running) returns 409."""
+        clicked and waits. A concurrent call (e.g. the startup thread still running) returns 409.
+
+        An empty/absent body keeps the historical behaviour EXACTLY — full fetch+triage+crm over every
+        account. The optional keys (Admin panel) narrow it: ``account_id`` (a single account, or a
+        list via ``account_ids``), ``do_fetch``/``do_triage`` (``do_triage:false`` is the zero-token
+        mode). ``do_crm`` follows ``do_triage`` unless given, because rebuilding the CRM off verdicts
+        that did not move is pure work."""
         import anyio
-        full = False
+        body: dict[str, Any] = {}
         try:
-            full = bool((await request.json()).get("full", False))
-        except Exception:  # noqa: BLE001 — empty/invalid body → default
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except Exception:  # noqa: BLE001 — empty/invalid body → defaults (legacy behaviour)
             pass
-        counts = await anyio.to_thread.run_sync(lambda: _run_sync(full))
+        full = bool(body.get("full", False))
+        do_fetch = bool(body.get("do_fetch", True))
+        do_triage = bool(body.get("do_triage", True))
+        do_crm = bool(body.get("do_crm", do_triage))
+        acc_ids: list[str] | None = None
+        if body.get("account_ids"):
+            acc_ids = [str(a) for a in body["account_ids"] if str(a).strip()]
+        elif str(body.get("account_id", "") or "").strip():
+            acc_ids = [str(body["account_id"]).strip()]
+        counts = await anyio.to_thread.run_sync(
+            lambda: _run_sync(full, do_fetch=do_fetch, do_triage=do_triage, do_crm=do_crm,
+                              account_ids=acc_ids))
         if counts.get("running"):
             return JSONResponse({"running": True}, status_code=409)
         if counts.get("error"):
@@ -233,8 +450,14 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
     @app.get("/api/sync/status")
     def api_sync_status():
+        """Live sync state for the header button + the Admin panel poll. ``per_account`` and
+        ``account_failures`` come straight from the last ``run_sync``; ``stages`` says which stages
+        actually ran, so a 0 from a skipped stage is never misread as a measured 0."""
         return JSONResponse({"running": _sync["running"], "last_counts": _sync["last_counts"],
-                             "last_ts": _sync["last_ts"], "last_error": _sync.get("last_error")})
+                             "last_ts": _sync["last_ts"], "last_error": _sync.get("last_error"),
+                             "per_account": _sync.get("per_account") or {},
+                             "account_failures": _sync.get("account_failures") or {},
+                             "stages": _sync.get("stages")})
 
     @app.post("/api/confirm")
     async def confirm(request: Request):
@@ -327,6 +550,54 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
         return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                                  headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
+
+    def _translation_playbook() -> str:
+        """The translation system prompt (config/translation_playbook.md), re-read per request so an
+        edit is live without a restart — same contract as the other playbooks."""
+        sp = settings.get("__settings_path__")
+        if not sp:
+            return _translate.DEFAULT_TRANSLATION_PLAYBOOK
+        return _translate.load_playbook(Path(sp).parents[1] / "config" / "translation_playbook.md")
+
+    @app.post("/api/translate")
+    async def translate_message(request: Request):
+        """Translate a received email body to English — a reading aid (ADR-032). Body:
+        ``{message_id, text}`` → ``{text, cached}``. Button-only from the shared message renderer;
+        nothing here runs on page load. To-English only, so the language is fixed and not in the key.
+
+        The translation is shown on screen — never sent, never stored, never logged (only ids/counts).
+        Sending the body to Vertex is the same egress the triage/spec passes already do (ADR-012/-020).
+        """
+        import anyio
+        from . import llm as _llm
+        if not settings.get("__settings_path__"):
+            return JSONResponse({"error": "tradução indisponível sem settings.json"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — empty body → nothing to translate, caught below
+            body = {}
+        mid = str((body or {}).get("message_id", "") or "")
+        text = str((body or {}).get("text", "") or "").strip()
+        if not text:
+            return JSONResponse({"error": "nada para traduzir"}, status_code=400)
+        ck = (mid, hashlib.sha256(text.encode("utf-8")).hexdigest())
+        if ck in _translate_cache:  # same message text as before — serve cached, spend 0 tokens
+            return JSONResponse({"text": _translate_cache[ck], "cached": True})
+        playbook = _translation_playbook()
+
+        def _work() -> str:
+            if app.state.client is None:
+                app.state.client = classifier.make_client(settings)
+            return _translate.translate_to_english(text, playbook, app.state.client, settings["llm"])
+
+        try:
+            out = await anyio.to_thread.run_sync(_work)
+        except _llm.LLMError as exc:
+            return JSONResponse({"error": f"o modelo falhou: {exc}"}, status_code=502)
+        except Exception as exc:  # noqa: BLE001 — e.g. no ADC/credentials; report, never fake it
+            return JSONResponse({"error": f"tradução indisponível: {exc}"}, status_code=503)
+        _translate_cache[ck] = out
+        return JSONResponse({"text": out})
 
     @app.post("/api/reclassify")
     async def reclassify_email(request: Request):
@@ -540,7 +811,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             return "2026-06-03T" + d[-5:]  # embedded raw: best-effort time-of-day sort
 
         all_msgs.sort(key=_sort_key)
-        return JSONResponse({"thread_root": thread_root, "messages": all_msgs})
+        # What the extraction layer already knows about this thread (ADR-024): the merged job spec +
+        # Gate-1 readiness for whichever of its messages carries a jobspec. Lets a caller judge
+        # estimability from the thread view alone, without opening the project. Lazy by
+        # construction — this endpoint is only hit when a human expands a thread, never in a list
+        # render, so it costs nothing on the polled queue. ``null`` when no message has a spec.
+        # Keyed off the thread's CRM interactions, NOT the rendered ``all_msgs``: rendering drops
+        # messages with no body and no attachments (e.g. a missing .eml), and the spec is a property
+        # of the thread, not of which messages survived that filter.
+        spec_block = None
+        for row in interactions:
+            mid = row.get("message_id") or ""
+            if mid and mid in jspecs:
+                spec_block = {"message_id": mid, **_spec_payload(mid)}
+                break
+        return JSONResponse({"thread_root": thread_root, "messages": all_msgs, "spec": spec_block})
 
     @app.get("/api/relations/{message_id}")
     def get_relations(message_id: str):
@@ -603,14 +888,34 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             "provenance": prov, "conflicts": conflicts,
             "threads": pstore.threads_for(pid),
             "message_ids": mids,
+            # How many Registar notes a re-extraction would re-read (ADR-026). Sent with the light
+            # default payload on purpose: it is what makes the button's cost predictable BEFORE the
+            # click, and it is one indexed read on a project that is already fully loaded here.
+            "n_events": sum(1 for e in pstore.knowledge_events(pid) if (e["text"] or "").strip()),
             "dangling_threads": _project.dangling_threads(pstore, pid, _crmdb),
         }
 
     def _provenance(body: dict) -> dict:
-        """Extract the optional provenance bundle (channel/asserted_by/acquired_at) from a write body."""
+        """Extract the provenance bundle from a write body: channel/asserted_by/acquired_at PLUS the
+        ``source_mid`` reference (WP-A).
+
+        The reference used to be dropped here, so every capture-confirmed field reached the ledger
+        unlinked — the highest-stakes data (it feeds the estimable gate) carried the weakest
+        provenance, and the value was then relabelled 'user'. The email path always passed it
+        (``project.seed_items_from``), which is what settles that this was a bug, not a design choice.
+
+        Raises ``ValueError`` on a ``capture:<cid>`` reference naming a capture that does not exist —
+        a bad reference must fail loudly, never be silently discarded (ADR-022 §7 freezes the value
+        space at ``<message-id> | capture:<cid> | 'user' | ''``).
+        """
+        ref = str(body.get("source_mid", "") or "")
+        cid = captures.capture_id_from_ref(ref)
+        if cid and cstore.get(cid) is None:
+            raise ValueError(f"unknown capture reference: {ref}")
         return {"channel": str(body.get("channel", "") or ""),
                 "asserted_by": str(body.get("asserted_by", "") or ""),
-                "acquired_at": str(body.get("acquired_at", "") or "")}
+                "acquired_at": str(body.get("acquired_at", "") or ""),
+                "source_mid": ref}
 
     def _summary_for(pr: dict) -> tuple[float, bool]:
         """Cheap (coverage, estimable) for the LIST view: read the denormalized columns; only fall
@@ -729,11 +1034,31 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         # a registry address (the 14 fields, incl per-item #i) OR a custom:<label> field (ADR-015).
         if not (base in _keys or js.is_custom_addr(field)):
             return JSONResponse({"error": "bad field"}, status_code=400)
+        try:
+            prov = _provenance(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         if value:
-            pstore.set_field(pid, field, value, **_provenance(body))
+            pstore.set_field(pid, field, value, **prov)
         else:
-            pstore.clear_field(pid, field)
+            # A removal can flip estimability, so it is attributed like any other write (WP-A): it
+            # used to log with no bundle at all, and participants() skips unattributed rows — so a
+            # deletion was never attributed to anyone.
+            pstore.clear_field(pid, field, **prov)
         return JSONResponse(_project_view(pid))
+
+    @app.post("/api/projects/{pid}/rename")
+    async def project_rename(pid: str, request: Request):
+        """Give the project a human title (the raw email subject it was born with is identity for
+        machines, not a name for a list). Blank titles are rejected, not silently ignored."""
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        body = await request.json()
+        title = str(body.get("title", "")).strip()
+        if not title:
+            return JSONResponse({"error": "title required"}, status_code=400)
+        pstore.rename(pid, title)
+        return JSONResponse({"ok": True, "project_id": pid, "title": title})
 
     @app.post("/api/projects/{pid}/custom-field")
     async def project_custom_field(pid: str, request: Request):
@@ -746,7 +1071,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         value = str(body.get("value", "")).strip()
         if not name or not value:
             return JSONResponse({"error": "name and value required"}, status_code=400)
-        pstore.set_field(pid, js.CUSTOM_PREFIX + name, value, **_provenance(body))
+        try:
+            prov = _provenance(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        pstore.set_field(pid, js.CUSTOM_PREFIX + name, value, **prov)
         return JSONResponse(_project_view(pid))
 
     @app.post("/api/projects/{pid}/event")
@@ -762,7 +1091,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if kind not in EVENT_KINDS or not text:
             return JSONResponse(
                 {"error": "kind (note/decision/opinion/todo) and text required"}, status_code=400)
-        pstore.add_event(pid, kind, text, **_provenance(body))
+        try:
+            prov = _provenance(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        pstore.add_event(pid, kind, text, **prov)
         return JSONResponse({"ok": True, "kind": kind})
 
     @app.get("/api/projects/{pid}/timeline")
@@ -847,13 +1180,54 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         result = _export.export_project(pstore, ws, jspecs, adapter, pid, crm_store=_crmdb, force=force)
         return JSONResponse({"ok": result.ok, "external_id": result.external_id, "detail": result.detail})
 
-    def _client_email_template() -> str:
-        """The editable email skeleton (config/client_email_template.md), re-read per request so a
-        playbook edit takes effect without a restart. Falls back to the built-in default."""
+    def _config_dir() -> Path | None:
+        """The bind-mounted config/ dir (from settings.json's location), or None when running
+        without a settings file — the signal to use built-in defaults."""
         sp = settings.get("__settings_path__")
-        if not sp:
-            return clientdraft.DEFAULT_TEMPLATE
-        return clientdraft.load_template(Path(sp).parents[1] / "config" / "client_email_template.md")
+        return (Path(sp).parents[1] / "config") if sp else None
+
+    def _client_email_template_for(purpose: str) -> str:
+        """The editable per-purpose skeleton (config/client_email_<id>_template.md), re-read per
+        request so an edit takes effect without a restart. Falls back to the built-in default."""
+        return clientdraft.load_purpose_template(purpose, _config_dir())
+
+    def _client_email_template() -> str:
+        """The ``ask`` skeleton — kept as a thin alias so existing callers are unchanged."""
+        return _client_email_template_for("ask")
+
+    def _reject_reasons() -> list[str]:
+        """The editable reject-reason list (config/client_email_reject_reasons.md), re-read per
+        request. Falls back to the built-in defaults."""
+        d = _config_dir()
+        if d is None:
+            return clientdraft.DEFAULT_REJECT_REASONS
+        return clientdraft.load_reasons(d / "client_email_reject_reasons.md")
+
+    def _assemble_draft(body: dict) -> tuple[str, list[str], list[str], bool]:
+        """Deterministically build the base draft for the requested purpose (no LLM). Returns
+        ``(body, questions, keep_values, has_input)`` where ``questions`` are the ticked prompts
+        (question purposes only), ``keep_values`` are the money/number/date tokens the user typed that
+        an AI polish must preserve verbatim (reason/text purposes), and ``has_input`` says whether the
+        user actually supplied the substance for this purpose — the signal for "is there anything to
+        polish". It is NOT the same as having ``keep_values``: a reject with a reason but no numbers
+        still has input worth rewriting. Unknown purpose → ``ask``."""
+        purpose = str(body.get("purpose") or clientdraft.DEFAULT_PURPOSE)
+        p = clientdraft.PURPOSES_BY_ID.get(purpose, clientdraft.PURPOSES_BY_ID[clientdraft.DEFAULT_PURPOSE])
+        tmpl = _client_email_template_for(p.id)
+        if p.input_kind == "questions":
+            selected = [str(k) for k in (body.get("selected") or [])]
+            custom = [str(c).strip() for c in (body.get("custom") or []) if str(c).strip()]
+            questions = _questions_for(selected) + custom
+            out = clientdraft.build_purpose_draft(p.id, tmpl, questions=questions)
+            return out, questions, [], bool(questions)
+        if p.input_kind == "reason":
+            reason = str(body.get("reason") or "").strip()
+            note = str(body.get("reason_note") or "").strip()
+            out = clientdraft.build_purpose_draft(p.id, tmpl, reason=reason, reason_note=note)
+            return out, [], clientdraft.extract_values(note), bool(reason or note)
+        content = str(body.get("content") or "").strip()
+        out = clientdraft.build_purpose_draft(p.id, tmpl, content=content)
+        return out, [], clientdraft.extract_values(content), bool(content)
 
     def _questions_for(keys: list[str]) -> list[str]:
         """Map selected base keys → their pt-PT clarifying questions, in registry order (so the
@@ -879,21 +1253,241 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             "subject": "Re: " + (proj.get("title") or ""),
             "askables": asks,
             "body": body,
+            # ADR-031: the purpose selector. `ask` stays the default; `body`/`askables` above are the
+            # `ask` starting point exactly as before. The JS mirrors this list (never hand-keeps it).
+            "purpose": clientdraft.DEFAULT_PURPOSE,
+            "purposes": [{"id": p.id, "label": p.label, "input_kind": p.input_kind}
+                         for p in clientdraft.PURPOSES],
+            "reject_reasons": _reject_reasons(),
         })
 
     @app.post("/api/projects/{pid}/draft")
     async def project_draft_build(pid: str, request: Request):
-        """Re-assemble the body for a given selection. Body: ``{selected: [keys], custom: [str]}``.
-        Deterministic — splices the selected questions (+ any free-text custom ones) into the
-        template. The user's manual edits live only in the browser textarea; this just rebuilds the
-        generated baseline when they toggle a prompt or hit Regenerar."""
+        """Re-assemble the body for a given purpose + inputs. Body:
+        ``{purpose, selected, custom, reason, reason_note, content}`` (only the fields the purpose
+        uses). Deterministic — no LLM. A request with no ``purpose`` behaves as ``ask`` exactly as
+        before. Returns ``{body, facts}`` where ``facts`` are the money/number/date tokens the user
+        typed (empty for the question purposes) so the UI can show what the AI polish must preserve.
+        The user's manual edits live only in the browser textarea; this rebuilds the baseline."""
         if pstore.get(pid) is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         body = await request.json()
-        selected = [str(k) for k in (body.get("selected") or [])]
-        custom = [str(c).strip() for c in (body.get("custom") or []) if str(c).strip()]
-        questions = _questions_for(selected) + custom
-        return JSONResponse({"body": clientdraft.build_draft(questions, _client_email_template())})
+        draft_body, _questions, keep, _has = _assemble_draft(body or {})
+        return JSONResponse({"body": draft_body, "facts": keep})
+
+    def _polish_playbook() -> str:
+        """The polish system prompt (config/client_email_polish_playbook.md), re-read per request so a
+        playbook edit takes effect without a restart — same contract as the other playbooks."""
+        sp = settings.get("__settings_path__")
+        if not sp:
+            return clientdraft.DEFAULT_POLISH_PLAYBOOK
+        return clientdraft.load_polish_playbook(
+            Path(sp).parents[1] / "config" / "client_email_polish_playbook.md")
+
+    def _confirmed_facts(spec) -> list[tuple[str, str]]:
+        """What we actually know about this job, as (pt-PT label, value) — the ONLY facts the polish
+        pass is allowed to restate. Internal flags are withheld: they are not things one says to a
+        client. Item facts are numbered when there is more than one piece."""
+        labels = {k: lbl for k, lbl, _t, _q, _s in js.FIELDS}
+        out: list[tuple[str, str]] = []
+        for k, f in (spec.job_fields or {}).items():
+            if f and f.value and k not in _POLISH_HIDE:
+                out.append((labels.get(k, k), f.value))
+        multi = len(spec.items or []) > 1
+        for i, item in enumerate(spec.items or [], 1):
+            for k, f in item.items():
+                if f and f.value and k not in _POLISH_HIDE:
+                    out.append((f"{labels.get(k, k)} (peça {i})" if multi else labels.get(k, k),
+                                f.value))
+        return out
+
+    def _thread_excerpts(mids: list[str]) -> list[dict[str, Any]]:
+        """What the client actually wrote, oldest→newest, for tone and continuity. Read from the same
+        on-disk .eml the spec pass reads; a message whose file is gone is skipped, not faked."""
+        from .envelope import clean_email_body as _clean_body
+        from .envelope import parse_eml as _parse_eml
+        out: list[dict[str, Any]] = []
+        for mid in mids:
+            f = _file_for(mid)
+            if not f:
+                continue
+            try:
+                env = _parse_eml(Path(f).read_bytes())
+            except (OSError, ValueError):
+                continue
+            body = _clean_body(env.get("body_text") or "").strip()
+            if not body:
+                continue
+            out.append({"from_email": (env.get("from") or {}).get("email") or "",
+                        "date": env.get("date") or "", "body": body})
+        return out
+
+    @app.post("/api/projects/{pid}/draft/polish")
+    async def project_draft_polish(pid: str, request: Request):
+        """AI polish of the client email — ADR-027 (extended by ADR-031 to every purpose).
+
+        Body: ``{purpose, selected, custom, reason, reason_note, content, tier}`` (only the fields
+        the purpose uses). Explicitly button-triggered: nothing here runs on page load, on a checkbox
+        toggle, or on any other path.
+
+        The deterministic draft is rebuilt server-side from the same inputs the composer sent — the
+        same call ``POST /draft`` makes — and handed to the model as the thing to rewrite. That keeps
+        ADR-013 intact: the questions enter the prompt as a fixed list rather than being re-derived by
+        the model, and the output is re-checked — ``missing_questions`` for the questions AND
+        ``missing_values`` for every price/number/date the user typed, so a model that alters a
+        number is caught exactly like a dropped question. Both texts come back (``base`` and ``body``)
+        because the user chooses; the polish never silently becomes the draft.
+
+        Fails loudly (502) rather than returning the unpolished draft dressed up as a success — the
+        user paid for a call and must know whether they got one.
+        """
+        import anyio
+        from . import classifier, llm as _llm
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not settings.get("__settings_path__"):
+            return JSONResponse({"error": "melhorar com IA indisponível sem settings.json"},
+                                status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — empty body → nothing to say, caught below
+            body = {}
+        tier = str((body or {}).get("tier", "") or "").strip().lower() or None
+        if tier is not None and tier not in _REEXTRACT_TIERS:
+            return JSONResponse({"error": f"tier inválido: {tier}"}, status_code=400)
+        lang = str((body or {}).get("lang", "") or "").strip().lower() or clientdraft.DEFAULT_LANGUAGE
+        if lang not in clientdraft.LANGUAGES_BY_ID:
+            return JSONResponse({"error": f"idioma inválido: {lang}"}, status_code=400)
+        base, questions, keep, has_input = _assemble_draft(body or {})
+        if not has_input:
+            return JSONResponse({"error": "nada para escrever"}, status_code=400)
+
+        mids = _project.message_ids_for(pstore, pid, _crmdb)
+        spec, _rd, _p, _c = _project.build_canonical(pstore, ws, jspecs, pid, _crmdb, mids=mids)
+        facts = _confirmed_facts(spec)
+        thread = _thread_excerpts(mids)
+        cfg = _llm.with_tier(settings["llm"], tier)
+        playbook = _polish_playbook()
+        translated = lang != clientdraft.DEFAULT_LANGUAGE
+        # Pass keep_values ONLY when non-empty so the `ask`/questions path calls polish_draft with
+        # exactly its historical argument set (backward compat with existing stubs and behaviour).
+        # Likewise pass language only when non-default, so the PT path is byte-identical to before.
+        extra = {}
+        if keep:
+            extra["keep_values"] = keep
+        if translated:
+            extra["language"] = lang
+
+        def _work() -> str:
+            client = classifier.make_client(settings)
+            return clientdraft.polish_draft(base, questions, playbook, client, cfg,
+                                            facts=facts, thread=thread, **extra)
+
+        try:
+            polished = await anyio.to_thread.run_sync(_work)
+        except _llm.LLMError as exc:
+            return JSONResponse({"error": f"o modelo falhou: {exc}"}, status_code=502)
+        except Exception as exc:  # noqa: BLE001 — e.g. no ADC/credentials; report, never fake a draft
+            return JSONResponse({"error": f"LLM indisponível: {exc}"}, status_code=503)
+        # The number/date guard is language-independent, so it runs for every language. The verbatim
+        # QUESTION check cannot survive translation, so it runs only for PT — a non-PT result is marked
+        # `translated` and reviewed by hand rather than claiming a coverage we did not verify.
+        missing = list(clientdraft.missing_values(polished, keep))
+        if not translated:
+            missing = clientdraft.missing_questions(polished, questions) + missing
+        return JSONResponse({"body": polished, "base": base, "tier": tier or "",
+                             "lang": lang, "translated": translated,
+                             "missing": missing, "n_questions": len(questions),
+                             "n_facts": len(keep),
+                             "used_thread": len(thread), "used_facts": len(facts)})
+
+    # ── DESCRIÇÃO composer (ADR-030) — the proposta/fatura product descritivo ───────────────────────
+    def _description_template() -> str:
+        """The editable descritivo skeleton (config/description_playbook.md), re-read per request so a
+        playbook edit takes effect without a restart. Falls back to the built-in average template."""
+        sp = settings.get("__settings_path__")
+        if not sp:
+            return descdraft.DEFAULT_TEMPLATE
+        return descdraft.load_template(Path(sp).parents[1] / "config" / "description_playbook.md")
+
+    def _description_polish_playbook() -> str:
+        """The descritivo polish prompt (config/description_polish_playbook.md), re-read per request.
+        Falls back to the module default — a missing file must not become a permissive prompt."""
+        sp = settings.get("__settings_path__")
+        if not sp:
+            return descdraft.DEFAULT_POLISH_PLAYBOOK
+        return descdraft.load_polish_playbook(
+            Path(sp).parents[1] / "config" / "description_polish_playbook.md")
+
+    def _description_for(pid: str):
+        """Build the deterministic average-style descritivo for a project from its canonical spec.
+        Returns ``(Description, project)`` or ``(None, None)`` when the project is unknown."""
+        proj = pstore.get(pid)
+        if proj is None:
+            return None, None
+        spec, _rd, _p, _c = _project.build_canonical(pstore, ws, jspecs, pid, _crmdb)
+        desc = descdraft.build_description(spec, _description_template(),
+                                           titulo=proj.get("title") or "")
+        return desc, proj
+
+    @app.get("/api/projects/{pid}/description")
+    def project_description(pid: str):
+        """The descritivo composer state: the deterministic average-style draft assembled from the
+        project's CONFIRMED spec fields, plus the gaps/unconfirmed facts the UI surfaces beside it.
+        Nothing here calls the model — the AI polish is a separate, explicit button (ADR-030/-027)."""
+        desc, _proj = _description_for(pid)
+        if desc is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({
+            "body": desc.text, "gaps": desc.gaps, "unconfirmed": desc.unconfirmed,
+            "complete": desc.complete, "n_facts": len(desc.facts),
+        })
+
+    @app.post("/api/projects/{pid}/description/polish")
+    async def project_description_polish(pid: str, request: Request):
+        """AI polish of the descritivo — ADR-030, the same checked shape as the client-email polish.
+
+        Body: ``{tier: light|standard|heavy}``. Button-triggered only. The server rebuilds the
+        deterministic draft from the canonical spec and hands THAT to the model with the confirmed
+        facts it must keep verbatim; ``missing_facts``/``dropped_gaps`` re-check the output. Both texts
+        come back (``base`` and ``body``) — the polish never silently becomes the draft. Fails loudly
+        (502) rather than dressing the unpolished draft up as a success."""
+        import anyio
+        from . import classifier, llm as _llm
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not settings.get("__settings_path__"):
+            return JSONResponse({"error": "melhorar com IA indisponível sem settings.json"},
+                                status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — empty body → default tier, handled below
+            body = {}
+        tier = str((body or {}).get("tier", "") or "").strip().lower() or None
+        if tier is not None and tier not in _REEXTRACT_TIERS:
+            return JSONResponse({"error": f"tier inválido: {tier}"}, status_code=400)
+
+        desc, _proj = _description_for(pid)
+        base, facts = desc.text, desc.facts
+        if not facts:
+            return JSONResponse({"error": "nada confirmado para redigir"}, status_code=400)
+        cfg = _llm.with_tier(settings["llm"], tier)
+        playbook = _description_polish_playbook()
+
+        def _work() -> str:
+            client = classifier.make_client(settings)
+            return descdraft.polish_description(base, facts, playbook, client, cfg)
+
+        try:
+            polished = await anyio.to_thread.run_sync(_work)
+        except _llm.LLMError as exc:
+            return JSONResponse({"error": f"o modelo falhou: {exc}"}, status_code=502)
+        except Exception as exc:  # noqa: BLE001 — no ADC/credentials etc.; report, never fake a draft
+            return JSONResponse({"error": f"LLM indisponível: {exc}"}, status_code=503)
+        missing = descdraft.missing_facts(polished, facts)
+        return JSONResponse({"body": polished, "base": base, "tier": tier or "",
+                             "missing": missing, "dropped_gaps": descdraft.dropped_gaps(polished, base),
+                             "n_facts": len(facts)})
 
     @app.get("/api/attachment/{message_id}/{index}")
     def get_attachment(message_id: str, index: int):
@@ -979,11 +1573,15 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         text = ((cap.get("raw_text") or "").strip()
                 or (cap.get("transcript") or "").strip()
                 or "📎 captura sem texto")
+        # ALWAYS cite the capture (WP-A). The old `if media_paths` ternary was written for a thumbnail
+        # renderer, and conflated "has media to show" with "has an origin worth citing" — so a
+        # text-only capture (the common case: a typed phone-call note) landed with source_mid="" and
+        # permanently lost its link. There is no derivable join key to repair it afterwards.
         pstore.add_event(pid, kind, text,
                          channel=cap.get("channel") or "manual",
                          asserted_by=cap.get("asserted_by") or "",
                          acquired_at=cap.get("acquired_at") or "",
-                         source_mid=f"capture:{cid}" if cap.get("media_paths") else "")
+                         source_mid=captures.capture_ref(cid))
         cstore.set_project(cid, pid)
         cstore.mark_applied(cid)
         return JSONResponse({"ok": True, "project_id": pid})
@@ -1018,12 +1616,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # Cockpit Fila — response queue (cockpit.build_fila over the CRM + thread_state overlay).
     # A SEPARATE render path from "/" (the inbox report) so it doesn't collide with that template.
     # -------------------------------------------------------------------------
-    def _fila_rows() -> list[dict[str, Any]]:
+    def _fila_rows(*, include_resolved: bool = False) -> list[dict[str, Any]]:
         if _crmdb is None:
             return []
         rows = cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
                                   now=datetime.now(timezone.utc),
-                                  reclassified=ws.get_reclassifications())
+                                  reclassified=ws.get_reclassifications(),
+                                  include_resolved=include_resolved)
         # Annotate each thread with the project it already belongs to (if any), so the Fila can show
         # "already in project X" and offer open-vs-create — preventing duplicate projects from one lead.
         root2proj: dict[str, dict] = {}
@@ -1034,6 +1633,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 root2proj.setdefault(root, info)
         for r in rows:
             r["project"] = root2proj.get(r.get("thread_root"))
+            # Reply path from the queue: a draft exists only for messages with a JobSpec, so tell
+            # the Fila which rows can offer "rascunho de resposta" instead of 404-ing on click.
+            r["can_draft"] = (r.get("message_id") or "") in jspecs
         return rows
 
     # -------------------------------------------------------------------------
@@ -1053,6 +1655,8 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         """Serialize clusters + enrich with Fila response-risk for the UI. Accepts a prebuilt
         ``frows`` so the caller's Fila build is reused, not recomputed (F3)."""
         frows = _fila_rows() if frows is None else frows
+        # Human display-name overrides (v8): a person manages "Tempus Lda", not "nif:274023911".
+        name_overrides = ws.counterparty_names()
         # Index fila rows by each email that appears in them
         risk_by_email: dict[str, str] = {}
         owe_by_email: dict[str, int] = {}
@@ -1084,7 +1688,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                             open_proj += 1
             out.append({
                 "key": cl.key, "kind": cl.kind, "emails": cl.emails,
-                "display_name": cl.display_name or cl.key,
+                # Precedence: human override (precious) → derived display name → the raw key.
+                "display_name": name_overrides.get(cl.key) or cl.display_name or cl.key,
+                "name_overridden": cl.key in name_overrides,
                 "nif": cl.nif, "last_counterparty": cl.last_counterparty,
                 "last_seen": cl.last_seen, "msg_count": cl.msg_count,
                 "we_owe_count": we_owe, "response_risk": risk, "open_projects": open_proj,
@@ -1118,8 +1724,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             nav_counts=_nav_counts(frows=frows)))
 
     @app.get("/api/fila")
-    def api_fila():
-        return JSONResponse({"rows": _fila_rows(), "team": _roster()})
+    def api_fila(include: str = ""):
+        """The active queue. ``?include=resolved`` adds HANDLED/INTERNAL rows — the "Tratados"
+        ledger: what was already decided, so a decision can be reviewed (and reopened) instead of
+        vanishing without a trace the moment it is made."""
+        return JSONResponse({"rows": _fila_rows(include_resolved=(include == "resolved")),
+                             "team": _roster()})
 
     @app.post("/api/thread/handled")
     async def thread_handled(request: Request):
@@ -1268,6 +1878,15 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             data["cluster"], data["timeline"], data["projects"], data["fila_rows"],
             stats=data["stats"], gates=data["gates"], nav_counts=_nav_counts()))
 
+    @app.post("/api/contrapartes/{key:path}/name")
+    async def contraparte_set_name(key: str, request: Request):
+        """Set (empty = reset to automatic) the human display name for a counterparty cluster (v8).
+        The clustering key stays the identity; only what a person SEES changes."""
+        body = await request.json()
+        ws.set_counterparty_name(key, str(body.get("name", "")))
+        return JSONResponse({"ok": True, "key": key,
+                             "name": ws.counterparty_names().get(key, "")})
+
     @app.get("/api/contrapartes/{key:path}")
     def api_contrapartes_detail(key: str):
         data = _contraparte_detail_data(key)
@@ -1283,18 +1902,57 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         frows = _fila_rows() if frows is None else frows
         clusters = _clusters() if clusters is None else clusters
         all_threads = {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])}
-        return para_ti.all_items(frows, clusters, all_threads)
+        # Persisted "Ignorar" (v8): a dismissed decision stays dismissed across reloads/restarts.
+        return para_ti.all_items(frows, clusters, all_threads,
+                                 dismissed=set(ws.para_ti_dismissed()))
+
+    # The decision lenses are rebuilt from the stores on every request, so the only thing that can
+    # serve a stale queue is an HTTP cache in front of us (browser bfcache / revisit). Opt out
+    # explicitly rather than relying on the absence of a validator (ADR-023).
+    _NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
 
     @app.get("/para-ti", response_class=HTMLResponse)
     def para_ti_view():
         frows = _fila_rows()  # build once, reuse for items + badges (F3)
         clusters = _clusters()
         return HTMLResponse(para_ti_page.build_html(
-            _para_ti_items(frows, clusters), nav_counts=_nav_counts(frows=frows, clusters=clusters)))
+            _para_ti_items(frows, clusters), nav_counts=_nav_counts(frows=frows, clusters=clusters),
+            roster=_roster()), headers=_NO_STORE)
 
     @app.get("/api/para-ti")
     def api_para_ti():
-        return JSONResponse({"items": _para_ti_items()})
+        """Live decision queue. Carries ``nav_counts`` + sync state alongside the items so the page's
+        refresh poll updates the badges and the freshness stamp in a single round-trip."""
+        frows = _fila_rows()
+        clusters = _clusters()
+        return JSONResponse({
+            "items": _para_ti_items(frows, clusters),
+            "nav_counts": _nav_counts(frows=frows, clusters=clusters),
+            "synced_at": _sync["last_ts"],
+            "syncing": _sync["running"],
+            "served_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }, headers=_NO_STORE)
+
+    @app.post("/api/para-ti/dismiss")
+    async def para_ti_dismiss(request: Request):
+        """Persist an "Ignorar" on a decision card (v8). The toast used to say "ignorado" while
+        keeping nothing — the same proposals resurrected on every load. Now the promise is kept."""
+        body = await request.json()
+        key = str(body.get("key", "")).strip()
+        if not key:
+            return JSONResponse({"error": "key required"}, status_code=400)
+        ws.dismiss_para_ti(key, kind=str(body.get("kind", "")).strip())
+        return JSONResponse({"ok": True, "key": key})
+
+    @app.post("/api/para-ti/undismiss")
+    async def para_ti_undismiss(request: Request):
+        """Reverse a dismissal — the Z/undo path of /api/para-ti/dismiss."""
+        body = await request.json()
+        key = str(body.get("key", "")).strip()
+        if not key:
+            return JSONResponse({"error": "key required"}, status_code=400)
+        ws.undismiss_para_ti(key)
+        return JSONResponse({"ok": True, "key": key})
 
     @app.post("/api/identity/confirm")
     async def identity_confirm(request: Request):
@@ -1334,6 +1992,259 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if pstore.get(pid) is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return HTMLResponse(_projetos_html())
+
+    # -------------------------------------------------------------------------
+    # Scoped re-extraction (ADR-025 §4) — the sanctioned bypass of the idempotency rule.
+    # -------------------------------------------------------------------------
+    @app.post("/api/projects/{pid}/reextract")
+    async def project_reextract(pid: str, request: Request):
+        """Re-run extraction over ALL of THIS project's knowledge, then re-seed the project.
+
+        Two sources, one button (ADR-026): the linked **emails** (Tier-1 spec pass) and the **timeline
+        knowledge events** — the notes/decisions/opinions/todos a person recorded in Registar, which
+        until now no model ever read, so a deadline agreed on a phone call stayed invisible to the
+        readiness gate.
+
+        This deliberately breaks the "never re-spend Tier-1 tokens on processed mail" default, so it
+        is gated three ways: an explicit human POST, ``only=<this project's message_ids>`` (never the
+        whole corpus — the cost-containment pin), and the sync lock (409 while a sync is in flight,
+        because both write ``out/jobspecs.jsonl``).
+
+        Human decisions survive on both paths: ``seed_items_from(force=True)`` and
+        ``apply_event_fields`` each skip every address in the project's human-touched ledger and never
+        delete a field (project.py). Failures are returned, not swallowed — a per-message
+        ``spec_error``, and ``events_failed`` for notes the model could not read: a failed re-extract
+        must not look like a thin email or an empty note.
+
+        Cost is proportional and visible: the events pass is one call per note at the chosen tier, and
+        the response reports ``events_read`` so the spend is never hidden behind a single click.
+        """
+        import anyio
+        from . import capture_infer, classifier, llm as _llm, specbuild
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not settings.get("__settings_path__"):
+            return JSONResponse({"error": "re-extração indisponível sem settings.json"},
+                                status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — empty body → default tier
+            body = {}
+        tier = str((body or {}).get("tier", "") or "").strip().lower() or None
+        if tier is not None and tier not in _REEXTRACT_TIERS:
+            return JSONResponse({"error": f"tier inválido: {tier}"}, status_code=400)
+        mids = _project.message_ids_for(pstore, pid, _crmdb)
+        # Blank-text events are dropped here rather than inside the loop: they can yield nothing, so
+        # sending them would be pure spend. No other length heuristic — a short note like "prazo:
+        # 15 março" is exactly the knowledge this pass exists to recover.
+        events = [e for e in pstore.knowledge_events(pid) if (e["text"] or "").strip()]
+        if not mids and not events:
+            return JSONResponse({"error": "projeto sem emails ligados nem registos na linha do tempo"},
+                                status_code=400)
+
+        cfg = _llm.with_tier(settings["llm"], tier)
+        client = None
+        if events:
+            try:
+                client = classifier.make_client(settings)
+            except Exception as exc:  # noqa: BLE001 — no client means no events pass; say so, don't guess
+                return JSONResponse({"error": f"LLM indisponível: {exc}"}, status_code=503)
+
+        def _work() -> dict:
+            nonlocal jspecs
+            if not _sync_lock.acquire(blocking=False):
+                return {"running": True}
+            try:
+                counts = {"built": 0, "drafted": 0, "kept": 0, "failed": 0, "total": 0}
+                if mids:
+                    counts = specbuild.rebuild_jobspecs(
+                        settings, draft=True, reply=False,
+                        incremental=True,      # REQUIRED: what keeps everything outside scope intact
+                        only=set(mids), tier=tier,
+                        log=lambda m: print(f"  {m}"))
+                    # rebuild_jobspecs rewrote the file on disk — the in-memory map MUST be reloaded
+                    # or the re-seed below would replay the stale specs it just replaced.
+                    jspecs = _load_jobspecs(_outdir())
+                    for mid in mids:  # oldest → newest, so the newest message wins a conflict
+                        _project.seed_items_from(pstore, ws, jspecs, pid, mid, force=True)
+                # Timeline pass (ADR-026) — deliberately AFTER the messages, so a recorded note beats
+                # a value parsed out of an email: someone chose to write it down, which is the
+                # stronger signal. Read once, after the re-seed, so both reflect the same state.
+                protected = pstore.human_touched_fields(pid)
+                current = {a: v for a, (v, _s) in pstore.fields_for(pid).items()}
+                applied: list[str] = []
+                failed: list[dict] = []
+                for e in events:
+                    try:
+                        got = capture_infer.extract_fields_strict(e["text"], client, cfg)
+                    except _llm.LLMError as exc:
+                        # Surfaced, never swallowed: a note the model could not read must not be
+                        # indistinguishable from a note that simply held no spec values.
+                        failed.append({"rowid": e["rowid"], "kind": e["kind"], "error": str(exc)})
+                        continue
+                    applied.extend(_project.apply_event_fields(
+                        pstore, pid, e["rowid"], got.get("fields") or {},
+                        protected=protected, current=current))
+                pstore.invalidate_summaries()
+                return {"counts": counts, "applied": applied, "failed": failed}
+            finally:
+                _sync_lock.release()
+
+        result = await anyio.to_thread.run_sync(_work)
+        if result.get("running"):
+            return JSONResponse({"running": True}, status_code=409)
+        messages = [{"message_id": m,
+                     "has_spec": m in jspecs,
+                     "spec_error": (jspecs.get(m) or {}).get("spec_error") or ""}
+                    for m in mids]
+        counts = result["counts"]
+        ev_failed = result["failed"]
+        return JSONResponse({"ok": not counts.get("failed") and not ev_failed, "tier": tier or "",
+                             "counts": counts, "messages": messages,
+                             "events": {"read": len(events), "applied": result["applied"],
+                                        "failed": ev_failed},
+                             "project": _project_view(pid)})
+
+    # -------------------------------------------------------------------------
+    # Administração (/admin) — IMAP account inventory, force-sync, account editor.
+    #
+    # SECRETS (non-negotiable #5): a password NEVER crosses this boundary in either direction. The
+    # GET reports only ``credential_present`` — a bool derived from testing os.environ, so not even
+    # the length of the secret is observable — and the POST rejects any body carrying a secret-shaped
+    # key. ``password_env`` is a variable NAME, which is configuration, not a credential.
+    # -------------------------------------------------------------------------
+    def _settings_file() -> Path:
+        return Path(settings["__settings_path__"])
+
+    def _cursors_for(account_id: str) -> list[dict[str, Any]]:
+        """Per-mailbox fetch watermarks from ``out/sync.db``. Opened READ-ONLY and only when the file
+        already exists, so merely viewing /admin never creates or migrates a store."""
+        if not settings.get("__settings_path__"):
+            return []
+        db = _outdir() / "sync.db"
+        if not db.exists():
+            return []
+        import sqlite3
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                rows = conn.execute(
+                    "SELECT mailbox, uidvalidity, last_uid, updated_ts FROM fetch_cursor "
+                    "WHERE account_id=? ORDER BY mailbox", (account_id,)).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []       # a missing table (pre-migration db) is not an admin-page failure
+        return [{"mailbox": r[0], "uidvalidity": r[1], "last_uid": r[2], "updated_ts": r[3]}
+                for r in rows]
+
+    def _admin_accounts() -> list[dict[str, Any]]:
+        """The redacted account inventory. Every field is derived; the settings dict is never
+        forwarded wholesale, and the only thing said about the credential is whether it resolved."""
+        imap = settings.get("imap", {}) or {}
+        rows = []
+        for a in (imap.get("accounts") or []):
+            if not isinstance(a, dict):
+                continue
+            aid = str(a.get("id", "") or "")
+            env = str(a.get("password_env", "") or "").strip()
+            # Truthiness only. The value is never bound to a name, logged, or returned.
+            present = bool(_ENV_NAME_RE.match(env)) and bool(os.environ.get(env))
+            mailboxes = ([str(m) for m in a["mailboxes"]] if isinstance(a.get("mailboxes"), list)
+                         else [str(imap.get("mailbox", "INBOX"))])
+            cursors = _cursors_for(aid)
+            last_sync = max((str(c.get("updated_ts") or "") for c in cursors), default="")
+            rows.append({
+                "id": aid,
+                "username": str(a.get("username", "") or ""),
+                "host": str(a.get("host") or imap.get("host", "") or ""),
+                "port": int(a.get("port") or imap.get("port", 993) or 993),
+                "mailboxes": mailboxes,
+                "password_env": env if _ENV_NAME_RE.match(env) else "",
+                "credential_present": present,
+                "last_sync": last_sync,
+                "cursors": cursors,
+                "errors": list(_account_errors.get(aid, [])),
+            })
+        return rows
+
+    def _admin_sync_state() -> dict[str, Any]:
+        return {"running": _sync["running"],
+                "last": {"ts": _sync["last_ts"] or "",
+                         "error": _sync.get("last_error") or "",
+                         "counts": {k: v for k, v in (_sync["last_counts"] or {}).items()
+                                    if isinstance(v, (int, float)) and not isinstance(v, bool)},
+                         "failures": dict(_sync.get("account_failures") or {})}}
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin_view():
+        return HTMLResponse(admin_page.build_html(
+            _admin_accounts(), sync=_admin_sync_state(), nav_counts=_nav_counts()),
+            headers=_NO_STORE)
+
+    @app.get("/api/admin/accounts")
+    def api_admin_accounts():
+        return JSONResponse({"accounts": _admin_accounts(), "sync": _admin_sync_state()},
+                            headers=_NO_STORE)
+
+    @app.post("/api/admin/accounts")
+    async def api_admin_accounts_save(request: Request):
+        """Replace ``imap.accounts`` in ``config/settings.json``. Validate-then-write, never both.
+
+        Every other key in the file (``llm``, ``intake``, ``paths``, ``sync``, …) is round-tripped
+        from the on-disk copy — this endpoint owns the account list and nothing else. The write is
+        atomic (temp file + ``os.replace``), so a crash mid-write cannot leave a truncated
+        settings.json that would make the app unbootable.
+        """
+        if not settings.get("__settings_path__"):
+            return JSONResponse({"error": "edição indisponível sem settings.json"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "corpo inválido (JSON esperado)."}, status_code=400)
+        leaked = _find_secret_key(body)
+        if leaked:
+            return JSONResponse(
+                {"error": f"o campo '{leaked}' não é aceite: as passwords vivem no .env e esta "
+                          "página guarda apenas o NOME da variável (password_env)."},
+                status_code=400)
+        accounts, err = validate_accounts((body or {}).get("accounts"))
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        # Guard the write against a concurrent sync: fetch_all reads imap.accounts mid-run, and
+        # swapping the file under it would give one run two different account lists.
+        if not _sync_lock.acquire(blocking=False):
+            return JSONResponse({"running": True}, status_code=409)
+        try:
+            sp = _settings_file()
+            disk = json.loads(sp.read_text(encoding="utf-8"))
+            if not isinstance(disk, dict):
+                return JSONResponse({"error": "settings.json não é um objeto JSON."},
+                                    status_code=500)
+            imap = dict(disk.get("imap") or {})
+            host, port = accounts[0]["host"], accounts[0]["port"]
+            imap["host"], imap["port"] = host, port
+            # The per-account host/port were validated as identical above and live at the imap level
+            # (that is where fetch._connect reads them), so they are not duplicated onto each account.
+            imap["accounts"] = [{"id": a["id"], "username": a["username"],
+                                 "password_env": a["password_env"], "mailboxes": a["mailboxes"]}
+                                for a in accounts]
+            disk["imap"] = imap
+            tmp = sp.with_name(sp.name + ".writing")
+            tmp.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.replace(tmp, sp)
+            # Reload the in-memory settings IN PLACE so every closure above (fetch, paths, llm) sees
+            # the new accounts without a restart. __settings_path__ is runtime-only and never on disk.
+            keep = settings["__settings_path__"]
+            settings.clear()
+            settings.update(disk)
+            settings["__settings_path__"] = keep
+        except OSError as exc:
+            return JSONResponse({"error": f"não foi possível gravar: {type(exc).__name__}"},
+                                status_code=500)
+        finally:
+            _sync_lock.release()
+        return JSONResponse({"ok": True, "accounts": _admin_accounts()})
 
     return app
 

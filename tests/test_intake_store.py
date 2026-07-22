@@ -23,11 +23,11 @@ def _conn() -> sqlite3.Connection:
 def test_allowlist_is_default_deny():
     cap = CaptureStore(_conn())
     assert cap.is_allowed(123) is False              # unknown sender -> denied (ADR-019 §6)
-    cap.allow(123, display_name="Pedro", roster_owner="Pedro", added_by="admin")
+    cap.allow(123, display_name="Diogo", roster_owner="Diogo", added_by="admin")
     assert cap.is_allowed(123) is True
     cap.disable(123)
     assert cap.is_allowed(123) is False              # soft-disabled -> denied, but the audit row is kept
-    assert cap.get_user(123)["display_name"] == "Pedro"
+    assert cap.get_user(123)["display_name"] == "Diogo"
     cap.allow(123)                                   # re-enable
     assert cap.is_allowed(123) is True
 
@@ -36,7 +36,7 @@ def test_add_persists_a_pending_capture():
     cap = CaptureStore(_conn())
     cid, created = cap.add(telegram_message_id=11, telegram_chat_id=99,
                            content_class="conversation", raw_text="prazo 30 jun",
-                           media_paths=["c-99-11/photo.jpg"], channel="call", asserted_by="Pedro")
+                           media_paths=["c-99-11/photo.jpg"], channel="call", asserted_by="Diogo")
     assert created is True and cid == "c-99-11"
     assert [c["capture_id"] for c in cap.list_pending()] == ["c-99-11"]
     got = cap.get(cid)
@@ -84,16 +84,16 @@ def test_discarded_capture_is_retained_for_audit():
 def test_re_enable_preserves_labels():
     # A bare allow(id) re-enable must NOT wipe the sender->owner mapping that feeds asserted_by.
     cap = CaptureStore(_conn())
-    cap.allow(7, display_name="Pedro", roster_owner="Pedro Ferreira", added_by="admin")
+    cap.allow(7, display_name="Diogo", roster_owner="Diogo Costa", added_by="admin")
     cap.disable(7)
     cap.allow(7)                                         # bare re-enable
     u = cap.get_user(7)
     assert u["enabled"] == 1
-    assert u["display_name"] == "Pedro" and u["roster_owner"] == "Pedro Ferreira"
+    assert u["display_name"] == "Diogo" and u["roster_owner"] == "Diogo Costa"
     assert u["added_by"] == "admin"                      # the original audit is preserved
-    cap.allow(7, display_name="Pedro F.")                # an explicit non-empty label DOES update
-    assert cap.get_user(7)["display_name"] == "Pedro F."
-    assert cap.get_user(7)["roster_owner"] == "Pedro Ferreira"   # untouched (not supplied)
+    cap.allow(7, display_name="Diogo F.")                # an explicit non-empty label DOES update
+    assert cap.get_user(7)["display_name"] == "Diogo F."
+    assert cap.get_user(7)["roster_owner"] == "Diogo Costa"   # untouched (not supplied)
 
 
 def test_terminal_captures_are_immutable():

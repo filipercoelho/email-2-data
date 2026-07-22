@@ -35,7 +35,8 @@ out/crm.db
    │  jobspec.py      JobSpec (14 vars + Gate-1 readiness)
    │  specdraft.py    Phase-B tiered spec draft (LEAD/PO only)
    │  replydraft.py   Phase-C clarifying reply (never sends)
-   │  clientdraft.py  Phase-C client-email composer (deterministic, never sends)  ADR-013
+   │  clientdraft.py  Phase-C client-email composer (deterministic, 8 purposes, PT/EN/FR/ES)  ADR-013/-031/-032
+   │  translate.py    Phase-C translate-received-email-to-English reading aid (display-only)  ADR-032
    ▼
 project.py  cross-thread Projects → one canonical spec (workspace.db, precious)  ADR-010
    │  export.py       shell-only offload → JSON | materials-costing API  ADR-011
@@ -60,7 +61,8 @@ webapp.py   FastAPI workspace UI on 127.0.0.1:8042 (live) + static report.html
 | `jobspec.py` | Phase A | JobSpec (14 vars + custom fields + provenance + confirmed) + Gate-1 readiness + `askables` (selectable client-email prompts) |
 | `specdraft.py` | Phase B | tiered LLM spec draft for LEAD/PO/estimate only |
 | `replydraft.py` | Phase C | clarifying reply grounded in confirmed-vs-missing fields (never sends) |
-| `clientdraft.py` | Phase C | deterministic client-email composer: splices selected prompts into `config/client_email_template.md` (no LLM, never sends) — ADR-013 |
+| `translate.py` | Phase C | on-demand translate-a-received-email-to-English reading aid (`POST /api/translate`, in-memory cache); display-only, never sends/stores — ADR-032 |
+| `clientdraft.py` | Phase C | deterministic client-email composer: 8 purposes (ask · reject · quote · follow-up · approval · payment · deadline · ready), each splicing its input into an editable per-purpose template (no LLM, never sends) — ADR-013; optional checked polish extended with a verbatim number guard (`extract_values`/`missing_values`) — ADR-027/-031 ([reference](../05-reference/client-email-composer.md)) |
 | `workspace.py` | write | human decisions (SQLite) overlaying job specs; survive re-runs |
 | `project.py` | entity | cross-thread Projects: many threads → one canonical spec + lifecycle + provenance-rich append-only field/event timeline + contradiction detection (ADR-015) |
 | `export.py` | offload | shell-only export to JSON (dry-run) or materials-costing API |

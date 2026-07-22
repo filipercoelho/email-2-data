@@ -161,6 +161,26 @@ CREATE TABLE IF NOT EXISTS capture_users (
     added_by         TEXT,                    -- who added this sender (v5)
     added_at         TEXT                     -- UTC ISO when added (v5)
 );
+-- Para ti dismissals (v8): "Ignorar" on a decision card is a HUMAN DECISION — it must survive a
+-- reload. Before this table the dismissal lived in a JS Set, so every ignored proposal resurrected
+-- on the next page load (the toast said "ignorado" and kept nothing — a broken promise). Keyed by
+-- the same content key the lens uses (kind|thread_root-or-email), never by list index. Deleting a
+-- row un-dismisses (the undo path), so the table holds only CURRENT dismissals — an audit trail of
+-- flip-flops is not needed here; the thread itself always stays visible in the Fila (never binned).
+CREATE TABLE IF NOT EXISTS para_ti_dismissals (
+    item_key TEXT PRIMARY KEY,   -- para_ti.item_key(): "kind|thread_root" or "kind|email" (v8)
+    kind     TEXT,               -- rever_classificacao | propor_projeto | confirmar_identidade (v8)
+    ts       TEXT                -- UTC ISO when dismissed (v8)
+);
+-- Human display names for counterparty clusters (v8): the clustering keys (nif:274023911,
+-- free:someone@gmail.com) are machine identity, not something to show a person managing clients.
+-- A row here overrides the derived display_name everywhere the cluster is rendered. Precious and
+-- hand-set; an empty/deleted row falls back to the automatic derivation.
+CREATE TABLE IF NOT EXISTS counterparty_names (
+    key  TEXT PRIMARY KEY,       -- the cluster key (accounts.AccountCluster.key) (v8)
+    name TEXT NOT NULL,          -- the human-chosen display name (v8)
+    ts   TEXT                    -- UTC ISO when set (v8)
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
@@ -175,7 +195,10 @@ CREATE TABLE IF NOT EXISTS capture_users (
 # table, so it needs a guarded ALTER in _migrate (ADR-020 preserve-at-core: transcript + original audio).
 # v7 (2026-06-22): Increment 2 (inference) — captures.extracted_fields_json + captures.confidence (the
 # LLM-extracted field VALUES the user validates field-by-field; never auto-applied). Two more guarded ALTERs.
-SCHEMA_VERSION = 7
+# v8 (2026-07-20): para_ti_dismissals (persisted "Ignorar" on decision cards — was a JS Set that lost
+# every dismissal on reload) + counterparty_names (human display-name override for cluster keys).
+# Both brand-new TABLES, delivered by SCHEMA's CREATE IF NOT EXISTS with no ALTER needed.
+SCHEMA_VERSION = 8
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -307,6 +330,8 @@ class Workspace:
             # more NEW COLUMNS on the pre-existing captures table, so two more guarded ALTERs.
             self._add_column("captures", "extracted_fields_json", "TEXT")
             self._add_column("captures", "confidence", "REAL")
+        # v8 (para_ti_dismissals + counterparty_names) adds only NEW TABLES — delivered by SCHEMA
+        # above (CREATE IF NOT EXISTS runs before _migrate), so there is no ALTER to do here.
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 
@@ -470,6 +495,62 @@ class Workspace:
         assert self._conn is not None, "call connect() first"
         return [r["name"] for r in self._conn.execute(
             "SELECT name FROM roster ORDER BY name").fetchall()]
+
+    # -- Para ti dismissals (v8) ------------------------------------------------------------
+
+    def dismiss_para_ti(self, item_key: str, kind: str = "", ts: str = "") -> None:
+        """Persist an "Ignorar" on a Para ti decision card. Idempotent upsert.
+
+        The thread itself is untouched (still in the Fila; never binned) — this only stops the
+        SAME proposal from resurrecting on every page load."""
+        assert self._conn is not None, "call connect() first"
+        key = (item_key or "").strip()
+        if not key:
+            return
+        self._conn.execute(
+            "INSERT INTO para_ti_dismissals(item_key, kind, ts) VALUES (?,?,?) "
+            "ON CONFLICT(item_key) DO UPDATE SET kind=excluded.kind, ts=excluded.ts",
+            (key, kind or key.split("|", 1)[0], ts or self._now_iso()),
+        )
+        self._conn.commit()
+
+    def undismiss_para_ti(self, item_key: str) -> None:
+        """Reverse a dismissal (the Z/undo path) — the proposal reappears on the next build."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute("DELETE FROM para_ti_dismissals WHERE item_key=?",
+                           ((item_key or "").strip(),))
+        self._conn.commit()
+
+    def para_ti_dismissed(self) -> dict[str, str]:
+        """``{item_key: ts}`` — all currently-dismissed Para ti items (para_ti.all_items filters on it)."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute("SELECT item_key, ts FROM para_ti_dismissals").fetchall()
+        return {r["item_key"]: r["ts"] or "" for r in rows}
+
+    # -- counterparty display names (v8) ----------------------------------------------------
+
+    def set_counterparty_name(self, key: str, name: str, ts: str = "") -> None:
+        """Set (or clear, with an empty ``name``) the human display name for a cluster key."""
+        assert self._conn is not None, "call connect() first"
+        k = (key or "").strip()
+        if not k:
+            return
+        n = (name or "").strip()
+        if not n:
+            self._conn.execute("DELETE FROM counterparty_names WHERE key=?", (k,))
+        else:
+            self._conn.execute(
+                "INSERT INTO counterparty_names(key, name, ts) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET name=excluded.name, ts=excluded.ts",
+                (k, n, ts or self._now_iso()),
+            )
+        self._conn.commit()
+
+    def counterparty_names(self) -> dict[str, str]:
+        """``{cluster_key: human display name}`` — the precious overrides."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute("SELECT key, name FROM counterparty_names").fetchall()
+        return {r["key"]: r["name"] for r in rows}
 
     # -- identity links (C1b) ---------------------------------------------------------------
 

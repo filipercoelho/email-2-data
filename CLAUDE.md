@@ -84,8 +84,14 @@ This project uses `standards/05-definition-of-done.md` (tiered L0–L4) **plus**
 3. **QA self-review.** ruff (`ruff check src tests`), edge cases (empty/None/malformed MIME,
    non-ASCII charsets), the non-negotiables above, and idempotency (re-running yields the
    same result). Report findings explicitly.
+4. **Redeploy.** If the change touched anything baked into the image (`src/**`, `pyproject.toml`,
+   `Dockerfile`, `README.md`) or read at boot (`docker-compose.yml`, `.env`), the work is **not
+   done until it is running**: tests green → `docker compose up -d --build` →
+   `./bin/check-image-drift.sh` clean. See "The rebuild rule" below for the full table. A change
+   that exists only in the working tree is a change nobody is using — never report it as live, and
+   never cite `docker compose ps` or `/healthz` as evidence that it is.
 
-**Stop-and-report rule.** If you cannot do all three, or the request is ambiguous about a
+**Stop-and-report rule.** If you cannot do all four, or the request is ambiguous about a
 classification rule or source of truth, **STOP** and ask in chat (use `AskUserQuestion`).
 Never mark a change done with an item hand-waved or deferred to a follow-up that does not exist.
 
@@ -94,8 +100,61 @@ Never mark a change done with an item hand-waved or deferred to a follow-up that
 ```bash
 .venv/bin/python -m pytest -q          # full suite (fast)
 ruff check src tests                   # lint
-email2data serve --port 8042           # local workspace UI on http://127.0.0.1:8042
+docker compose up -d --build           # THE deploy — webapp on http://127.0.0.1:8042 + intake worker
+docker compose ps                      # both services: email2data (healthy) + intake-bot
+docker compose logs -f email2data      # or: logs -f intake-bot
 ```
+
+### Docker is the only deployment target (2026-07-20)
+
+**Every long-running process for this project runs as a `docker-compose` service — nothing is
+deployed any other way.** Two services: `email2data` (the webapp, published to `127.0.0.1:8042`
+only) and `intake-bot` (the ADR-019/-021 Telegram worker, no port, `depends_on: email2data healthy`
+because it opens `workspace.db` with `migrate=False` and must not migrate behind the webapp).
+
+- **Never run `email2data serve` or `email2data intake-bot` from the host.** The container already
+  holds `127.0.0.1:8042`, so a host `serve` **silently loses the bind and logs nothing** — you then
+  curl 8042 and verify the *container's* code while believing you are testing your working tree.
+  This has already produced one wrong "the change isn't there" conclusion. Two intake-bot pollers on
+  one token also fight over Telegram `getUpdates`.
+- **To see a source change, rebuild:** `docker compose up -d --build`. Editing `src/` alone changes
+  nothing that is running — `src/` is baked into the image; only `config/`, `corpus/`, `out/` and
+  `.env` are bind-mounted, so a *playbook* edit is live but a *code* edit is not.
+
+#### The rebuild rule — what changes require what (2026-07-20)
+
+**Any change to something baked into the image is not deployed until you rebuild.** Do not reason
+about which category a file is in from memory — use the table, then *verify* with the drift check.
+
+| You changed | Deployed by | Why |
+| --- | --- | --- |
+| `src/**`, `pyproject.toml`, `Dockerfile`, `README.md` | `docker compose up -d --build` | `COPY`'d into the image at build time |
+| `docker-compose.yml`, `.env` | `docker compose up -d` | mounted or compose-level, but read at process boot |
+| `config/**` (playbooks, `settings.json`, `gazetteer.csv`), `corpus/**`, `out/**` | nothing — already live | bind-mounted and read per call (no `lru_cache` anywhere in `src/`) |
+
+**Verify, never assume** — this check compares the running container's code against the working tree
+and is the only trustworthy answer to "is what I'm looking at current?":
+
+```bash
+./bin/check-image-drift.sh      # exit 0 = container matches worktree; exit 1 = STALE, rebuild
+```
+
+**Order of operations is not optional.** Rebuilding deploys code, so the suite gates it — a red
+working tree must never reach the container, and `--build` also bounces `intake-bot` (it
+`depends_on: email2data healthy`), so a broken image takes the worker down with it:
+
+```bash
+.venv/bin/python -m pytest -q && docker compose up -d --build && ./bin/check-image-drift.sh
+```
+
+**Never answer "is it up / is the latest UI running?" from `docker compose ps` or `/healthz`.** Both
+report the *container* as fine while it serves code from an image built days ago — that is exactly
+how a stale UI gets reported as live. `ps` proves a container is running; only the drift check proves
+it is running *your* code.
+
+- **To verify against a live server without disturbing the deploy**, either drive the app in-process
+  with `TestClient` (see `tests/test_webapp.py`) or serve on a **different free port** (e.g. 8043 —
+  **never 8000**). Do not stop the user's containers to free 8042.
 
 All tests must pass before handing a change back. **Baseline pin (2026-06-15, `fix/audit-followups`):
 330 passed, 0 failed** (the +18 over 312 are the lifecycle/ownership feature: `CANCELLED` stage +

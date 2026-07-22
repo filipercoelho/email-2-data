@@ -23,7 +23,7 @@ Rank the **active** projects (terminal stages excluded) by how strongly the capt
 - **Product / material words help.** Material and product terms (acrílico, MDF, alumínio, cortiça,
   vinil, placas, expositor, sinalética, troféus) match a project whose title/spec uses them.
 - **Gazetteer.** When a project's client sits at a [gazetteer](gazetteer.csv) domain, that domain's note
-  contributes extra match terms (e.g. corticoenetos.com → "cork").
+  contributes extra match terms (e.g. cork-example.com → "cork").
 - **Confident vs ambiguous.** The resolver pre-selects a project only when one match **strictly beats**
   the rest. A tie or a no-signal capture stays unresolved and waits for the human (or, Increment 2, the
   model) — never a guess (ADR-001: compute ∝ uncertainty).
@@ -35,7 +35,7 @@ so an alias expands the capture text before matching. One per line: `- <alias> -
 
 - VDH -> Violaine d'Harcourt
 - Vhils -> Vhils studio
-- VisionBox -> Amadeus Vision Box
+- TravelCo -> TravelCo
 - acrilico -> acrílico
 - inox -> aço inox
 - sinaletica -> sinalética

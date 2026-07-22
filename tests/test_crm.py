@@ -19,11 +19,11 @@ def _v(cp="CLIENT", purpose="PO_FROM_CLIENT", direction="inbound"):
 
 def test_participants_roles():
     env = _env("m1", {"email": "Joao@Cliente.PT", "name": "João"},
-               to=[{"email": "pedro@lindoservico.pt", "name": "Pedro"}],
+               to=[{"email": "diogo@lindoservico.pt", "name": "Diogo"}],
                cc=[{"email": "ana@cliente.pt", "name": "Ana"}],
                reply_to={"email": "vendas@cliente.pt", "name": "Vendas"})
     roles = {e: r for e, _, r in participants(env)}
-    assert roles == {"joao@cliente.pt": "from", "pedro@lindoservico.pt": "to",
+    assert roles == {"joao@cliente.pt": "from", "diogo@lindoservico.pt": "to",
                      "ana@cliente.pt": "cc", "vendas@cliente.pt": "reply_to"}
 
 
@@ -31,10 +31,10 @@ def test_rollup_counts_recency_and_types(tmp_path):
     s = CrmStore(tmp_path / "crm.db").connect()
     # two emails from the same client contact, different dates/purposes
     s.record(_env("m1", {"email": "joao@cliente.pt", "name": "João"},
-                  to=[{"email": "pedro@lindoservico.pt", "name": "Pedro"}], date="2026-05-10"),
+                  to=[{"email": "diogo@lindoservico.pt", "name": "Diogo"}], date="2026-05-10"),
              _v(purpose="ESTIMATE_REQUEST_FROM_CLIENT"))
     s.record(_env("m2", {"email": "joao@cliente.pt", "name": "João C."},
-                  to=[{"email": "pedro@lindoservico.pt"}], date="2026-05-20"),
+                  to=[{"email": "diogo@lindoservico.pt"}], date="2026-05-20"),
              _v(purpose="PO_FROM_CLIENT"))
     joao = {r["email"]: r for r in s.top_contacts(external_only=False)}["joao@cliente.pt"]
     assert joao["msg_count"] == 2 and joao["from_count"] == 2
@@ -48,11 +48,11 @@ def test_rollup_counts_recency_and_types(tmp_path):
 def test_internal_flag_and_external_filter(tmp_path):
     s = CrmStore(tmp_path / "crm.db").connect()
     s.record(_env("m1", {"email": "joao@cliente.pt"},
-                  to=[{"email": "pedro@lindoservico.pt"}]), _v())
+                  to=[{"email": "diogo@lindoservico.pt"}]), _v())
     by_email = {r["email"]: r for r in s.top_contacts(external_only=False)}
-    assert by_email["pedro@lindoservico.pt"]["is_internal"] == 1
+    assert by_email["diogo@lindoservico.pt"]["is_internal"] == 1
     assert by_email["joao@cliente.pt"]["is_internal"] == 0
-    assert all(r["email"] != "pedro@lindoservico.pt" for r in s.top_contacts(external_only=True))
+    assert all(r["email"] != "diogo@lindoservico.pt" for r in s.top_contacts(external_only=True))
     s.close()
 
 

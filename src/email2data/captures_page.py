@@ -250,9 +250,13 @@ async function confirmField(card, row){
   const val = ((row.querySelector('.capfval')||{}).value || '').trim();
   if(!val){ toast('Valor vazio'); return; }
   try{
+    /* source_mid cites the ORIGINATING CAPTURE (WP-A). Without it this value — which feeds the
+       estimable gate — reached the ledger unlinked and was then relabelled 'user', i.e. reported as
+       a human fact. The server 400s an unknown reference rather than dropping it. */
     await post('/api/projects/'+encodeURIComponent(pid)+'/field',
       {field: addr, value: val, channel: c.channel || 'manual',
-       asserted_by: c.asserted_by || '', acquired_at: c.acquired_at || ''});
+       asserted_by: c.asserted_by || '', acquired_at: c.acquired_at || '',
+       source_mid: 'capture:' + c.capture_id});
     row.classList.add('saved');
     const b = row.querySelector('.capfok'); if(b){ b.textContent = '✓ guardado'; b.disabled = true; }
     toast('campo guardado em '+pid); announce('campo confirmado');

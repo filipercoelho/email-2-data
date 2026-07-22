@@ -79,3 +79,24 @@ def test_infer_degrades_on_llm_error(monkeypatch):
     ("budget", "budget"), ("process", None), ("nonsense", None)])
 def test_field_address_maps_scope(key, addr):
     assert ci.field_address(key) == addr
+
+
+def test_extract_fields_strict_raises_where_the_capture_path_degrades(monkeypatch):
+    """ADR-026: the widened project re-extract reads a whole timeline in one pass, so it must be able
+    to tell "this note held no spec values" from "the model could not read this note" — collapsing the
+    two would report a silent failure as a clean run. The capture path keeps degrading: there, a dead
+    LLM must never cost the user a capture."""
+    _mock(monkeypatch, llm.LLMError("boom"))
+    assert ci.extract_fields("prazo 15 de março", object(), {}) == {"fields": {}, "confidence": 0.0}
+    with pytest.raises(llm.LLMError):
+        ci.extract_fields_strict("prazo 15 de março", object(), {})
+
+
+def test_extract_fields_strict_shares_the_coercion_and_the_no_op_cases(monkeypatch):
+    """Same contract as the wrapper otherwise: unknown keys dropped, values addressed, and no text /
+    no client is an empty result rather than a failure (nothing was attempted, so nothing failed)."""
+    _mock(monkeypatch, {"material": " inox ", "bogus": "x", "deadline": None, "confidence": 0.9})
+    got = ci.extract_fields_strict("nota", object(), {})
+    assert got["fields"] == {"material#0": "inox"} and got["confidence"] == 0.9
+    assert ci.extract_fields_strict("", object(), {}) == {"fields": {}, "confidence": 0.0}
+    assert ci.extract_fields_strict("nota", None, {}) == {"fields": {}, "confidence": 0.0}

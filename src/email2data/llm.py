@@ -22,6 +22,26 @@ def _attempts(cfg: dict[str, Any]) -> int:
     return max(1, int(cfg.get("max_retries", 5)))
 
 
+def with_tier(cfg: dict[str, Any], tier: Optional[str]) -> dict[str, Any]:
+    """Return a COPY of ``cfg`` with the named tier's overrides applied (``llm.tiers.<tier>``).
+
+    Tiers let one call opt into a heavier or cheaper model without changing the default for the whole
+    process — ``standard`` stays whatever ``llm.model`` says, so an unknown or absent tier is a no-op
+    rather than a surprise model switch. Returning a copy is load-bearing: ``settings`` is shared
+    process state, and mutating it here would silently repoint every later call in the same run.
+
+    Each tier may override ``model``, ``max_tokens`` and ``thinking_budget``. Because the context-cache
+    key is ``(model, sha256(system))`` (:func:`_gemini_cache_key`), two tiers never collide — each
+    model gets its own cached prefix.
+    """
+    if not tier:
+        return cfg
+    spec = (cfg.get("tiers") or {}).get(tier)
+    if not isinstance(spec, dict):
+        return cfg
+    return {**cfg, **{k: v for k, v in spec.items() if v is not None}}
+
+
 # Vertex context-cache registry: (model, sha256(system_instruction)) -> CachedContent resource name.
 # The triage playbook is a large STABLE prefix (~2.4K tokens) re-sent as system_instruction on every
 # classification; without caching it is re-billed in full each call. Caching it once and reusing it
@@ -101,7 +121,7 @@ def _gemini_stream(client, cfg, system, user, temperature):
     cfg_obj = types.GenerateContentConfig(
         system_instruction=system, temperature=temperature,
         max_output_tokens=int(cfg.get("max_tokens", 1024)),
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=types.ThinkingConfig(thinking_budget=int(cfg.get("thinking_budget", 0))),
     )
     stream = client.models.generate_content_stream(model=cfg["model"], contents=user, config=cfg_obj)
     for chunk in stream:
@@ -134,7 +154,7 @@ def _gemini(client, cfg, system, user, schema, text, temperature, images=None) -
             kw: dict[str, Any] = dict(
                 temperature=temperature,
                 max_output_tokens=int(cfg.get("max_tokens", 1024)),
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                thinking_config=types.ThinkingConfig(thinking_budget=int(cfg.get("thinking_budget", 0))),
             )
             # cached_content already carries the system_instruction — passing BOTH is an error, so
             # it is one or the other.

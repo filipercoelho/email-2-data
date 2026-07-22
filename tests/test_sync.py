@@ -248,6 +248,156 @@ def test_cli_reports_total_fetch_failure_cleanly(tmp_path, monkeypatch, capsys):
     assert "Fetch error" in capsys.readouterr().err
 
 
+# ── per-account detail + stage switches (what an admin panel needs) ──────────
+
+def test_fetch_all_reports_per_account_counts_and_failures(tmp_path, monkeypatch):
+    """fetch_all already knew which account failed and why — it just threw it away. The report keeps
+    it: still a {account_id: n} mapping for every existing caller, now with .failures/.total/.ok so a
+    0 can be told apart from "0 because that account is down"."""
+    settings = _two_accounts(tmp_path)
+    good = FakeIMAP(uidvalidity=42, messages={1: _eml(1), 2: _eml(2)})
+
+    def fake_connect(s, account):
+        if account["id"] == "bad":
+            raise fetch.FetchError("IMAP error for account 'bad': [AUTHENTICATIONFAILED] auth failed")
+        return good
+    monkeypatch.setattr(fetch, "_connect", fake_connect)
+
+    report = fetch.fetch_all(settings)
+    # backward compatible: the old callers (cli.cmd_fetch, run_sync) only ever saw a dict
+    assert dict(report) == {"bad": 0, "good": 2}
+    assert sum(report.values()) == 2 and report.total == 2
+    # additive: the failing account is NAMED, with the credential-safe server detail
+    assert set(report.failures) == {"bad"}
+    assert "auth failed" in report.failures["bad"]
+    assert report.ok == ["good"]                       # one bad account did not stop the healthy one
+
+
+def test_fetch_all_account_ids_targets_one_account(tmp_path, monkeypatch):
+    """A force-sync of ONE account: the filter lives inside fetch_all (so the isolation logic still
+    applies), the untargeted account is never even connected and its watermark is untouched."""
+    settings = _two_accounts(tmp_path, ids=("a", "b"))
+    fakes = {"a": FakeIMAP(uidvalidity=42, messages={1: _eml(1)}),
+             "b": FakeIMAP(uidvalidity=42, messages={2: _eml(2), 3: _eml(3)})}
+    connected: list[str] = []
+
+    def fake_connect(s, account):
+        connected.append(account["id"])
+        return fakes[account["id"]]
+    monkeypatch.setattr(fetch, "_connect", fake_connect)
+
+    report = fetch.fetch_all(settings, account_ids=["b"])
+    assert connected == ["b"]                          # 'a' was not touched at all
+    assert dict(report) == {"b": 2} and report.failures == {}
+
+    sync = SyncStore(tmp_path / "out" / "sync.db").connect()
+    assert sync.get_cursor("b", "INBOX") == (42, 3)
+    assert sync.get_cursor("a", "INBOX") is None
+    sync.close()
+
+
+def test_fetch_all_rejects_an_unknown_account_id(tmp_path, monkeypatch):
+    """A typo'd or removed id must not masquerade as a healthy empty sync."""
+    import pytest
+    settings = _two_accounts(tmp_path, ids=("a", "b"))
+
+    def never(s, account):
+        raise AssertionError("must not connect for an unknown account id")
+    monkeypatch.setattr(fetch, "_connect", never)
+
+    with pytest.raises(fetch.FetchError) as ei:
+        fetch.fetch_all(settings, account_ids=["nope"])
+    assert "nope" in str(ei.value)
+
+
+def test_fetch_all_targeted_single_account_failure_still_raises(tmp_path, monkeypatch):
+    """The total-outage contract follows the filter: if the ONE account you targeted is down, that is
+    a total outage for this run — raise loudly instead of returning a misleading 0."""
+    import pytest
+    settings = _two_accounts(tmp_path)
+    good = FakeIMAP(uidvalidity=42, messages={1: _eml(1)})
+
+    def fake_connect(s, account):
+        if account["id"] == "bad":
+            raise fetch.FetchError("boom bad")
+        return good
+    monkeypatch.setattr(fetch, "_connect", fake_connect)
+
+    with pytest.raises(fetch.FetchError) as ei:
+        fetch.fetch_all(settings, account_ids=["bad"])
+    assert "bad" in str(ei.value)
+
+
+def test_run_sync_surfaces_per_account_counts_and_failures(tmp_path, monkeypatch):
+    """run_sync used to collapse everything into sum(counts.values()). The per-account detail now
+    survives to its return dict, without renaming any key the CLI/button already read."""
+    from email2data import sync as syncmod
+    settings = _two_accounts(tmp_path)
+    good = FakeIMAP(uidvalidity=42, messages={1: _eml(1), 2: _eml(2)})
+
+    def fake_connect(s, account):
+        if account["id"] == "bad":
+            raise fetch.FetchError("IMAP error for account 'bad': [AUTHENTICATIONFAILED] auth failed")
+        return good
+    monkeypatch.setattr(fetch, "_connect", fake_connect)
+
+    out = syncmod.run_sync(settings, do_triage=False, do_crm=False)
+    assert out["fetched"] == 2                                   # unchanged key, unchanged meaning
+    assert out["per_account"] == {"bad": 0, "good": 2}
+    assert "auth failed" in out["account_failures"]["bad"]
+    assert out["stages"] == {"fetch": True, "triage": False, "crm": False}
+
+
+def test_run_sync_fetch_only_spends_no_tokens(tmp_path, monkeypatch):
+    """do_fetch=True + do_triage=False is the admin panel's "pull mail, spend nothing" mode: the
+    triage stage must not run at all — no store, no LLM client, no triage_corpus."""
+    from email2data import cascade, crm
+    from email2data import sync as syncmod
+
+    settings = _settings(tmp_path)
+    fake = FakeIMAP(uidvalidity=42, messages={1: _eml(1)})
+    monkeypatch.setattr(fetch, "_connect", lambda s, a: fake)
+
+    def never(*a, **k):
+        raise AssertionError("triage/crm stage must not run when switched off")
+    monkeypatch.setattr(cascade, "triage_corpus", never)
+    monkeypatch.setattr(cascade, "build_store", never)
+    monkeypatch.setattr(cascade.classifier, "make_client", never)
+    monkeypatch.setattr(crm, "build_crm", never)
+
+    out = syncmod.run_sync(settings, do_triage=False, do_crm=False)
+    assert out["fetched"] == 1 and out["per_account"] == {"acc": 1}
+    assert out["triaged_new"] == 0 and out["llm"] == 0 and out["crm_recorded"] == 0
+    assert out["stages"]["triage"] is False and out["stages"]["crm"] is False
+
+
+def test_run_sync_triage_only_skips_fetch(tmp_path, monkeypatch):
+    """The mirror switch: do_fetch=False classifies what is already in the corpus without opening a
+    single IMAP connection, and reports empty per-account detail rather than a fake 0-count account."""
+    from email2data import cascade, crm
+    from email2data import sync as syncmod
+
+    class _Store:
+        def close(self):
+            pass
+
+    settings = _settings(tmp_path)
+
+    def never(*a, **k):
+        raise AssertionError("fetch stage must not run when switched off")
+    monkeypatch.setattr(fetch, "fetch_all", never)
+    monkeypatch.setattr(cascade, "build_store", lambda s: _Store())
+    monkeypatch.setattr(cascade, "triage_corpus", lambda s, store, full=False: {
+        "new": 3, "skipped": 1, "offline": 2, "llm": 1, "failed": 0})
+    monkeypatch.setattr(crm, "build_crm", lambda s: {"recorded": 7})
+
+    out = syncmod.run_sync(settings, do_fetch=False)
+    assert out["fetched"] == 0 and out["per_account"] == {} and out["account_failures"] == {}
+    assert out["triaged_new"] == 3 and out["triaged_skipped"] == 1
+    assert out["offline"] == 2 and out["llm"] == 1 and out["crm_recorded"] == 7
+    assert out["stages"] == {"fetch": False, "triage": True, "crm": True}
+
+
 def test_triage_escalates_to_needs_review_when_tier1_fails(tmp_path, monkeypatch):
     """A Tier-1 failure (e.g. LLM/auth down) must NOT drop the message — it escalates to NEEDS_REVIEW
     so it stays visible in the human queue (VISION: uncertain escalates, never disappears)."""

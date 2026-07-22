@@ -72,7 +72,7 @@ def load_aliases(path: str | Path) -> dict[str, str]:
 
 def load_gazetteer(path: str | Path) -> dict[str, str]:
     """``{domain: note}`` from the gazetteer CSV — the note seeds extra needles for a project whose
-    client sits at that domain (e.g. corticoenetos.com → "supplies cork rolls…"). Best-effort."""
+    client sits at that domain (e.g. cork-example.com → "supplies cork rolls…"). Best-effort."""
     out: dict[str, str] = {}
     try:
         text = Path(path).read_text(encoding="utf-8")

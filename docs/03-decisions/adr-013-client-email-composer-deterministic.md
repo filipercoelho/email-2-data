@@ -42,3 +42,19 @@ The Perguntas block becomes a **composer**, with three rules:
 - Trace: `src/email2data/clientdraft.py`, `jobspec.askables`, `webapp.py` (`/api/projects/{id}/draft`),
   `projetos_page.py` (composer). Tests: `tests/test_clientdraft.py`, `test_jobspec.py`
   (`test_askables_*`), `test_webapp.py` (`test_client_email_draft_compose_and_rebuild`).
+
+## Status update (2026-07-20)
+
+The optional "melhorar tom" layer reserved in the first Decision bullet is now **built** — see
+[ADR-027](adr-027-ai-polish-sits-on-top-of-the-deterministic-draft.md). This ADR is **extended, not
+superseded**: all three rules above still hold, the deterministic draft is still what the composer
+produces by default, and the system still never sends. ADR-027 makes "sits *on top of* the
+deterministic draft" mechanically checkable (`clientdraft.missing_questions`) rather than a claim, and
+it uses its own playbook rather than `reply_playbook.md` as guessed here — that playbook drafts a reply
+*from* a spec, whereas the polish rewrites *a given text*.
+
+**Status update (2026-07-20):** further extended by
+[ADR-031](adr-031-client-email-purpose-selector-and-verbatim-fact-guard.md) — the composer gains a
+**purpose selector** (8 kinds; `ask` stays the default and unchanged). Every purpose's base draft is
+still deterministic and server-assembled from an editable template; the money/text purposes add a
+free-text input the user writes. All three rules above still hold, and the system still never sends.

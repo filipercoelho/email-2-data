@@ -32,6 +32,9 @@ node_modules/
 
 # Local data — never commit (real inbox content, contact DBs, watermarks)
 config/settings.json
+# The gazetteer names your real clients/suppliers — keep it OUT of git (config/gazetteer.example.csv
+# is the committed template). It is bind-mounted/read at runtime, so the local file stays on disk.
+config/gazetteer.csv
 labels/*.csv
 corpus/*.eml
 *.db
@@ -49,6 +52,10 @@ captures/
 # cursor (out/intake_offset.json) — ignore all but the keep file
 out/*
 !out/.gitkeep
+
+# Local app screenshots — they capture REAL inbox content (subjects, addresses, message-ids in the
+# filename). Never commit. Sanitized UI shots, if ever needed, go under docs/ and are force-added.
+res/screenshots/
 
 # Python build artifacts
 *.egg-info/

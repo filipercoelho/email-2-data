@@ -40,19 +40,59 @@ _MAX_PICK = 8  # inline buttons shown; beyond this we say so (no silent cap)
 _TRANSCRIBE_SYSTEM = "Transcreve o áudio em pt-PT; devolve só o texto."
 
 # pt-PT user-facing strings (project convention; code/comments stay English).
-_HELP = ("Envia uma nota, uma foto ou uma mensagem de voz e eu guardo-a para associares a uma obra. "
-         "Confirmas sempre na app — nada é aplicado automaticamente.")
+_HELP = ("Envia uma nota, uma foto, um ficheiro (PDF/desenho) ou uma mensagem de voz e eu guardo-a "
+         "para associares a uma obra. Confirmas sempre na app — nada é aplicado automaticamente.\n\n"
+         "Comandos: /ajuda — esta mensagem.")
 _F1_UNAUTHORIZED = "Não estás autorizado a usar este canal."
 _T1_ACK = "📥 Recebido. A guardar…"
-_E_EMPTY = "Envia texto ou uma foto para eu guardar."
-_E_DOWNLOAD = "Não consegui descarregar a imagem. Tenta enviar outra vez."
+_E_EMPTY = "Envia texto, uma foto, um ficheiro ou uma mensagem de voz para eu guardar."
+# One message per media kind: reusing the photo wording for an audio/file failure told the user the
+# wrong thing (UX review, 2026-07-19).
+_E_DOWNLOAD_PHOTO = "Não consegui descarregar a imagem. Tenta enviar outra vez."
+_E_DOWNLOAD_AUDIO = "Não consegui descarregar a mensagem de voz. Tenta enviar outra vez."
+_E_DOWNLOAD_DOC = "Não consegui descarregar o ficheiro. Tenta enviar outra vez."
 _E_PERSIST = "Erro temporário a guardar. Reenvia, por favor."
 _T2_PICK = "A que projeto pertence?"
+# Voice memos are scrubbed from Telegram once stored, so the chat is the ONLY place the staffer can
+# check what was heard before the source is gone — always report transcription status (UX review).
+_T2_HEARD = "🎙 Ouvi: «{text}»\n\n"
+_T2_NOT_HEARD = "🎙 Guardei o áudio mas não consegui transcrevê-lo — confirma na Caixa de Capturas.\n\n"
+_HEARD_MAX = 400  # keep the echo readable on a phone (Telegram hard-caps a message at 4096)
 _T2_NO_PROJECTS = ("Guardado. Não há projetos ativos — abre a Caixa de Capturas na app "
                    "para o associares.")
 _T2_TRUNCATED = "\n(+{extra} outros — usa a Caixa de Capturas na app se não estiver na lista.)"
 _T2_PICKED = "✅ Associado a {title}. Valida na Caixa de Capturas."
 _T2_SKIPPED = "Deixei na Caixa de Capturas para validares na app."
+
+# The / autocomplete menu registered with Telegram at worker start, so the commands are discoverable
+# instead of hidden (UX review). Best-effort: a failure never blocks the loop.
+_BOT_COMMANDS = [{"command": "ajuda", "description": "Como usar este canal"}]
+
+
+_TITLE_MAX = 30  # inline-button text wraps badly on a phone beyond roughly this
+
+
+def _button_label(p: dict[str, Any]) -> str:
+    """A phone-readable, DISAMBIGUATED pick button.
+
+    Titles are raw email subjects: long, and often duplicated (two 'Troféu KIA' rows, two identical
+    'Pedido de orçamento - troféu croissant'). Two identical buttons are un-pickable, so append a
+    human-meaningful discriminator — the client's domain, else the creation date — and keep the id for
+    cross-referencing the app (UX review, 2026-07-19).
+    """
+    title = " ".join((p.get("title") or "(sem título)").split())
+    if len(title) > _TITLE_MAX:
+        title = title[:_TITLE_MAX - 1].rstrip() + "…"
+    hint = ""
+    email = (p.get("client_email") or "").strip()
+    if "@" in email:
+        hint = email.rsplit("@", 1)[1]
+    if not hint:
+        ts = str(p.get("created_ts") or "")[:10]          # YYYY-MM-DD
+        if len(ts) == 10 and ts[4] == "-":
+            hint = f"{ts[8:10]}/{ts[5:7]}"
+    pid = p.get("project_id", "")
+    return f"{title} · {hint} ({pid})" if hint else f"{title} ({pid})"
 
 
 def _admin_new_user(name: str, uid: int, username: str | None) -> str:
@@ -112,19 +152,25 @@ class IntakeBot:
         if chat_id is None or sender_id is None or message_id is None:
             return
 
+        # Default-deny FIRST (ADR-019 §6): the help text describes the internal workflow, so a stranger
+        # who finds the bot must not receive it either (UX review, 2026-07-19).
+        if not self._captures.is_allowed(sender_id):
+            self._reject(chat_id, sender_id, from_user)
+            return
+
         text = (message.get("text") or "").strip()
         if text in ("/start", "/ajuda", "/help"):
             self._client.send_message(chat_id, _HELP)
             return
 
-        if not self._captures.is_allowed(sender_id):
-            self._reject(chat_id, sender_id, from_user)
-            return
-
         photos = message.get("photo") or []
         voice = message.get("voice") or message.get("audio")   # a voice memo or an audio file
+        # A document is how Telegram delivers a PDF/DXF drawing AND any photo sent "as file" (which the
+        # staffer does to preserve quality) — without this they got "envia texto ou uma foto" after
+        # sending exactly that (UX review). Artifact, like a photo.
+        document = message.get("document")
         body_text = text or (message.get("caption") or "").strip()
-        if not body_text and not photos and not voice:
+        if not body_text and not photos and not voice and not document:
             self._client.send_message(chat_id, _E_EMPTY)
             return
 
@@ -139,7 +185,7 @@ class IntakeBot:
                 media_paths.append(self._download_photo(photos, chat_id, message_id))
             except Exception:
                 logger.exception("intake_download_failed", extra={"chat_id": chat_id})
-                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD)
+                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD_PHOTO)
                 return  # before persist -> nothing to scrub; Telegram keeps the message
         elif voice:
             # A voice memo / audio file: the staffer's own words (ADR-019 §3) — content_class stays
@@ -150,7 +196,15 @@ class IntakeBot:
                 media_paths.append(audio_rel)
             except Exception:
                 logger.exception("intake_download_failed", extra={"chat_id": chat_id})
-                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD)
+                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD_AUDIO)
+                return  # before persist -> nothing to scrub; Telegram keeps the message
+        elif document:
+            content_class = CONTENT_ARTIFACT
+            try:
+                media_paths.append(self._download_document(document, chat_id, message_id))
+            except Exception:
+                logger.exception("intake_download_failed", extra={"chat_id": chat_id})
+                self._client.edit_message_text(chat_id, t1_id, _E_DOWNLOAD_DOC)
                 return  # before persist -> nothing to scrub; Telegram keeps the message
 
         user = self._captures.get_user(sender_id) or {}
@@ -175,11 +229,12 @@ class IntakeBot:
         # surfaced for manual handling — the capture is PRECIOUS; inference is not (ADR-020).
         if audio_rel:
             self._transcribe(cid, audio_rel, voice or {})
+        self._extract_fields(cid)
+        self._offer_projects(chat_id, t1_id, cid, was_voice=bool(audio_rel))
         # Increment 2: extract job-spec field VALUES from the text/transcript (best-effort, stored only).
         # NEVER auto-applied — the user validates each field in the Caixa de Capturas (R9). Runs after the
-        # transcript so a voice memo's words are included.
-        self._extract_fields(cid)
-        self._offer_projects(chat_id, t1_id, cid)
+        # transcript so a voice memo's words are included. (Both calls are made above, right after the
+        # transcription, so the pick-list can report what was heard.)
 
     def _reject(self, chat_id: int, sender_id: int, from_user: dict[str, Any]) -> None:
         self._client.send_message(chat_id, _F1_UNAUTHORIZED)
@@ -213,6 +268,33 @@ class IntakeBot:
         ext = Path(meta.get("file_path", "")).suffix.lstrip(".") or "ogg"
         rel = f"c-{chat_id}-{message_id}/voice.{ext}"
         dest = self._captures_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return rel
+
+    def _download_document(self, doc: dict[str, Any], chat_id: int, message_id: int) -> str:
+        """Download a document (PDF/DXF drawing, or a photo sent 'as file') to the precious captures
+        dir. ``file_name`` is ATTACKER-CONTROLLED, so it is reduced to a bare basename and scrubbed of
+        separators/dots — a name like ``../../etc/passwd`` must never escape the capture folder."""
+        meta = self._client.get_file(doc["file_id"])
+        data = self._client.download_file(meta["file_path"])
+        raw = (doc.get("file_name") or "").strip()
+        # Basename, then neutralise BOTH separator styles (a Windows-style name is not split by
+        # PurePosixPath) and collapse any surviving dot-dot run, so the stored name can never read as
+        # a traversal to this or any downstream tool.
+        safe = Path(raw).name.replace("/", "_").replace("\\", "_")
+        while ".." in safe:
+            safe = safe.replace("..", "_")
+        safe = safe.lstrip(".")
+        if not safe:  # no usable name -> fall back to the Telegram path's extension
+            ext = Path(meta.get("file_path", "")).suffix.lstrip(".") or "bin"
+            safe = f"document.{ext}"
+        rel = f"c-{chat_id}-{message_id}/{safe}"
+        dest = self._captures_dir / rel
+        # Belt-and-braces: even after sanitising, refuse anything that resolves outside the capture dir.
+        root = self._captures_dir.resolve()
+        if root not in dest.resolve().parents:
+            raise ValueError("document path escapes the captures dir")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         return rel
@@ -264,7 +346,7 @@ class IntakeBot:
         except Exception:
             logger.info("intake_scrub_failed", extra={"chat_id": chat_id, "capture_id": cid})
 
-    def _offer_projects(self, chat_id: int, t1_id: int, cid: str) -> None:
+    def _offer_projects(self, chat_id: int, t1_id: int, cid: str, *, was_voice: bool = False) -> None:
         active = [p for p in self._projects.list() if p["stage"] not in _project.TERMINAL_STAGES]
         # Deterministic resolve (R2 seed): rank the active projects by how strongly the capture's
         # text/transcript names them, so the likeliest obra is the FIRST button. No auto-apply — these
@@ -289,16 +371,29 @@ class IntakeBot:
                 active = ranked
         shown = active[:_MAX_PICK]
         rows: list[list[dict[str, str]]] = [
-            [{"text": f"{p['title']} ({p['project_id']})",
-              "callback_data": f"pick:{cid}:{p['project_id']}"}] for p in shown]
+            [{"text": _button_label(p), "callback_data": f"pick:{cid}:{p['project_id']}"}]
+            for p in shown]
+        # A voice memo is scrubbed from Telegram once stored, so this reply is the staffer's ONLY
+        # chance to see what was heard while they can still re-say it — report it either way.
+        prefix = ""
+        if was_voice:
+            heard = (cap.get("transcript") or "").strip()
+            if heard:
+                clipped = heard if len(heard) <= _HEARD_MAX else heard[:_HEARD_MAX - 1].rstrip() + "…"
+                prefix = _T2_HEARD.format(text=clipped)
+            else:
+                prefix = _T2_NOT_HEARD
         if not rows:
-            self._client.edit_message_text(chat_id, t1_id, _T2_NO_PROJECTS)
+            self._client.edit_message_text(chat_id, t1_id, prefix + _T2_NO_PROJECTS, parse_mode=None)
             return
         rows.append([{"text": "▫️ Outro (resolver na app)", "callback_data": f"skip:{cid}"}])
-        text = _T2_PICK
+        text = prefix + _T2_PICK
         if len(active) > len(shown):
             text += _T2_TRUNCATED.format(extra=len(active) - len(shown))
-        self._client.edit_message_text(chat_id, t1_id, text, reply_markup={"inline_keyboard": rows})
+        # parse_mode=None: the transcript is model output and titles are email subjects — neither is
+        # trusted Markdown (same posture as the pick confirmation).
+        self._client.edit_message_text(chat_id, t1_id, text, reply_markup={"inline_keyboard": rows},
+                                       parse_mode=None)
 
     # -- callback -> project pick -----------------------------------------------------------------
 
@@ -381,6 +476,12 @@ def poll_forever(*, client: TelegramClient, bot: IntakeBot, bot_name: str, offse
     a locked DB never drops a capture."""
     backoff = 0
     offset = _initial_offset(client, offset_path, bot_name)
+    # Publish the / menu once at start — best-effort: a bot that cannot register its commands must
+    # still poll (the menu is discoverability, not function).
+    try:
+        client.set_my_commands(_BOT_COMMANDS)
+    except Exception:
+        logger.info("intake_set_commands_failed", extra={"bot_name": bot_name})
     logger.info("intake_started", extra={"bot_name": bot_name, "offset": offset})
     while shutdown is None or not shutdown.is_set():
         try:

@@ -1,15 +1,24 @@
 """Response cockpit (D1) — fold per-message verdicts into per-THREAD state with a response clock.
 
-The Fila (queue) is sorted by *response risk* — "who owes the next reply, and for how long" — not by
-per-message priority. This is the core of [docs/05-reference/cockpit-design.md]: it turns *"we classified it right"* into
+The Fila (queue) can be sorted by *response risk* — "who owes the next reply, and for how long" — not
+by per-message priority. This is the core of [docs/05-reference/cockpit-design.md]: it turns *"we classified it right"* into
 *"someone must answer this, and the clock is running."*
+
+Two orderings, one queue (``build_fila(..., order=...)``)
+---------------------------------------------------------
+``"recent"`` (the DEFAULT) — newest thread activity first: the mailbox-shaped view people expect when
+they open the queue, and what the user asked for. ``"risk"`` — the response-risk tuple above
+(``sort_key``), this product's opinionated "what is falling over" order. Risk stays a first-class,
+always-available option; the default only decides which lens opens first, never what the cockpit knows.
+Every row carries BOTH keys under ``order_keys`` so the UI can re-sort client-side without re-deriving
+(and drifting from) this logic — one source of truth for the risk tuple, here in Python.
 
 Pure functions over CRM interaction rows (``crm.CrmStore.all_interactions``) + the precious thread_state
 overlay (owner/handled, from ``workspace.Workspace``). No I/O, no LLM — fully unit-testable.
 
 How the Fila detects replies from lindoservico.pt (the "we answered" signal)
 ---------------------------------------------------------------------------
-When Pedro or any colleague sends a reply from their mail client, that reply lands in Lindo's Sent
+When Diogo or any colleague sends a reply from their mail client, that reply lands in Lindo's Sent
 folder on the IMAP server. ``signals.header_signals()`` derives ``direction="outbound"`` for any
 message whose ``X-Email2Data-Source`` header names a Sent or Enviados folder. ``fold_threads()``
 tracks ``last_outbound_date`` per thread, and ``thread_clock()`` at line ~182 says:
@@ -68,6 +77,11 @@ _NON_COUNTERPARTY = {"INTERNAL", "BULK", "OTHER", ""}
 
 # Sort rank per state (higher = nearer the top of the Fila). Explicit, not magic.
 _STATE_RANK = {WE_OWE: 3, AWAITING: 2, INTERNAL: 1, HANDLED: 0}
+
+# Fila orderings (see the module docstring). Both are ORDER BY DESC over their key.
+ORDER_RECENT = "recent"   # newest thread activity first — the default
+ORDER_RISK = "risk"       # response-risk tuple (``sort_key``) — the cockpit's opinionated order
+ORDERS = (ORDER_RECENT, ORDER_RISK)
 
 # Clock-colour thresholds, in hours-in-state. FIRST-DRAFT — calibrate against how the shop actually
 # triages (a client estimate is hours; a supplier chase is days). One curve for the MVP; per-counterparty
@@ -269,10 +283,19 @@ def sort_key(clock: dict[str, Any], counterparty: str) -> tuple[int, int, float]
             clock["age_hours"])
 
 
+def recency_key(s: ThreadSummary) -> float:
+    """Seconds-since-epoch of the thread's LAST activity, any direction (used for ORDER BY DESC).
+
+    ``0.0`` when the thread has no parseable date, so an undated thread sinks to the bottom instead of
+    floating to the top of a most-recent-first queue."""
+    return s.last_date.timestamp() if s.last_date else 0.0
+
+
 def build_fila(interactions: Iterable[dict[str, Any]],
                thread_states: Optional[dict[str, dict[str, Any]]] = None,
                *, now: Optional[datetime] = None, include_resolved: bool = False,
-               reclassified: Optional[dict[str, dict[str, str]]] = None) -> list[dict[str, Any]]:
+               reclassified: Optional[dict[str, dict[str, str]]] = None,
+               order: str = ORDER_RECENT) -> list[dict[str, Any]]:
     """Top-level: fold → reclassification overlay → clock → sort. Returns Fila rows for the UI/JSON.
 
     ``thread_states``: ``{thread_root: {"owner": str, "handled": bool, "handled_ts": str}}`` (workspace).
@@ -280,7 +303,12 @@ def build_fila(interactions: Iterable[dict[str, Any]],
     corrections, ``Workspace.get_reclassifications``). When a thread's dominant verdict was corrected we
     use the human value, mark the row ``committed``, and — since the override happens BEFORE the clock —
     a correction can move a thread INTO or OUT of the active queue (e.g. OTHER→CLIENT, or CLIENT→OTHER).
-    ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them (shrink-to-zero)."""
+    ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them (shrink-to-zero).
+    ``order``: ``"recent"`` (default — newest thread activity first) or ``"risk"`` (the response-risk
+    tuple). Unknown values raise instead of silently falling back, so a typo can never quietly reorder
+    the queue. Each row also carries ``order_keys`` = both keys, for a client-side re-sort."""
+    if order not in ORDERS:
+        raise ValueError(f"unknown Fila order {order!r} — expected one of {ORDERS}")
     now = now or datetime.now(timezone.utc)
     states = thread_states or {}
     recl = reclassified or {}
@@ -307,6 +335,7 @@ def build_fila(interactions: Iterable[dict[str, Any]],
         clock = thread_clock(s, now, handled=bool(st.get("handled")), handled_ts=st.get("handled_ts"))
         if not include_resolved and clock["state"] in (HANDLED, INTERNAL):
             continue
+        risk_k, recent_k = list(sort_key(clock, s.counterparty)), recency_key(s)
         rows.append({
             "thread_root": s.thread_root,
             "message_id": s.dominant_mid,   # the verdict id reclassify writes against (correct from the Fila)
@@ -322,7 +351,12 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "clock": clock,
             "trust": {"confidence": round(s.confidence, 2), "decided_by": s.decided_by,
                       "reason": s.reason, "committed": committed},
-            "_sort": sort_key(clock, s.counterparty),
+            # Last activity in the thread (any direction) — what the "recent" order sorts on, and the
+            # only date the UI can show without re-reading the clock's state-dependent `since`.
+            "last_date": s.last_date.isoformat() if s.last_date else None,
+            # BOTH sort keys, so the lens can flip order without a round-trip or a second implementation.
+            "order_keys": {ORDER_RECENT: recent_k, ORDER_RISK: risk_k},
+            "_sort": recent_k if order == ORDER_RECENT else risk_k,
         })
     rows.sort(key=lambda r: r["_sort"], reverse=True)
     for r in rows:
