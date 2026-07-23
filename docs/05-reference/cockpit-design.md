@@ -7,6 +7,13 @@ the **convergence point** of work already on the roadmap, plus the two ideas the
 
 Status legend: ✅ done · 🔄 in progress · ⬜ planned.
 
+> **2026-07-23 — the Fila lens is being rebuilt as «Mesa com Foco»**
+> ([ADR-033](../03-decisions/adr-033-fila-mesa-com-foco.md) ·
+> [fila-mesa-design.md](fila-mesa-design.md) ·
+> [phases](../04-implementation/fila-mesa-phases.md)): split-pane list+dossier, counterparty tabs,
+> risk as the default order, five fixed vistas, act-and-advance. The principles below are unchanged
+> and ADR-033 cites them; D3's flat-list rendering detail is superseded by the new reference.
+
 ---
 
 ## In one sentence

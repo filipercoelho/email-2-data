@@ -9,6 +9,7 @@ invalidates them.
 | [triage-schema.md](triage-schema.md) | The verdict model — the four axes, vocabularies (counterparty/purpose/direction/priority), `derive_priority`, `TriageResult`, `Entities`, structured-output contracts, versioning, Phase-B spec schema. |
 | [data-stores.md](data-stores.md) | `out/` files and the three SQLite stores, their recoverability tiers, migration discipline, dangling refs, and the Project lifecycle. |
 | [cockpit-design.md](cockpit-design.md) | The cockpit / triage-delivery UI spec (Fila, Para Ti, Projetos, Contrapartes) — layout, trust grammar, motion, a11y. |
+| [fila-mesa-design.md](fila-mesa-design.md) | The Fila «Mesa com Foco» redesign reference ([ADR-033](../03-decisions/adr-033-fila-mesa-com-foco.md)) — regions, command strip, counterparty tabs, vistas, row anatomy, dossier, vertical conversation timeline, momentum definition, keyboard map, contextual-R mapping, `/api/fila` data-contract additions, PT-PT strings. |
 | [intake-bot-contract.md](intake-bot-contract.md) | The Telegram intake surface — commands, accepted message kinds, the reply sequence (incl. the mandatory voice transcription report), per-kind errors, and the pick-list button format. |
 | [client-email-composer.md](client-email-composer.md) | The Projetos client-email composer — the 8-purpose registry + input kinds, editable templates/reasons, the `/draft[/polish]` route shapes, the `_FACT_RE` verbatim-number guard (with its FP/FN boundaries), the PT/EN/FR/ES output language, and the `POST /api/translate` reading aid. |
 
