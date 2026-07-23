@@ -972,3 +972,118 @@ def test_api_fila_rows_carry_display_name_and_cluster(tmp_path):
     ws.set_counterparty_name("acme.pt", "ACME Metalomecânica")
     rows = {x["thread_root"]: x for x in cl.get("/api/fila").json()["rows"]}
     assert rows["mid:t1"]["display_name"] == "ACME Metalomecânica"   # the precious override wins
+
+
+# ── ADR-033 Phase 2 — live + data joins + vistas + bulk ──────────────────────
+
+def _verdict_ent(cp="CLIENT", purpose="ESTIMATE_REQUEST_FROM_CLIENT", **ents):
+    v = _verdict(cp, purpose)
+    v["entities"] = ents
+    return v
+
+
+def test_api_fila_rows_carry_entities_absent_when_unknown(tmp_path):
+    """Extracted entities join the row — with a parsed money_value for the € vista — and a row whose
+    verdict extracted nothing carries NO entities key: absence, never a placeholder (no-fake-numbers)."""
+    crm = _crm_with([
+        (_env("t1", 3), _verdict_ent(money="€ 1.200", deadline="2026-08-01",
+                                     product_or_service="letras LED", action_requested="orçamento com montagem")),
+        (_env("t2", 4, frm="joao@beira.pt", subject="Outro"), _verdict()),
+    ])
+    rows = {x["thread_root"]: x for x in _client(tmp_path, crm)[0].get("/api/fila").json()["rows"]}
+    e = rows["mid:t1"]["entities"]
+    assert e["money"] == "€ 1.200" and e["money_value"] == 1200.0
+    assert e["deadline"] == "2026-08-01" and e["product_or_service"] == "letras LED"
+    assert "entities" not in rows["mid:t2"]
+
+
+def test_api_fila_rows_carry_chase_novo_momentum_and_related(tmp_path):
+    """The joined decision signals: chase (AWAITING past 72h), novo (first contact ≤14d — flags the
+    rarest, highest-value event), momentum, and the cross-thread related count (same contact or
+    shared entity — the double-answer guard)."""
+    real_now = datetime.now(timezone.utc)
+    fresh = _env("t4", 0, frm="nova@boreal.pt", subject="Letras LED")
+    fresh["date"] = (real_now - timedelta(hours=3)).isoformat()   # «novo» is a WALL-CLOCK concept
+    crm = _crm_with([
+        (_env("t1", 3), _verdict()),
+        (_env("t2", 5, subject="Segundo pedido"), _verdict()),   # same contact, separate thread
+        (_env("t3", 100, frm="forn@aco.pt", subject="Encomenda"),
+         {**_verdict(cp="SUPPLIER", purpose="OUR_ORDER_TO_SUPPLIER"), "direction": "internal"}),
+        (fresh, _verdict(cp="LEAD")),
+    ])
+    rows = {x["thread_root"]: x for x in _client(tmp_path, crm)[0].get("/api/fila").json()["rows"]}
+    assert rows["mid:t3"]["chase"] is True                    # AWAITING amber = past the chase cutoff
+    assert rows["mid:t1"]["chase"] is False
+    assert rows["mid:t4"]["novo"] is True                     # first contact 3h ago (real clock)
+    assert rows["mid:t1"]["novo"] is False                    # established contact (weeks old)
+    assert rows["mid:t1"]["momentum"] in ("active", "slowing", "stalled")
+    assert rows["mid:t1"]["related_count"] >= 1               # t2 shares the contact
+    assert rows["mid:t3"]["related_count"] == 0
+
+
+def test_api_fila_carries_freshness_badges_and_needs_review(tmp_path):
+    """The poll updates everything in one round-trip (mirrors /api/para-ti): synced_at + syncing +
+    nav_counts + the NEEDS_REVIEW count that finally gets a surface (the «rever N» chip)."""
+    crm = _crm_with([(_env("t1", 3), _verdict()),
+                     (_env("t2", 4, frm="x@spam.biz", subject="??"),
+                      {**_verdict(), "priority": "NEEDS_REVIEW"})])
+    d = _client(tmp_path, crm)[0].get("/api/fila").json()
+    assert "synced_at" in d and "syncing" in d
+    assert isinstance(d["nav_counts"], dict)
+    assert d["needs_review"] == 1
+
+
+def test_fila_routes_forbid_http_caching(tmp_path):
+    """The queue is rebuilt per request; the only way to serve a stale one is an HTTP cache in front
+    of us. Both the page and its API opt out (same rule Para ti already pins)."""
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.get("/").headers.get("cache-control") == "no-store"
+    assert cl.get("/api/fila").headers.get("cache-control") == "no-store"
+
+
+def test_fila_page_polls_itself_in_place(tmp_path):
+    """ADR-023 reaches the hero: 30s poll, hidden-tab pause, signature diff (state|band|owners), the
+    swap carries fetched threads/drafts across by root, never swaps under an open picker, and
+    «Sincronizar» refreshes in place instead of location.reload() (the onSynced shell hook)."""
+    html = _p0_page(tmp_path)
+    assert "REFRESH_MS" in html and "'/api/fila'" in html and "no-store" in html
+    assert "function _sig(" in html and "visibilitychange" in html
+    assert "function onSynced()" in html                     # the Fila's no-reload sync hook
+    assert "typeof onSynced==='function'" in html            # …dispatched by the shell
+    assert "_menu" in html.split("async function refresh(")[1].split("setInterval")[0]
+
+
+def test_fila_signal_tiles_and_entity_chips(tmp_path):
+    """The dossier's signal tiles (Em jogo / Prazo / Resposta / Ritmo) and the row's dashed entity
+    chips: an AI-extracted € renders dashed with a ? (proposed, never solid), deadlines as ⚑."""
+    html = _p0_page(tmp_path)
+    assert "Em jogo" in html and "Ritmo" in html and "A abrandar" in html
+    assert "valor estimado (IA)" in html
+    assert "money_value" in html and "⚑" in html
+    assert 'class="rchip money"' in html
+
+
+def test_fila_money_and_prazos_vistas(tmp_path):
+    """€ em jogo (money desc, explicitly AI-estimated) and Prazos (days-left asc) on keys 2/3 —
+    fixed vistas over the same queue, flat-rendered, honestly bannered."""
+    html = _p0_page(tmp_path)
+    assert 'data-vista="money"' in html and 'data-vista="prazos"' in html
+    assert "e.key==='2'" in html and "e.key==='3'" in html
+    assert "valores estimados pela IA" in html               # the € vista banner
+    assert "p.set('vista'" in html and "get('vista')" in html
+
+
+def test_fila_bulk_select_structurally_excludes_ignore(tmp_path):
+    """X selects, Shift+X selects the group, and the bulk verbs are tratado/dono ONLY — a mass
+    silent bin is the one unrecoverable triage mistake, so bulk IGNORE does not exist as a control."""
+    html = _p0_page(tmp_path)
+    assert "e.key==='x'" in html and "selecionadas" in html
+    assert 'data-bulk="handled"' in html and 'data-bulk="owner"' in html
+    assert 'data-bulk="ignore"' not in html and "bulkIgnore" not in html
+
+
+def test_fila_rever_chip_surfaces_needs_review(tmp_path):
+    """NEEDS_REVIEW finally gets a surface: a quiet chip in the strip, linking to Para ti."""
+    html = _p0_page(tmp_path)
+    assert 'id="_rever"' in html and "const NEEDS_REVIEW" in html
+    assert "paintRever" in html and "/para-ti" in html

@@ -366,3 +366,39 @@ def test_reclassified_row_keeps_original_auto():
     assert r["purpose"] == "FOLLOW_UP" and r["counterparty"] == "SUPPLIER"     # overlaid
     assert r["auto"] == {"counterparty": "CLIENT", "purpose": "ESTIMATE_REQUEST_FROM_CLIENT"}
     assert r["trust"]["committed"] is True
+
+
+# ── ADR-033 P2 — momentum («Ritmo») + money parsing, deterministic ──────────
+
+def test_momentum_single_message_fresh_vs_stalled():
+    from email2data.cockpit import momentum
+    assert momentum([_parse_dt(ago(2))], NOW) == "active"      # fresh single message
+    assert momentum([_parse_dt(ago(100))], NOW) == "stalled"   # old single message (>72h)
+    assert momentum([], NOW) == "stalled"                      # no dates: nothing moving
+
+
+def test_momentum_cadence_bands():
+    """gap ≤ max(48h, 1.5×cadence) = active; ≤ 3×cadence = slowing; else stalled (design §8)."""
+    from email2data.cockpit import momentum
+    cadence24 = [_parse_dt(ago(84)), _parse_dt(ago(60)), _parse_dt(ago(36))]  # 24h cadence
+    assert momentum(cadence24 + [_parse_dt(ago(12))], NOW) == "active"    # gap 12 ≤ 48
+    assert momentum([_parse_dt(ago(132)), _parse_dt(ago(108)),
+                     _parse_dt(ago(84)), _parse_dt(ago(60))], NOW) == "slowing"   # gap 60 ∈ (48, 72]
+    assert momentum([_parse_dt(ago(172)), _parse_dt(ago(148)),
+                     _parse_dt(ago(124)), _parse_dt(ago(100))], NOW) == "stalled"  # gap 100 > 72
+
+
+def test_build_fila_rows_carry_momentum():
+    [r] = build_fila([_row("t1", "m1", ago(6))], now=NOW)
+    assert r["momentum"] in ("active", "slowing", "stalled")
+
+
+def test_money_value_parses_pt_formats():
+    from email2data.cockpit import money_value
+    assert money_value("€ 1.234,56") == 1234.56
+    assert money_value("1.200") == 1200.0          # PT thousands, not 1.2
+    assert money_value("1200,50 EUR") == 1200.5
+    assert money_value("160€") == 160.0
+    assert money_value("12,5") == 12.5
+    assert money_value("sem valor") is None
+    assert money_value("") is None and money_value(None) is None

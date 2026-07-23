@@ -83,9 +83,11 @@ coherent change (the old flat rendering is deleted, not kept as a mode).
   product_or_service/action_requested from the dominant interaction's `entities` JSON),
   `related_count` (`crm.related`), `novo` (contacts.first_seen ≤ 14 d), `chase`, `momentum`
   (deterministic, computed in `cockpit.py` beside the clock — unit-tested there), project
-  `coverage`/`estimable` on the project chip, typed attachment glyph (content-type of the last
-  inbound's attachments). Performance note: one pass, no N+1 queries — `related()` calls bounded to
-  visible-queue dominant mids with an in-request memo; measured before/after on the real corpus.
+  `coverage`/`estimable` on the project chip. *Shipped scope notes (2026-07-23):* the typed
+  attachment glyph (📎PDF/IMG) is **deferred** — `crm.interactions` stores only `has_attach`, and
+  inventing a type would be a fake value; it needs attachment metadata joined into the CRM first.
+  The related-threads affordance shipped as a **count chip** (`↻N`, full list on the dossier's
+  cluster context); jump-link popovers need the related list in the payload and follow with P3+.
 - **2.3 Vistas**: € em jogo (money desc, dashed, "valores estimados (IA)" banner) · Prazos
   (days-left asc, red past-due) · Cobranças (chase desc) wired on keys 2/3/4; facet counts under the
   rail (tipo top-4, sem dono, ✍, 📎). NEEDS_REVIEW «rever N» chip in the strip (count from

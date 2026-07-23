@@ -1619,16 +1619,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     def _fila_rows(*, include_resolved: bool = False) -> list[dict[str, Any]]:
         if _crmdb is None:
             return []
-        rows = cockpit.build_fila(_crmdb.all_interactions(), ws.thread_states(),
-                                  now=datetime.now(timezone.utc),
+        ints = _crmdb.all_interactions()
+        now = datetime.now(timezone.utc)
+        rows = cockpit.build_fila(ints, ws.thread_states(),
+                                  now=now,
                                   reclassified=ws.get_reclassifications(),
                                   include_resolved=include_resolved)
         # Annotate each thread with the project it already belongs to (if any), so the Fila can show
         # "already in project X" and offer open-vs-create — preventing duplicate projects from one lead.
+        # The denormalized Gate-1 columns (v3) ride along so the dossier's project line can say
+        # «faltam N campos» / «pronto a orçamentar» without opening the project (ADR-033 P2).
         root2proj: dict[str, dict] = {}
         for pr in pstore.list(include_archived=True):
             info = {"project_id": pr["project_id"], "title": pr.get("title") or pr["project_id"],
-                    "stage": pr.get("stage") or ""}
+                    "stage": pr.get("stage") or "",
+                    "coverage": pr.get("coverage"), "estimable": pr.get("estimable")}
             for root in pstore.threads_for(pr["project_id"]):
                 root2proj.setdefault(root, info)
         for r in rows:
@@ -1653,7 +1658,56 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             else:
                 r["display_name"] = r.get("contact") or ""
                 r["cluster"] = None
+        # ADR-033 P2: join what the pipeline already extracted and never showed. Every field is
+        # ABSENT when unknown — a missing extraction renders as absence, never a placeholder.
+        ent_by_mid: dict[str, dict[str, Any]] = {}
+        for it in ints:
+            raw = it.get("entities")
+            if raw:
+                try:
+                    parsed = json.loads(raw) or {}
+                    if isinstance(parsed, dict):
+                        ent_by_mid[it.get("message_id") or ""] = parsed
+                except (TypeError, ValueError):
+                    pass
+        first_seen = {c.get("email"): c.get("first_seen") or "" for c in _crmdb.all_contacts()}
+        for r in rows:
+            ents = ent_by_mid.get(r.get("message_id") or "") or {}
+            keep = {k: ents[k] for k in ("money", "deadline", "product_or_service",
+                                         "action_requested") if ents.get(k)}
+            if keep.get("money"):
+                mv = cockpit.money_value(keep["money"])
+                if mv is not None:
+                    keep["money_value"] = mv   # the € vista's proposed ordering key — never the default sort
+            if keep:
+                r["entities"] = keep
+            c = r.get("clock") or {}
+            # chase: AWAITING past the 72h cutoff — _band() only ambers AWAITING at that threshold.
+            r["chase"] = bool(c.get("state") == "AWAITING" and c.get("band") == "amber")
+            # novo: first contact within 14 days — the rarest, highest-value event (a new lead).
+            fs = cockpit._parse_dt(first_seen.get(r.get("contact") or ""))
+            r["novo"] = bool(fs and (now - fs).days <= 14)
+            # cross-thread relations (same contact or shared entity), deduped by thread_root — the
+            # double-answer guard. Bounded: one related() call per active thread on a local SQLite.
+            n_rel = 0
+            if r.get("message_id"):
+                rel = _crmdb.related(r["message_id"])
+                roots = {x.get("thread_root") for grp in ("by_contact", "by_entity")
+                         for x in rel.get(grp, [])}
+                roots.discard(r.get("thread_root"))
+                roots.discard("")
+                roots.discard(None)
+                n_rel = len(roots)
+            r["related_count"] = n_rel
         return rows
+
+    def _needs_review_count() -> int:
+        """Verdicts the cascade could not decide (tier-1 failure → NEEDS_REVIEW, ADR-016) — the
+        «rever N» strip chip finally gives them a surface."""
+        if _crmdb is None:
+            return 0
+        return sum(1 for it in _crmdb.all_interactions()
+                   if (it.get("priority") or "") == "NEEDS_REVIEW")
 
     # -------------------------------------------------------------------------
     # Shared cluster builder (C1a/C1b) — assembled per-request; cheap (in-memory).
@@ -1741,15 +1795,28 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             # The freshness stamp (ADR-033 P0): same source as /api/para-ti's synced_at, so the
             # hero page can say how old the mail behind its clocks actually is.
             synced_at=_sync["last_ts"] or "",
-            nav_counts=_nav_counts(frows=frows)))
+            needs_review=_needs_review_count(),
+            nav_counts=_nav_counts(frows=frows)),
+            # Rebuilt per request; the only stale path is an HTTP cache in front of us (ADR-023).
+            headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fila")
     def api_fila(include: str = ""):
         """The active queue. ``?include=resolved`` adds HANDLED/INTERNAL rows — the "Tratados"
         ledger: what was already decided, so a decision can be reviewed (and reopened) instead of
-        vanishing without a trace the moment it is made."""
-        return JSONResponse({"rows": _fila_rows(include_resolved=(include == "resolved")),
-                             "team": _roster()})
+        vanishing without a trace the moment it is made.
+
+        Carries ``synced_at``/``syncing``/``nav_counts``/``needs_review`` alongside the rows so the
+        Fila's ADR-023 poll updates the whole page in one round-trip (mirrors /api/para-ti)."""
+        frows = _fila_rows(include_resolved=(include == "resolved"))
+        # The fila badge must count the ACTIVE queue even when the ledger view asked for resolved.
+        active = ([r for r in frows if (r.get("clock") or {}).get("state")
+                   in (cockpit.WE_OWE, cockpit.AWAITING)] if include else frows)
+        return JSONResponse({"rows": frows, "team": _roster(),
+                             "synced_at": _sync["last_ts"], "syncing": _sync["running"],
+                             "nav_counts": _nav_counts(frows=active),
+                             "needs_review": _needs_review_count()},
+                            headers={"Cache-Control": "no-store"})
 
     @app.post("/api/thread/handled")
     async def thread_handled(request: Request):

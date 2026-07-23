@@ -60,6 +60,7 @@ State machine (latest message wins):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -154,6 +155,8 @@ class ThreadSummary:
     # All message_ids in the thread (date-ascending). Used as a fallback when dominant_mid shifts
     # to a new message that has no reclassification — the correction on an older message survives.
     all_message_ids: list[str] = field(default_factory=list)
+    # Parsed message dates (ascending) — the momentum («Ritmo») input (ADR-033 §8).
+    dates: list[datetime] = field(default_factory=list)
 
 
 def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
@@ -204,8 +207,62 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
             decided_by=dom.get("decided_by") or "",
             reason=dom.get("reason") or "",
             all_message_ids=[r.get("message_id", "") for r in rows_asc if r.get("message_id")],
+            dates=[d for d in (_parse_dt(r.get("date")) for r in rows_asc) if d],
         ))
     return summaries
+
+
+def momentum(dates: list[datetime], now: datetime) -> str:
+    """The thread's «Ritmo» — deterministic from message-date deltas, no LLM (ADR-033 §8).
+
+    ``gap`` = hours since the last message; ``cadence`` = median gap of the last (up to) 3
+    message-pairs. ``active`` while the gap fits the thread's own rhythm (with a 48h floor so slow
+    email cadence never flags a 2-day-old thread as slowing); ``slowing`` up to 3× cadence;
+    ``stalled`` beyond — or for a single message older than 72h."""
+    ds = sorted(d for d in dates if d)
+    if not ds:
+        return "stalled"
+    gap = _age_hours(ds[-1], now)
+    pairs = [(ds[i + 1] - ds[i]).total_seconds() / 3600.0
+             for i in range(max(0, len(ds) - 4), len(ds) - 1)]
+    if not pairs:
+        return "active" if gap <= 72.0 else "stalled"
+    pairs.sort()
+    n = len(pairs)
+    cadence = pairs[n // 2] if n % 2 else (pairs[n // 2 - 1] + pairs[n // 2]) / 2.0
+    if gap <= max(48.0, 1.5 * cadence):
+        return "active"
+    if gap <= 3.0 * cadence:
+        return "slowing"
+    return "stalled"
+
+
+_PT_THOUSANDS_RE = re.compile(r"^\d{1,3}(\.\d{3})+$")
+
+
+def money_value(raw: Any) -> Optional[float]:
+    """Parse an LLM-extracted money STRING into a float for the € vista's ordering — or ``None``.
+
+    Handles the pt-PT shapes the corpus actually contains («€ 1.234,56», «1.200», «160€»,
+    «1200,50 EUR»). The value stays a *proposed* tiebreak/vista key only — it never enters the
+    default risk order (ADR-033 §2.6), so a mis-parse can never reorder the queue above the clock."""
+    if not raw:
+        return None
+    t = re.sub(r"[^\d,.]", "", str(raw))
+    if not any(ch.isdigit() for ch in t):
+        return None
+    if "," in t and "." in t:           # 1.234,56 → dots are thousands, comma is decimal
+        t = t.replace(".", "").replace(",", ".")
+    elif "," in t:                      # 1200,50 → comma is decimal
+        t = t.replace(",", ".")
+    elif _PT_THOUSANDS_RE.match(t):     # 1.200 → PT thousands, not one-point-two
+        t = t.replace(".", "")
+    elif t.count(".") > 1:              # 1.234.567 → thousands
+        t = t.replace(".", "")
+    try:
+        return float(t)
+    except ValueError:
+        return None
 
 
 def thread_clock(s: ThreadSummary, now: datetime,
@@ -351,6 +408,8 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "owner": st.get("owner") or "",              # legacy single (first owner) for old readers
             "owners": st.get("owners") or [],            # multi-owner set (the Fila chips)
             "clock": clock,
+            # «Ritmo» (ADR-033 §8): the thread's own cadence vs its current silence.
+            "momentum": momentum(s.dates, now),
             "trust": {"confidence": round(s.confidence, 2), "decided_by": s.decided_by,
                       "reason": s.reason, "committed": committed},
             # Last activity in the thread (any direction) — what the "recent" order sorts on, and the

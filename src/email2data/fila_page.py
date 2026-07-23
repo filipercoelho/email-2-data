@@ -106,6 +106,7 @@ function syncURL(){
   if(filters.hasAttachment) p.set('attachment','1');
   if(filters.minAgeDays!=null) p.set('minDays', String(filters.minAgeDays));
   if(filters.search) p.set('search', filters.search);
+  if(vista!=='fila') p.set('vista', vista);
   if(order!==ORDER_RISK) p.set('order', order);   /* the default stays out of the address bar */
   if(urlThread) p.set('thread', urlThread);
   const base = location.pathname.split('?')[0];
@@ -155,10 +156,22 @@ function toggleGroup(sg){
 /* ── view with multi-filter ─────────────────────────────────────────────
    viewAll() = tab + filters + group partition (the full set — headline and group counts read this).
    view() = viewAll() minus collapsed groups (what is actually rendered and keyboard-walked). */
+/* Fixed vistas (ADR-033 §4 — no view builder): 'fila' (grouped default) · 'money' (€ em jogo —
+   WE_OWE with an AI-estimated value, largest first, explicitly bannered as proposed) · 'prazos'
+   (extracted deadlines, nearest first). Flat-rendered; the risk order stays the only default. */
+let vista='fila';
 function view(){
   const va=viewAll();
   if(mode==='tratados') return va;
+  if(vista==='money') return va.filter(r=>((r.entities||{}).money_value!=null)&&((r.clock||{}).state==='WE_OWE'))
+    .slice().sort((a,b)=>(b.entities.money_value)-(a.entities.money_value));
+  if(vista==='prazos') return va.filter(r=>(r.entities||{}).deadline)
+    .slice().sort((a,b)=>((Date.parse(a.entities.deadline)||0)-(Date.parse(b.entities.deadline)||0)));
   return va.filter(r=>!isCollapsed(semGroup(r)));
+}
+function setVista(k){
+  if(k!=='fila'&&k!=='money'&&k!=='prazos') return;
+  vista=k; focus=0; focusRoot=null; syncURL(); render();
 }
 function viewAll(){
   const src = mode==='tratados' ? (resolvedRows||[]) : rows;
@@ -234,9 +247,13 @@ function renderRail(){
   const pc={}; act.forEach(r=>{ if(r.purpose) pc[r.purpose]=(pc[r.purpose]||0)+1; });
   const tops=Object.entries(pc).sort((a,b)=>b[1]-a[1]).slice(0,4);
   const purLab=k=>(LABELS.purpose&&LABELS.purpose[k])||k.toLowerCase().replace(/_/g,' ');
+  const nM=act.filter(r=>((r.entities||{}).money_value!=null)&&((r.clock||{}).state==='WE_OWE')).length;
+  const nD=act.filter(r=>(r.entities||{}).deadline).length;
   el.innerHTML='<div class="rl">Vistas</div>'
-    +'<button class="vit'+((mode==='ativos'&&!('band' in filters))?' on':'')+'" data-vista="risco"><span class="vd red"></span>Em risco<span class="vc">'+nR+'</span><kbd>1</kbd></button>'
-    +'<button class="vit'+(filters.band==='chase'?' on':'')+'" data-vista="cobrar"><span class="vd amber"></span>Cobranças<span class="vc">'+nC+'</span><kbd>4</kbd></button>'
+    +'<button class="vit'+((mode==='ativos'&&vista==='fila'&&!('band' in filters))?' on':'')+'" data-vista="risco"><span class="vd red"></span>Em risco<span class="vc">'+nR+'</span><kbd>1</kbd></button>'
+    +'<button class="vit'+(vista==='money'?' on':'')+'" data-vista="money"><span class="vd ac"></span>€ em jogo<span class="vc">'+nM+'</span><kbd>2</kbd></button>'
+    +'<button class="vit'+(vista==='prazos'?' on':'')+'" data-vista="prazos"><span class="vd purple"></span>Prazos<span class="vc">'+nD+'</span><kbd>3</kbd></button>'
+    +'<button class="vit'+(vista==='fila'&&filters.band==='chase'?' on':'')+'" data-vista="cobrar"><span class="vd amber"></span>Cobranças<span class="vc">'+nC+'</span><kbd>4</kbd></button>'
     +'<button class="vit'+(mode==='tratados'?' on':'')+'" data-vista="tratados"><span class="vd green"></span>Tratados<kbd>5</kbd></button>'
     +'<div class="rl">Tipo</div>'
     +tops.map(([k,n])=>'<button class="fit'+(filters.purpose===k?' on':'')+'" data-fpur="'+esc(k)+'">'+esc(purLab(k))+'<span class="vc">'+n+'</span></button>').join('')
@@ -315,18 +332,42 @@ function render(){
   }
   announce(mode==='tratados'?(v.length+' tratados'):(v.length?S.threads(v.length)+' por tratar':'Tudo tratado'));
 
-  /* Section sizes from the UN-collapsed set (va), so a folded header still carries its true count. */
-  const gCount={}; if(mode!=='tratados') for(const r of va){const g=groupOf(r); gCount[g]=(gCount[g]||0)+1;}
+  /* Honest vista banner: the € lens is explicitly AI-estimated, never presented as fact. */
+  const vb=$('#_vbanner');
+  if(vb){
+    if(mode!=='tratados'&&vista==='money'){ vb.textContent='€ em jogo — valores estimados pela IA (tracejado = proposto), maiores primeiro'; vb.classList.remove('hidden'); }
+    else if(mode!=='tratados'&&vista==='prazos'){ vb.textContent='Prazos extraídos dos emails — do mais próximo para o mais distante'; vb.classList.remove('hidden'); }
+    else vb.classList.add('hidden');
+  }
+  /* Bulk selection bar — the verbs are tratado/dono ONLY, structurally: a mass silent bin is the
+     one unrecoverable triage mistake, so bulk IGNORE does not exist as a control (ADR-033 §2.11). */
+  if(mode==='ativos') selected.forEach(root=>{ if(!rows.some(r=>r.thread_root===root)) selected.delete(root); });
+  const sb=$('#_selbar');
+  if(sb){
+    if(selected.size&&mode==='ativos'){
+      sb.classList.remove('hidden');
+      sb.innerHTML='<b>'+selected.size+' selecionadas</b>'
+        +'<button class="act-btn accept" data-bulk="handled">✓ Tratar todas</button>'
+        +'<button class="act-btn" data-bulk="owner">@ Dono</button>'
+        +'<button class="act-btn" data-bulk="clear">limpar</button>';
+    } else { sb.classList.add('hidden'); sb.innerHTML=''; }
+  }
+
+  /* Section sizes from the UN-collapsed set (va), so a folded header still carries its true count.
+     Flat renders (the ledger + the money/prazos vistas) skip headers entirely. */
+  const flat=(mode==='tratados')||(vista!=='fila');
+  const src=flat?v:va;
+  const gCount={}; if(!flat) for(const r of va){const g=groupOf(r); gCount[g]=(gCount[g]||0)+1;}
   let lastG=null, vi=0;
 
   const list=$('#_list');
-  list.innerHTML=va.map(r=>{
+  list.innerHTML=src.map(r=>{
     const c=r.clock||{},tr=r.trust||{};
     /* Headers ride in the SAME map as the rows. The map walks va (all groups, so a collapsed group
        still emits its counted header) while `vi` indexes into view() — collapsed rows return only
        their header, so data-i / focus / j/k keep matching exactly what is rendered. */
     let head='';
-    if(mode!=='tratados'){
+    if(!flat){
       const g=groupOf(r), sg=TAB_SEQ[tab][g];
       if(g!==lastG){
         lastG=g;
@@ -340,11 +381,12 @@ function render(){
       if(isCollapsed(sg)) return head;   /* folded: the counted header stands in for its rows */
     }
     const i=vi++;
+    const en=r.entities||{};
     const cpLabel=(LABELS.counterparty&&LABELS.counterparty[r.counterparty])||r.counterparty||'—';
     const name=r.display_name||r.contact||'(sem contacto)';
-    /* The scan line: the readable "what this is" — reason today, entities.product_or_service when
-       P2 joins it — demoting «RE: FW:» subject archaeology to the dossier. */
-    const scan=tr.reason||r.subject||'(sem assunto)';
+    /* The scan line: the readable "what this is" — product_or_service → reason → subject, a
+       deterministic fallback chain that demotes «RE: FW:» archaeology to the dossier. */
+    const scan=en.product_or_service||tr.reason||r.subject||'(sem assunto)';
     const decided=decidedShort(tr.decided_by);
     const conf=tr.confidence?(' · '+Math.round(tr.confidence*100)+'%'):'';
     /* Off focus, trust collapses to a 2px dot — a repeated label is not signal (§9). */
@@ -361,13 +403,19 @@ function render(){
     const cpPill=(tab==='all')
       ?'<button class="cp sm '+esc(r.counterparty||'OTHER')+'" data-act="fcp" title="filtrar: '+esc(cpLabel)+'">'+esc(cpLabel)+'</button>'
       :'';
+    /* Entity chips render ONLY when informative — a missing extraction is absence, never «—».
+       The AI-estimated € wears a trailing «?» and dashed styling: proposed, not fact. */
     const chips=[
+      r.novo?'<span class="rchip novo" title="novo contacto — primeiro email há menos de 14 dias">novo</span>':'',
+      en.money?'<span class="rchip money" title="valor estimado pela IA — proposto, não confirmado">'+esc(en.money)+'?</span>':'',
+      en.deadline?_ddlChip(en.deadline):'',
+      (r.related_count||0)>0?'<span class="rchip rel" title="'+(r.related_count)+' conversas relacionadas (mesmo contacto ou entidade partilhada)">↻'+r.related_count+'</span>':'',
       r.can_draft?'<span class="rchip draft" title="rascunho de resposta pronto">✍</span>':'',
       r.has_attachment?'<span class="rchip att" aria-hidden="true">📎</span>':'',
       r.n_messages>1?'<span class="rchip n">×'+r.n_messages+'</span>':'',
     ].join('');
     return head
-      +'<div class="row cpr-'+esc(r.counterparty||'OTHER')+(i===focus?' on':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
+      +'<div class="row cpr-'+esc(r.counterparty||'OTHER')+(i===focus?' on':'')+(selected.has(r.thread_root)?' picked':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
       /* Motion is triaged like the mail: only the CRITICAL red tier pulses (WE_OWE ≥3 days).
          `wait` hollows the dot whenever the ball is NOT ours (wait + chase): colour carries
          URGENCY, fill carries OBLIGATION — a row read outside its section still says whose move. */
@@ -384,6 +432,15 @@ function render(){
       +'</div>';
   }).join('');
   renderDossier();
+}
+
+/* Deadline chip: days-left from the client-stated date; red once it passed. */
+function _ddlChip(iso){
+  const t=Date.parse(iso); if(!t) return '';
+  const days=Math.ceil((t-Date.now())/86400000);
+  if(days<0) return '<span class="rchip ddl late" title="prazo indicado pelo cliente — já passou ('+esc(iso)+')">⚑ há '+(-days)+' d</span>';
+  if(days===0) return '<span class="rchip ddl late" title="prazo indicado pelo cliente: '+esc(iso)+'">⚑ hoje</span>';
+  return '<span class="rchip ddl" title="prazo indicado pelo cliente: '+esc(iso)+'">⚑ '+days+' d</span>';
 }
 
 /* ── the dossier (ADR-033 §6): the decision carries its evidence ─────── */
@@ -431,11 +488,25 @@ function dossierHTML(r){
     +'<button class="verb" data-act="owner">@ Dono<kbd>A</kbd></button>'
     +'<button class="verb" data-act="'+(r.project?'openproj':'mkproj')+'">▦ '+(r.project?'Abrir projeto':'Criar projeto')+'<kbd>P</kbd></button>'
     +'</div>';
-  /* Análise IA — dashed = proposta; the reason is ALWAYS visible here (it was a hidden click). */
-  if(decided||tr.reason){
+  /* Signal tiles (ADR-033 §6.4): Em jogo / Prazo / Resposta / Ritmo. A tile states absence in
+     words («nenhum prazo detetado») — the fixed grid is where honest absence is the information. */
+  const en=r.entities||{};
+  const MOM={active:['Ativo','var(--green)'],slowing:['A abrandar','var(--amber)'],stalled:['Parado','var(--red)']};
+  const mom=MOM[r.momentum];
+  const ageTxt=(c.age_hours!=null)?((c.age_hours>=48)?(Math.round(c.age_hours/24)+' d'):(Math.round(c.age_hours)+' h')):'—';
+  h+='<div class="dtiles">'
+    +'<div class="dtile"><small>Em jogo</small><b'+(en.money?' class="tband red"':'')+'>'+(en.money?esc(en.money)+'?':'—')+'</b><span>'+(en.money?'valor estimado (IA)':'sem valor associado')+'</span></div>'
+    +'<div class="dtile"><small>Prazo</small><b>'+(en.deadline?esc(en.deadline):'—')+'</b><span>'+(en.deadline?'indicado pelo cliente':'nenhum prazo detetado')+'</span></div>'
+    +'<div class="dtile"><small>Resposta</small><b class="tband '+esc(c.band||'none')+'">'+esc(ageTxt)+'</b><span>'+(semGroup(r)===G_OWE?'a bola do nosso lado':'à espera deles')+'</span></div>'
+    +(mom?'<div class="dtile"><small>Ritmo</small><b style="color:'+mom[1]+'">'+mom[0]+'</b><span>cadência da conversa</span></div>':'')
+    +'</div>';
+  /* Análise IA — dashed = proposta; the reason is ALWAYS visible here (it was a hidden click),
+     and the literal ask («Pedem:») leads when extraction caught it. */
+  if(decided||tr.reason||en.action_requested){
     h+='<div class="dai'+(tr.committed?' committed':'')+'"><div class="dai-h"><span class="dai-k">Análise IA'+(tr.committed?' — confirmada':' — proposta')+'</span>'
       +(decided?'<span class="trust '+(tr.committed?'committed':'proposed')+'">'+esc(decided)+conf+'</span>':'')
       +'</div>'
+      +(en.action_requested?'<p class="dpedem"><b>Pedem:</b> '+esc(en.action_requested)+'</p>':'')
       +(tr.reason?'<p>'+esc(tr.reason)+'</p>':'')
       +'</div>';
   }
@@ -446,6 +517,10 @@ function dossierHTML(r){
     +(cl.msg_count!=null?'<span class="dcp-s"><b>'+cl.msg_count+'</b><small>mensagens</small></span>':'')
     +((cl.we_owe_count||0)>0?'<span class="dcp-s"><b class="dred">'+cl.we_owe_count+'</b><small>a responder</small></span>':'')
     +((cl.open_projects||0)>0?'<span class="dcp-s"><b>'+cl.open_projects+'</b><small>projetos</small></span>':'')
+    /* Gate-1 readiness (denormalized): the next click is predictable — quote, or chase fields. */
+    +((r.project&&r.project.coverage!=null)
+      ?'<span class="dcp-s"><b'+(r.project.estimable?' class="dgreen"':'')+'>'+Math.round((r.project.coverage||0)*100)+'%</b><small>'
+        +(r.project.estimable?'pronto a orçamentar':'campos do spec')+'</small></span>':'')
     +'</div>';
   /* Conversa: vertical timeline + the SAME thread renderer the inline expansion used. */
   h+='<div class="dconv">'+timelineHTML(r._threadMsgs||[], c)
@@ -717,8 +792,10 @@ function onKey(e){
   /* tab cycling works even on an empty view (an empty Leads tab must not trap the keyboard) */
   if(e.key==='t'){ cycleTab(1); return; }
   if(e.key==='T'){ cycleTab(-1); return; }
-  if(e.key==='1'){ setMode('ativos').then(()=>setFilter('band',null)); return; }
-  if(e.key==='4'){ setMode('ativos').then(()=>setFilter('band','chase')); return; }
+  if(e.key==='1'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',null);}); return; }
+  if(e.key==='2'){ setMode('ativos').then(()=>setVista('money')); return; }
+  if(e.key==='3'){ setMode('ativos').then(()=>setVista('prazos')); return; }
+  if(e.key==='4'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band','chase');}); return; }
   if(e.key==='5'){ setMode('tratados'); return; }
   const v=view(); if(!v.length) return;
   /* Shift+J/K jumps between section starts — reaching «À espera deles» used to cost ~5 screens. */
@@ -735,12 +812,55 @@ function onKey(e){
   }
   if(e.key==='j'||e.key==='ArrowDown'){focus=Math.min(v.length-1,focus+1);focusRoot=v[focus]?v[focus].thread_root:null;render();const r=document.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'});e.preventDefault();}
   else if(e.key==='k'||e.key==='ArrowUp'){focus=Math.max(0,focus-1);focusRoot=v[focus]?v[focus].thread_root:null;render();const r=document.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'});e.preventDefault();}
-  else if(e.key==='e'||e.key==='E')dispatch('handled',focus);
-  else if(e.key==='a'||e.key==='A')dispatch('owner',focus);
+  else if(e.key==='e'||e.key==='E'){ if(selected.size&&mode==='ativos'){bulkHandled();} else dispatch('handled',focus); }
+  else if(e.key==='x'){ const r=v[focus]; if(r&&mode==='ativos'){ selected.has(r.thread_root)?selected.delete(r.thread_root):selected.add(r.thread_root); render(); } }
+  else if(e.key==='X'){ const r=v[focus]; if(r&&mode==='ativos'){ const sg=semGroup(r); const roots=v.filter(x=>semGroup(x)===sg).map(x=>x.thread_root); const all=roots.every(root=>selected.has(root)); roots.forEach(root=>all?selected.delete(root):selected.add(root)); render(); } }
+  else if(e.key==='a'||e.key==='A'){ if(selected.size&&mode==='ativos'){bulkOwnerMenu();} else dispatch('owner',focus); }
   else if(e.key==='p'||e.key==='P'){const r=v[focus]; if(r)dispatch(r.project?'openproj':'mkproj',focus);}
   else if(e.key==='Enter'||e.key==='o'||e.key==='O'){dispatch('thread',focus);e.preventDefault();}
 }
-function onEsc(){ if(hasFilters()) clearFilters(); }
+function onEsc(){
+  if(selected.size){ selected.clear(); render(); return; }
+  if(hasFilters()) clearFilters();
+}
+
+/* ── bulk select (ADR-033 P2): X row · Shift+X group · verbs tratado/dono ONLY ── */
+let selected=new Set();
+async function bulkHandled(){
+  const roots=[...selected]; if(!roots.length) return;
+  const removed=[];
+  roots.forEach(root=>{const at=rows.findIndex(r=>r.thread_root===root); if(at>=0) removed.push([at,rows[at]]);});
+  removed.sort((a,b)=>b[0]-a[0]).forEach(([at])=>rows.splice(at,1));
+  selected.clear(); focusRoot=null; render();
+  undo.push({label:'tratadas',revert:()=>{
+    removed.sort((a,b)=>a[0]-b[0]).forEach(([at,r])=>rows.splice(Math.min(at,rows.length),0,r));
+    render();
+    roots.forEach(root=>post('/api/thread/handled',{thread_root:root,handled:false}).catch(()=>toast(S.falhou)));
+  }});
+  announce(roots.length+' tratadas'); toast(roots.length+' tratadas — Z desfaz');
+  for(const root of roots){
+    try{ await post('/api/thread/handled',{thread_root:root,handled:true}); }
+    catch(e){ toast(S.falhou); }
+  }
+}
+function bulkOwnerMenu(){
+  if(!selected.size) return;
+  const m=$('#_menu');
+  m.innerHTML='<div class="mhdr">Dono para '+selected.size+' selecionadas</div>'
+    +filaRoster.map(nm=>'<div class="mi" data-n="'+esc(nm)+'">@'+esc(nm)+'</div>').join('');
+  m.dataset.kind='bulkowner'; m.classList.remove('hidden');
+  const sb=$('#_selbar');
+  if(sb){const b=sb.getBoundingClientRect();m.style.top=(window.scrollY+b.bottom+4)+'px';m.style.left=(window.scrollX+b.left)+'px';}
+}
+async function bulkOwner(name){
+  const roots=[...selected]; selected.clear();
+  roots.forEach(root=>{const r=rows.find(x=>x.thread_root===root); if(r){r.owners=[name]; r.owner=name;}});
+  render(); toast('dono: @'+name+' × '+roots.length);
+  for(const root of roots){
+    try{ await post('/api/thread/owner',{thread_root:root,owners:[name]}); }
+    catch(e){ toast(S.falhou); }
+  }
+}
 
 /* `/` focuses the visible search box (the natural gesture) — the shell falls back to the palette on
    lenses that define no onSlash. ⌘K keeps the palette here too. */
@@ -766,6 +886,59 @@ function paintFreshness(){
   el.classList.toggle('stale',(Date.now()-Date.parse(_syncedAt))/1000>45*60);
 }
 paintFreshness(); setInterval(paintFreshness,60000);
+
+/* ── NEEDS_REVIEW chip: tier-1 failures finally get a surface (quiet, links to Para ti) ── */
+let _needsReview=(typeof NEEDS_REVIEW!=='undefined')?(NEEDS_REVIEW|0):0;
+function paintRever(){
+  const el=$('#_rever'); if(!el) return;
+  el.textContent='rever '+_needsReview;
+  el.classList.toggle('hidden',!_needsReview);
+}
+paintRever();
+const _rv=$('#_rever'); if(_rv)_rv.addEventListener('click',()=>{location.href='/para-ti';});
+
+/* ── live refresh (ADR-023 reaches the hero, ADR-033 P2) ────────────────
+   The server keeps ingesting on its own schedule; an open tab must converge without a reload.
+   Poll the same endpoint, swap IN PLACE keyed by content: focus survives via focusRoot, fetched
+   threads and open drafts are carried across by root, and the swap is skipped while a picker is
+   open (rows must not shift under a menu). */
+const REFRESH_MS=30000;
+let _refreshing=false,_lastSig=null;
+function _sig(list){
+  return list.map(r=>r.thread_root+'|'+((r.clock||{}).state)+'|'+((r.clock||{}).band)+'|'+((r.owners||[]).join(','))).join('\n');
+}
+async function refresh(opts){
+  opts=opts||{};
+  if(_refreshing||mode==='tratados') return;
+  const menu=$('#_menu');
+  if(menu&&!menu.classList.contains('hidden')) return;   /* never swap under an open picker */
+  _refreshing=true;
+  try{
+    const resp=await fetch('/api/fila',{cache:'no-store'});
+    if(!resp.ok) return;
+    const d=await resp.json();
+    _syncedAt=d.synced_at||_syncedAt; paintFreshness();
+    if(typeof setNavCounts==='function') setNavCounts(d.nav_counts);
+    _needsReview=d.needs_review||0; paintRever();
+    const next=d.rows||[];
+    const sig=_sig(next);
+    if(sig===_lastSig&&!opts.force) return;   /* nothing moved — don't clobber the DOM */
+    const seen=new Set(rows.map(r=>r.thread_root));
+    const added=next.filter(r=>!seen.has(r.thread_root)).length;
+    const carry={}; rows.forEach(r=>{carry[r.thread_root]=r;});
+    next.forEach(r=>{const o=carry[r.thread_root]; if(o){r._threadMsgs=o._threadMsgs;r._threadErr=o._threadErr;r._draft=o._draft;r._open=o._open;}});
+    rows=next; sortRows(); _lastSig=sig;
+    render();
+    if(!opts.quiet&&added>0) toast(added+(added===1?' nova thread':' novas threads'));
+  }catch(e){ /* offline / server restarting — keep showing what we have, retry next tick */ }
+  finally{ _refreshing=false; }
+}
+setInterval(()=>{ if(!document.hidden) refresh(); },REFRESH_MS);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refresh(); });
+_lastSig=_sig(rows);
+
+/* «Sincronizar» refreshes IN PLACE — the shell's onSynced hook replaces its location.reload(). */
+function onSynced(){ toast(S.sincronizado); refresh({force:true,quiet:true}); }
 
 /* ── palette items ──────────────────────────────────────────────────── */
 function paletteItems(q){
@@ -873,6 +1046,7 @@ $('#_menu').addEventListener('click',e=>{
   const mi=e.target.closest('.mi'); if(!mi) return;
   const m=$('#_menu'), i=parseInt(m.dataset.i,10);
   if(m.dataset.kind==='reclass'){ reclassify(i,m.dataset.field,mi.dataset.val||''); m.classList.add('hidden'); return; }
+  if(m.dataset.kind==='bulkowner'){ if(mi.dataset.n) bulkOwner(mi.dataset.n); m.classList.add('hidden'); return; }
   // owner (multi-select): toggle keeps the picker open; clear / new are explicit
   if(mi.dataset.new){ addFilaOwner(i); return; }
   if(mi.dataset.clear){ setThreadOwners(i,[]); m.classList.add('hidden'); return; }
@@ -926,8 +1100,9 @@ if(_vr) _vr.addEventListener('click',e=>{
   const vi=e.target.closest('[data-vista]');
   if(vi){
     const k=vi.dataset.vista;
-    if(k==='risco'){ setMode('ativos').then(()=>setFilter('band',null)); }
-    else if(k==='cobrar'){ setMode('ativos').then(()=>setFilter('band',filters.band==='chase'?null:'chase')); }
+    if(k==='risco'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',null);}); }
+    else if(k==='money'||k==='prazos'){ setMode('ativos').then(()=>setVista(vista===k?'fila':k)); }
+    else if(k==='cobrar'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',filters.band==='chase'?null:'chase');}); }
     else if(k==='tratados'){ setMode(mode==='tratados'?'ativos':'tratados'); }
     return;
   }
@@ -954,6 +1129,7 @@ function applyURLState(){
   if(p.get('attachment')==='1') filters.hasAttachment=true;
   const md=p.get('minDays'); if(md) filters.minAgeDays=parseFloat(md);
   const sv=p.get('search'); if(sv) filters.search=sv;
+  const vv=p.get('vista'); vista=(vv==='money'||vv==='prazos')?vv:'fila';
   const si=$('#_search'); if(si) si.value=filters.search||'';
   /* Order: an explicit ?order= wins; otherwise the STORED preference (sticky); otherwise the
      ADR-033 default (risk) — the oldest debts open on top, not at the bottom. */
@@ -1006,6 +1182,7 @@ _BODY_HTML = """
     <button id="_risk" class="risk" aria-live="polite" title="devemos resposta, vermelho+laranja (clica para filtrar)"
       style="font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;border-radius:20px;padding:3px 12px;border:1px solid"></button>
     <button id="_cobrar" class="hidden" title="à espera deles há 72h+ — candidatas a cobrança (clica para filtrar)"></button>
+    <button id="_rever" class="hidden" title="classificações que a cascata não conseguiu decidir — rever no Para ti"></button>
     <span id="_count"></span>
     <span id="_fresh" class="fresh" title="idade do correio sincronizado"></span>
     <div id="_tabs" class="mtabs" role="tablist" aria-label="Contraparte"></div>
@@ -1024,12 +1201,14 @@ _BODY_HTML = """
   <div class="mesa-body">
     <nav id="_vrail" class="vrail" aria-label="Vistas e filtros"></nav>
     <div class="mcol">
+      <div id="_selbar" class="selbar hidden" aria-label="Seleção em massa"></div>
+      <div id="_vbanner" class="vbanner hidden" aria-live="polite"></div>
       <div id="_list" class="list" role="list" aria-label="Fila de resposta"></div>
       <div id="_zero" class="zero hidden">✓ Tudo tratado<span class="s">nada está a cair · 0 a responder</span></div>
     </div>
     <aside id="_doss" class="mdoss" aria-label="Dossiê da conversa"></aside>
   </div>
-  <div class="hint"><b>J/K</b> mover · <b>Shift+J/K</b> secções · <b>Enter</b> abrir · <b>E</b> tratado · <b>A</b> dono · <b>P</b> projeto · <b>T</b> separador · <b>1/4/5</b> vistas · <b>Z</b> desfazer · <b>/</b> procurar · <b>⌘K</b> comandos · <b>?</b> ajuda</div>
+  <div class="hint"><b>J/K</b> mover · <b>Shift+J/K</b> secções · <b>Enter</b> abrir · <b>E</b> tratado · <b>A</b> dono · <b>P</b> projeto · <b>X</b> selecionar · <b>T</b> separador · <b>1–5</b> vistas · <b>Z</b> desfazer · <b>/</b> procurar · <b>⌘K</b> comandos · <b>?</b> ajuda</div>
 </div>
 """
 
@@ -1126,6 +1305,35 @@ _EXTRA_CSS = """
   #_cobrar.filtering{outline:2px solid var(--amber);outline-offset:1px}
   .fresh{color:var(--mut2);font-size:11.5px;font-variant-numeric:tabular-nums}
   .fresh.stale{color:var(--amber);font-weight:700}
+  #_rever{color:var(--purple);background:#efeafb;border:1px solid #ddd2f5;cursor:pointer;
+    font-family:inherit;font-size:11.5px;font-weight:680;border-radius:20px;padding:3px 11px}
+  #_rever:hover{filter:brightness(.96)}
+  /* ── entity chips (P2): dashed € = proposed, ⚑ deadline, ↻ related, novo ── */
+  .rchip.money{color:var(--mut);border:1px dashed var(--mut2);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
+  .rchip.ddl{color:var(--amber);background:#fdf4e3;border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
+  .rchip.ddl.late{color:var(--red);background:#fbeaea}
+  .rchip.novo{color:var(--purple);background:#efeafb;border-radius:5px;padding:0 5px;font-size:10px;font-weight:800}
+  .rchip.rel{color:var(--mut2);font-size:10px;font-weight:700}
+  /* vistas rail extras */
+  .vd.ac{background:var(--ac)} .vd.purple{background:var(--purple)}
+  .vbanner{margin:0 0 8px;padding:7px 12px;border:1px dashed var(--mut2);border-radius:9px;
+    color:var(--mut);font-size:12px;background:var(--card)}
+  /* bulk selection */
+  .selbar{display:flex;align-items:center;gap:9px;margin:0 0 8px;padding:7px 12px;
+    border:1px solid #cdd7ff;border-radius:9px;background:#eef2ff;font-size:12.5px}
+  .selbar b{color:var(--ac);font-variant-numeric:tabular-nums}
+  .mesa .row.picked{outline:2px solid var(--ac);outline-offset:-2px}
+  /* dossier signal tiles */
+  .dtiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+  @media (max-width:1360px){ .dtiles{grid-template-columns:repeat(2,1fr)} }
+  .dtile{border:1px solid var(--bd);border-radius:10px;padding:9px 11px;background:var(--card);
+    display:flex;flex-direction:column;gap:2px}
+  .dtile small{font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--mut2)}
+  .dtile b{font-size:14.5px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .dtile span{font-size:10.5px;color:var(--mut2)}
+  .tband.red{color:var(--red)} .tband.amber{color:var(--amber)} .tband.green{color:var(--green)} .tband.none{color:var(--mut2)}
+  .dpedem{margin:0 0 4px}
+  .dgreen{color:var(--green)}
   /* ── dossier ──────────────────────────────────────────────────────── */
   .dtop{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
   .dgrow{flex:1}
@@ -1216,7 +1424,7 @@ _EXTRA_CSS = """
 
 
 def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
-                    *, now_iso: str = "", synced_at: str = "",
+                    *, now_iso: str = "", synced_at: str = "", needs_review: int = 0,
                     nav_counts: dict[str, int] | None = None) -> str:
     return cockpit_ui.page(
         "Fila",
@@ -1225,6 +1433,8 @@ def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
         embeds={"rows": rows, "team": list(team or []), "now": now_iso,
                 # Freshness (ADR-033 P0): when the mail behind the clocks was last synced.
                 "synced_at": synced_at,
+                # NEEDS_REVIEW count (ADR-033 P2): the «rever N» chip's initial value.
+                "needs_review": int(needs_review),
                 "labels": _labels.fila_labels()},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,

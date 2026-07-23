@@ -508,7 +508,11 @@ function _rp(){_pf=Math.max(0,Math.min(_pf,_pi.length-1));$('#_presults').innerH
 function _runP(i){const it=_pi[i];if(!it)return;closePalette();it.run();}
 function toggleDensity(){document.body.classList.toggle('compact');try{localStorage.setItem('fila-density',document.body.classList.contains('compact')?'compact':'');}catch(e){}}
 function onEsc(){}  /* lens may override */
-async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);return;}if(!r.ok){toast(S.syncFalhou);return;}await r.json();toast(S.sincronizado);setTimeout(()=>location.reload(),700);}catch(e){toast(S.syncFalhou);}}
+/* Post-sync: a lens that defines onSynced() refreshes ITSELF in place (ADR-023/§7 — a reload throws
+   away the user's position mid-decision); lenses without the hook keep the legacy reload. */
+async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);return;}if(!r.ok){toast(S.syncFalhou);return;}await r.json();if(typeof onSynced==='function'){onSynced();}else{toast(S.sincronizado);setTimeout(()=>location.reload(),700);}}catch(e){toast(S.syncFalhou);}}
+/* Nav badge refresh from any lens poll (shared; a lens-local copy may shadow this harmlessly). */
+function setNavCounts(counts){document.querySelectorAll('.nlink[data-nav]').forEach(a=>{const n=(counts||{})[a.dataset.nav]||0;let b=a.querySelector('.nbadge');if(n){if(!b){b=document.createElement('span');b.className='nbadge';a.appendChild(b);}b.textContent=n;}else if(b){b.remove();}});}
 """
 
 # ── shell event wiring (runs after lens JS, calls lens functions) ─────────────
