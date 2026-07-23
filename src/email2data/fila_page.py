@@ -408,9 +408,11 @@ function render(){
     const ownerBtn=(((r.owners&&r.owners.length)||i===focus)
       ?'<button class="owner'+((r.owners&&r.owners.length)?'':' empty')+'" data-act="owner" aria-label="atribuir donos">'+ownerLabel(r)+'</button>'
       :'');
-    /* Row badges FILTER (the natural gesture); correcting the verdict lives in the dossier. */
+    /* Row badges FILTER (the natural gesture); correcting the verdict lives in the dossier.
+       Monogram, not the full word (P4a): «Cliente» ×58 is the repeated-label sin — the colour rail
+       + one letter + tooltip carry the identity in 20px instead of 60. */
     const cpPill=(tab==='all')
-      ?'<button class="cp sm '+esc(r.counterparty||'OTHER')+'" data-act="fcp" title="filtrar: '+esc(cpLabel)+'">'+esc(cpLabel)+'</button>'
+      ?'<button class="cp mono '+esc(r.counterparty||'OTHER')+'" data-act="fcp" title="'+esc(cpLabel)+' — clica para filtrar">'+esc((cpLabel||'?').charAt(0))+'</button>'
       :'';
     /* Entity chips render ONLY when informative — a missing extraction is absence, never «—».
        The AI-estimated € wears a trailing «?» and dashed styling: proposed, not fact. */
@@ -421,8 +423,10 @@ function render(){
       (r.related_count||0)>0?'<span class="rchip rel" title="'+(r.related_count)+' conversas relacionadas (mesmo contacto ou entidade partilhada)">↻'+r.related_count+'</span>':'',
       r.can_draft?'<span class="rchip draft" title="rascunho de resposta pronto">✍</span>':'',
       r.has_attachment?'<span class="rchip att" aria-hidden="true">📎</span>':'',
-      r.n_messages>1?'<span class="rchip n">×'+r.n_messages+'</span>':'',
     ].join('');
+    /* The compact clock (P4a): «devemos resposta há 13 dias» ×58 ate ~30% of every row saying what
+       the group header already says — the NUMBER is the signal. Full sentence in the tooltip. */
+    const ageTxt=(c.age_hours!=null)?((c.age_hours>=48)?(Math.round(c.age_hours/24)+' d'):(Math.round(c.age_hours||0)+' h')):'';
     return head
       +'<div class="row cpr-'+esc(r.counterparty||'OTHER')+(i===focus?' on':'')+(selected.has(r.thread_root)?' picked':'')+'" data-i="'+i+'" role="listitem"'+(i===focus?' aria-current="true"':'')+' tabindex="0">'
       /* Motion is triaged like the mail: only the CRITICAL red tier pulses (WE_OWE ≥3 days).
@@ -430,8 +434,8 @@ function render(){
          URGENCY, fill carries OBLIGATION — a row read outside its section still says whose move. */
       +'<span class="clock '+esc(c.band||'none')+((c.band==='red'&&(c.age_hours||0)>=72)?' crit':'')
       +(semGroup(r)!==G_OWE?' wait':'')
-      +'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
-      +'<div class="rmain" data-act="thread" title="abrir no dossiê (Enter)">'
+      +'" title="'+esc(c.label||'')+'"><span class="d" aria-hidden="true"></span>'+esc(ageTxt)+'</span>'
+      +'<div class="rmain" data-act="thread" title="abrir no dossiê (Enter) · '+r.n_messages+' mensagens">'
       +'<div class="rline">'+cpPill+'<b class="rname">'+esc(name)+'</b>'
       +'<span class="rscan">'+esc(scan)+'</span></div>'
       +(i===focus?'<div class="rmeta"><span class="mtxt">'+esc(r.subject||'')+'</span></div>':'')
@@ -457,13 +461,19 @@ function focusedRow(){ const v=view(); return v[focus]||null; }
 
 async function ensureThread(r){
   if(!r) return;
-  if(_threadCache[r.thread_root]){ r._threadMsgs=_threadCache[r.thread_root]; return; }
+  const c0=_threadCache[r.thread_root];
+  if(c0){ r._threadMsgs=c0.messages; r._facts=c0.facts; r._decisions=c0.decisions; r._ledgerProj=c0.proj; return; }
   if(r._threadBusy) return;
   r._threadBusy=true; r._threadErr=null; renderDossier();
   try{
     const d=await (await fetch('/api/thread/'+encodeURIComponent(r.thread_root))).json();
     if(d.error){ r._threadErr=d.error; }
-    else{ _threadCache[r.thread_root]=d.messages; r._threadMsgs=d.messages; }
+    else{
+      _threadCache[r.thread_root]={messages:d.messages, facts:d.facts||[],
+                                   decisions:d.decisions||[], proj:d.ledger_project||null};
+      r._threadMsgs=d.messages; r._facts=d.facts||[];
+      r._decisions=d.decisions||[]; r._ledgerProj=d.ledger_project||null;
+    }
   }catch(e){ r._threadErr='falhou ao carregar'; }
   r._threadBusy=false; renderDossier();
 }
@@ -480,9 +490,13 @@ function dossierHTML(r){
   const name=r.display_name||r.contact||'';
   const decided=decidedShort(tr.decided_by);
   const conf=tr.confidence?(' · '+Math.round(tr.confidence*100)+'%'):'';
+  /* Ritmo survives inline on the clock line (P4a) — the tile grid is gone. */
+  const MOM={active:['Ativo','var(--green)'],slowing:['A abrandar','var(--amber)'],stalled:['Parado','var(--red)']};
+  const mom=MOM[r.momentum];
   let h='<div class="dtop">'
     +'<button class="cp '+esc(r.counterparty||'OTHER')+'" data-act="reclassCp" title="contraparte: '+esc(cpLabel)+' — clica para corrigir">'+esc(cpLabel)+'</button>'
     +'<span class="dclock clock '+esc(c.band||'none')+(semGroup(r)!==G_OWE?' wait':'')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
+    +(mom?'<span class="dritmo" title="cadência da conversa" style="color:'+mom[1]+'">· '+mom[0]+'</span>':'')
     +'<button class="pur'+(tr.committed?' committed':'')+'" data-act="reclassPur" title="tipo: '+esc(purLabel)+' — clica para corrigir">'+esc(purLabel)+'</button>'
     +'<span class="dgrow"></span>'
     +'<button class="owner'+((r.owners&&r.owners.length)?'':' empty')+'" data-act="owner" aria-label="atribuir donos">'+ownerLabel(r)+'</button>'
@@ -497,18 +511,7 @@ function dossierHTML(r){
     +'<button class="verb" data-act="owner">@ Dono<kbd>A</kbd></button>'
     +'<button class="verb" data-act="'+(r.project?'openproj':'mkproj')+'">▦ '+(r.project?'Abrir projeto':'Criar projeto')+'<kbd>P</kbd></button>'
     +'</div>';
-  /* Signal tiles (ADR-033 §6.4): Em jogo / Prazo / Resposta / Ritmo. A tile states absence in
-     words («nenhum prazo detetado») — the fixed grid is where honest absence is the information. */
   const en=r.entities||{};
-  const MOM={active:['Ativo','var(--green)'],slowing:['A abrandar','var(--amber)'],stalled:['Parado','var(--red)']};
-  const mom=MOM[r.momentum];
-  const ageTxt=(c.age_hours!=null)?((c.age_hours>=48)?(Math.round(c.age_hours/24)+' d'):(Math.round(c.age_hours)+' h')):'—';
-  h+='<div class="dtiles">'
-    +'<div class="dtile"><small>Em jogo</small><b'+(en.money?' class="tband red"':'')+'>'+(en.money?esc(en.money)+'?':'—')+'</b><span>'+(en.money?'valor estimado (IA)':'sem valor associado')+'</span></div>'
-    +'<div class="dtile"><small>Prazo</small><b>'+(en.deadline?esc(en.deadline):'—')+'</b><span>'+(en.deadline?'indicado pelo cliente':'nenhum prazo detetado')+'</span></div>'
-    +'<div class="dtile"><small>Resposta</small><b class="tband '+esc(c.band||'none')+'">'+esc(ageTxt)+'</b><span>'+(semGroup(r)===G_OWE?'a bola do nosso lado':'à espera deles')+'</span></div>'
-    +(mom?'<div class="dtile"><small>Ritmo</small><b style="color:'+mom[1]+'">'+mom[0]+'</b><span>cadência da conversa</span></div>':'')
-    +'</div>';
   /* Análise IA — dashed = proposta; the reason is ALWAYS visible here (it was a hidden click),
      and the literal ask («Pedem:») leads when extraction caught it. */
   if(decided||tr.reason||en.action_requested){
@@ -517,6 +520,41 @@ function dossierHTML(r){
       +'</div>'
       +(en.action_requested?'<p class="dpedem"><b>Pedem:</b> '+esc(en.action_requested)+'</p>':'')
       +(tr.reason?'<p>'+esc(tr.reason)+'</p>':'')
+      +'</div>';
+  }
+  /* «Registo do fio» (ADR-033 P4a, owner request): the ledger — one place where every fact the
+     pipeline extracted across ALL the thread's messages accumulates (with its source message +
+     date; NIF/IBAN are checksum FACTs and render solid, the rest dashed «?» until confirmed),
+     followed by every HUMAN decision taken on the thread. Absence is one quiet line, never a
+     grid of dashes. */
+  const FK={money:'Valor',deadline:'Prazo',product_or_service:'Produto / serviço',
+            action_requested:'Pedido',client_name:'Nome',nif:'NIF',iban:'IBAN'};
+  if(r._facts===undefined){
+    h+='<div class="dledger"><div class="lg-h">Registo do fio</div><div class="lg-none">a carregar registo…</div></div>';
+  } else {
+    const facts=r._facts||[], decs=r._decisions||[];
+    const latest={}; facts.forEach(f=>{ latest[f.key]=f; });   /* chronological — last write wins */
+    const factRows=Object.keys(FK).filter(k=>latest[k]).map(k=>{
+      const f=latest[k], nMore=facts.filter(x=>x.key===k).length-1;
+      return '<div class="lg-r"><small>'+FK[k]+'</small><b class="'+(f.fact?'solid':'prop')+'">'
+        +esc(String(f.value))+(f.fact?'':'?')+'</b><span>'+esc(f.date||'')
+        +(nMore>0?' · +'+nMore+' menções':'')+'</span></div>';
+    }).join('');
+    const decBits=[];
+    if(r._ledgerProj) decBits.push('<span class="lg-d proj">▦ '+esc(r._ledgerProj.title||'')
+      +' · '+esc(String(r._ledgerProj.stage||'').toLowerCase())
+      +((r._ledgerProj.fields_confirmed||0)>0?' · '+r._ledgerProj.fields_confirmed+' campos':'')+'</span>');
+    decs.forEach(d0=>{
+      if(d0.kind==='reclass') decBits.push('<span class="lg-d">corrigido '+esc(d0.field)+' → '+esc(d0.value)+'</span>');
+      else if(d0.kind==='owners') decBits.push('<span class="lg-d">dono @'+esc(d0.value)+'</span>');
+      else if(d0.kind==='handled') decBits.push('<span class="lg-d">tratado '+esc(d0.value)+'</span>');
+      else if(d0.kind==='snooze') decBits.push('<span class="lg-d">adiada até '+esc(d0.value)+'</span>');
+    });
+    h+='<div class="dledger"><div class="lg-h">Registo do fio</div>'
+      +(factRows?'<div class="lg-facts">'+factRows+'</div>'
+        :'<div class="lg-none">sem factos extraídos deste fio</div>')
+      +(decBits.length?'<div class="lg-decs">'+decBits.join('')+'</div>'
+        :'<div class="lg-none">sem decisões humanas registadas</div>')
       +'</div>';
   }
   /* Counterparty history — the cluster rollup the server already computes per request. */
@@ -1003,7 +1041,8 @@ async function refresh(opts){
     const seen=new Set(rows.map(r=>r.thread_root));
     const added=next.filter(r=>!seen.has(r.thread_root)).length;
     const carry={}; rows.forEach(r=>{carry[r.thread_root]=r;});
-    next.forEach(r=>{const o=carry[r.thread_root]; if(o){r._threadMsgs=o._threadMsgs;r._threadErr=o._threadErr;r._draft=o._draft;r._open=o._open;}});
+    next.forEach(r=>{const o=carry[r.thread_root]; if(o){r._threadMsgs=o._threadMsgs;r._threadErr=o._threadErr;
+      r._facts=o._facts;r._decisions=o._decisions;r._ledgerProj=o._ledgerProj;r._draft=o._draft;r._open=o._open;}});
     rows=next; sortRows(); _lastSig=sig;
     render();
     if(!opts.quiet&&added>0) toast(added+(added===1?' nova thread':' novas threads'));
@@ -1356,14 +1395,15 @@ _EXTRA_CSS = """
   .mesa .row.cpr-SUPPLIER{border-left-color:var(--forn)!important}
   .mesa .row.cpr-LEAD{border-left-color:var(--lead)!important}
   .mesa .row.on{background:var(--ac-soft)}
-  .mesa .clock{min-width:150px;text-align:left;font-size:11.5px}
+  .mesa .clock{min-width:52px;text-align:right;font-size:11.5px}
   .rline{display:flex;align-items:baseline;gap:8px;min-width:0}
   .rname{font-size:var(--rfont);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:220px}
   .rscan{flex:1;min-width:0;color:var(--mut);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   /* the focused row breathes: the name un-clamps and the scan line yields to the subject (rmeta) */
   .mesa .row.on .rname{max-width:none;white-space:normal}
   .mesa .row.on .rscan{display:none}
-  .cp.sm{min-width:0;padding:1px 7px;cursor:pointer;border:none;font-family:inherit}
+  .cp.mono{min-width:20px;width:20px;height:20px;padding:0;border-radius:6px;cursor:pointer;border:none;
+    font-family:inherit;display:inline-flex;align-items:center;justify-content:center;font-size:10px;flex:0 0 auto}
   .rchips{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px}
   .rchip{font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums}
   .rchip.draft{color:var(--ac);background:var(--ac-soft);border-radius:5px;padding:0 5px}
@@ -1408,15 +1448,21 @@ _EXTRA_CSS = """
     border:1px solid var(--ac-line);border-radius:9px;background:var(--ac-soft);font-size:12.5px}
   .selbar b{color:var(--ac);font-variant-numeric:tabular-nums}
   .mesa .row.picked{outline:2px solid var(--ac);outline-offset:-2px}
-  /* dossier signal tiles */
-  .dtiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
-  @media (max-width:1360px){ .dtiles{grid-template-columns:repeat(2,1fr)} }
-  .dtile{border:1px solid var(--bd);border-radius:10px;padding:9px 11px;background:var(--card);
-    display:flex;flex-direction:column;gap:2px}
-  .dtile small{font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--mut2)}
-  .dtile b{font-size:14.5px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-  .dtile span{font-size:10.5px;color:var(--mut2)}
-  .tband.red{color:var(--red)} .tband.amber{color:var(--amber)} .tband.green{color:var(--green)} .tband.none{color:var(--mut2)}
+  /* «Registo do fio» — the thread ledger (facts w/ provenance + human decisions) */
+  .dledger{border:1px solid var(--bd);border-radius:11px;background:var(--card);padding:11px 14px;margin-bottom:12px}
+  .lg-h{font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);margin-bottom:7px}
+  .lg-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 14px;margin-bottom:8px}
+  .lg-r{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .lg-r small{font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--mut2)}
+  .lg-r b{font-size:12.5px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lg-r b.prop{border-bottom:1px dashed var(--mut2)}      /* LLM-extracted: proposto, não confirmado */
+  .lg-r b.solid{color:var(--int)}                          /* checksum FACT (NIF/IBAN, ADR-007) */
+  .lg-r span{font-size:10px;color:var(--mut2);font-variant-numeric:tabular-nums}
+  .lg-decs{display:flex;flex-wrap:wrap;gap:5px;border-top:1px solid var(--bd2);padding-top:8px}
+  .lg-d{font-size:10.5px;font-weight:650;color:var(--mut);background:var(--bd2);border-radius:5px;padding:2px 8px}
+  .lg-d.proj{color:var(--ac);background:var(--ac-soft)}
+  .lg-none{font-size:11.5px;color:var(--mut2);padding:2px 0}
+  .dritmo{font-size:11px;font-weight:700}
   .dpedem{margin:0 0 4px}
   .dgreen{color:var(--green)}
   /* ── dossier ──────────────────────────────────────────────────────── */

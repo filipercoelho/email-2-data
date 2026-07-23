@@ -1053,12 +1053,11 @@ def test_fila_page_polls_itself_in_place(tmp_path):
     assert "_menu" in html.split("async function refresh(")[1].split("setInterval")[0]
 
 
-def test_fila_signal_tiles_and_entity_chips(tmp_path):
-    """The dossier's signal tiles (Em jogo / Prazo / Resposta / Ritmo) and the row's dashed entity
-    chips: an AI-extracted € renders dashed with a ? (proposed, never solid), deadlines as ⚑."""
+def test_fila_entity_chips_render_dashed(tmp_path):
+    """The row's dashed entity chips: an AI-extracted € renders dashed with a ? (proposed, never
+    solid), deadlines as ⚑. (The dossier tile grid these once fed was removed by owner feedback —
+    see test_fila_dossier_tiles_are_gone_and_ledger_present.)"""
     html = _p0_page(tmp_path)
-    assert "Em jogo" in html and "Ritmo" in html and "A abrandar" in html
-    assert "valor estimado (IA)" in html
     assert "money_value" in html and "⚑" in html
     assert 'class="rchip money"' in html
 
@@ -1174,3 +1173,85 @@ def test_novo_stays_silent_when_the_corpus_cannot_know(tmp_path):
     rows = {x["thread_root"]: x for x in _client(tmp_path, deep)[0].get("/api/fila").json()["rows"]}
     assert rows["mid:d2"]["novo"] is True
     assert rows["mid:d1"]["novo"] is False
+
+
+# ── ADR-033 P4a — row compaction + thread LEDGER (owner feedback 2026-07-23) ──
+
+def test_fila_row_clock_is_compact_with_label_in_tooltip(tmp_path):
+    """«devemos resposta há 13 dias» ×58 ate ~30% of every row saying what the group header already
+    says — the NUMBER is the signal. The row clock is now a compact age chip («13 d») with the full
+    sentence in its tooltip; the sentence itself survives in the group header and the dossier."""
+    html = _p0_page(tmp_path)
+    assert ".mesa .clock{min-width:52px" in html
+    fn = html.split("list.innerHTML=src.map")[1].split("renderDossier()")[0]
+    assert 'title="\'+esc(c.label' in fn                  # the sentence lives in the tooltip
+    assert "Math.round(c.age_hours/24)+' d'" in fn        # …and the chip is just the age
+
+
+def test_fila_dossier_tiles_are_gone_and_ledger_present(tmp_path):
+    """Owner feedback: tiles that print «—  · sem valor associado» spend prime space announcing
+    ignorance (violating absent-means-absent), and there was NO place where the thread's gathered
+    knowledge accumulates. The tile grid is deleted; «Registo do fio» — extracted facts with
+    provenance + human decisions — takes its place. Ritmo survives inline on the clock line."""
+    html = _p0_page(tmp_path)
+    assert "dtiles" not in html and "sem valor associado" not in html
+    assert "Registo do fio" in html and "dledger" in html
+    assert "sem factos extraídos" in html                 # honest empty state, one quiet line
+    assert "A abrandar" in html                           # momentum still exists, inline
+
+
+def test_api_thread_carries_the_ledger(tmp_path):
+    """/api/thread returns the deterministic thread ledger: every extracted fact across ALL the
+    thread's messages (with source message + date; NIF/IBAN marked as checksum FACTs) and every
+    human decision taken on the thread (reclassification, owners, handled, project)."""
+    crm = _crm_with([
+        (_env("t1", 30), _verdict_ent(money="€ 950", product_or_service="letras em inox")),
+        ({**_env("t2", 3), "references": ["t1"], "in_reply_to": "t1"},
+         _verdict_ent(deadline="2026-08-10", nif="274023911")),
+    ])
+    cl, ws = _client(tmp_path, crm)
+    cl.post("/api/reclassify", json={"message_id": "t1", "field": "purpose",
+                                     "value_auto": "ESTIMATE_REQUEST_FROM_CLIENT",
+                                     "value_human": "PO_FROM_CLIENT"})
+    cl.post("/api/thread/owner", json={"thread_root": "mid:t1", "owner": "Diogo"})
+    pid = cl.post("/api/projects", json={"title": "Letras inox",
+                                         "from_message": "mid:t1"}).json()["project_id"]
+    d = cl.get("/api/thread/mid:t1").json()
+    facts = {f["key"]: f for f in d["facts"]}
+    assert facts["money"]["value"] == "€ 950" and facts["money"]["message_id"] == "t1"
+    assert facts["deadline"]["value"] == "2026-08-10" and facts["deadline"]["date"]
+    assert facts["nif"]["fact"] is True                   # checksum FACT (ADR-007), never dashed
+    assert facts["product_or_service"]["fact"] is False   # LLM-extracted → renders dashed
+    kinds = {x["kind"] for x in d["decisions"]}
+    assert "reclass" in kinds and "owners" in kinds
+    assert d["ledger_project"]["project_id"] == pid
+
+
+def test_fila_contact_falls_back_to_outbound_recipient(tmp_path):
+    """«(sem contacto)» rows: an outbound-only thread (we wrote to a supplier; no reply yet) has no
+    inbound sender, but the recipient IS known (crm.participants role='to'). The row now names it —
+    critical detail, not a vague placeholder."""
+    env = _env_out("o1", 100, to="vendas@aco-norte.pt", subject="Encomenda chapa 3mm")
+    env["references"] = []
+    env["in_reply_to"] = None
+    crm = _crm_with([(env, {**_verdict(cp="SUPPLIER", purpose="OUR_ORDER_TO_SUPPLIER"),
+                            "direction": "outbound"})])
+    rows = _client(tmp_path, crm)[0].get("/api/fila").json()["rows"]
+    [r] = rows
+    assert r["contact"] == "vendas@aco-norte.pt"
+    assert r["display_name"]                              # the cluster join now has a key to work with
+
+
+def test_novo_never_badges_automated_senders(tmp_path):
+    """A mailer-daemon wearing a «novo» badge as a Cliente (seen live) is a fake fact twice over —
+    automated senders never get the new-contact treatment (signals.NO_REPLY_RE, as ADR-028 already
+    pinned for Para ti gates)."""
+    real_now = datetime.now(timezone.utc)
+    old = _env("t0", 0, frm="cliente@antigo.pt")
+    old["date"] = (real_now - timedelta(days=60)).isoformat()   # corpus depth exists
+    bot = _env("t1", 0, frm="mailer-daemon@ex.pt", subject="Undelivered")
+    bot["date"] = (real_now - timedelta(hours=3)).isoformat()
+    rows = {x["thread_root"]: x
+            for x in _client(tmp_path, _crm_with([(old, _verdict()),
+                                                  (bot, _verdict())]))[0].get("/api/fila").json()["rows"]}
+    assert rows["mid:t1"]["novo"] is False

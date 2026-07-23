@@ -394,6 +394,19 @@ class CrmStore:
     # Reporting helpers
     # -------------------------------------------------------------------------
 
+    def tos_by_message(self) -> dict[str, list[str]]:
+        """``{message_id: [to-recipient emails]}`` from the participants table.
+
+        The outbound-recipient fallback (ADR-033 P4a): a thread that only contains OUR outbound
+        mail has no inbound sender, but the counterparty — who we wrote to — is right here."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT message_id, email FROM participants WHERE role='to' ORDER BY rowid").fetchall()
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            out.setdefault(r["message_id"], []).append(r["email"])
+        return out
+
     def all_contacts(self) -> list[dict[str, Any]]:
         """All contact rows (for account clustering in ``accounts.py``)."""
         rows = self._conn.execute("SELECT * FROM contacts ORDER BY msg_count DESC").fetchall()

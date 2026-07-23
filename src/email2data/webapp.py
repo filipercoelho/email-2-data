@@ -825,7 +825,55 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             if mid and mid in jspecs:
                 spec_block = {"message_id": mid, **_spec_payload(mid)}
                 break
-        return JSONResponse({"thread_root": thread_root, "messages": all_msgs, "spec": spec_block})
+        # ── The thread LEDGER (ADR-033 P4a, owner request): one place where everything the
+        # pipeline extracted from this thread and every human decision on it accumulate —
+        # deterministic, with provenance. NIF/IBAN are checksum FACTs (ADR-007); the rest is
+        # LLM-extracted and renders dashed until a human commits it.
+        facts: list[dict[str, Any]] = []
+        for row in interactions:
+            raw = row.get("entities")
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw) or {}
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for key in ("money", "deadline", "product_or_service", "action_requested",
+                        "client_name", "nif", "iban"):
+                val = parsed.get(key)
+                if val:
+                    facts.append({"key": key, "value": val,
+                                  "message_id": row.get("message_id") or "",
+                                  "date": (row.get("date") or "")[:10],
+                                  "fact": key in ("nif", "iban")})
+        recl = ws.get_reclassifications()
+        decisions: list[dict[str, Any]] = []
+        for row in interactions:
+            for field, val in (recl.get(row.get("message_id") or "") or {}).items():
+                decisions.append({"kind": "reclass", "field": field, "value": val})
+        st = ws.thread_states().get(thread_root) or {}
+        if st.get("owners"):
+            decisions.append({"kind": "owners", "value": ", ".join(st["owners"])})
+        if st.get("handled"):
+            decisions.append({"kind": "handled", "value": (st.get("handled_ts") or "")[:10]})
+        sn = ws.thread_snoozes().get(thread_root)
+        if sn:
+            decisions.append({"kind": "snooze", "value": (sn.get("until_ts") or "")[:10]})
+        proj_block = None
+        for pr in pstore.list(include_archived=True):
+            if thread_root in pstore.threads_for(pr["project_id"]):
+                nf = pstore._conn.execute(
+                    "SELECT COUNT(*) FROM project_fields WHERE project_id=?",
+                    (pr["project_id"],)).fetchone()[0]
+                proj_block = {"project_id": pr["project_id"],
+                              "title": pr.get("title") or pr["project_id"],
+                              "stage": pr.get("stage") or "", "fields_confirmed": int(nf)}
+                break
+        return JSONResponse({"thread_root": thread_root, "messages": all_msgs, "spec": spec_block,
+                             "facts": facts, "decisions": decisions,
+                             "ledger_project": proj_block})
 
     @app.get("/api/relations/{message_id}")
     def get_relations(message_id: str):
@@ -1642,6 +1690,29 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             # Reply path from the queue: a draft exists only for messages with a JobSpec, so tell
             # the Fila which rows can offer "rascunho de resposta" instead of 404-ing on click.
             r["can_draft"] = (r.get("message_id") or "") in jspecs
+        # «(sem contacto)» fix (ADR-033 P4a): an outbound-only thread has no inbound sender, but the
+        # counterparty — who WE wrote to — is in crm.participants (role='to'). Fall back to the
+        # first external recipient across the thread's messages BEFORE the display-name join, so
+        # the cluster lookup gets a key to work with. Critical detail, never a vague placeholder.
+        from .signals import NO_REPLY_RE, OUR_DOMAIN
+
+        def _external_addr(e: str) -> bool:
+            d = e.rsplit("@", 1)[-1].lower() if "@" in e else ""
+            return bool(d) and d != OUR_DOMAIN and not d.endswith("." + OUR_DOMAIN)
+        if any(not r.get("contact") for r in rows):
+            mids_by_root: dict[str, list[str]] = {}
+            for it in ints:
+                mids_by_root.setdefault(it.get("thread_root") or "", []).append(
+                    it.get("message_id") or "")
+            tos = _crmdb.tos_by_message()
+            for r in rows:
+                if r.get("contact"):
+                    continue
+                for mid in mids_by_root.get(r.get("thread_root") or "", []):
+                    ext = [e for e in tos.get(mid, []) if _external_addr(e)]
+                    if ext:
+                        r["contact"] = ext[0]
+                        break
         # ADR-033 P1: rows lead with the curated human name, never a raw address when a name exists,
         # and carry their cluster's rollup so the dossier's counterparty card needs no second call.
         # Precedence mirrors _clusters_as_dicts: v8 override (precious) → derived name → the contact.
@@ -1698,10 +1769,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             c = r.get("clock") or {}
             # chase: AWAITING past the 72h cutoff — _band() only ambers AWAITING at that threshold.
             r["chase"] = bool(c.get("state") == "AWAITING" and c.get("band") == "amber")
-            # novo: first appearance ≤14d AND the corpus reaches ≥7d further back (else we can't know).
+            # novo: first appearance ≤14d AND the corpus reaches ≥7d further back (else we can't
+            # know) AND never for automated senders — a mailer-daemon wearing «novo» as a Cliente
+            # (seen live 2026-07-23) is a fake fact twice over (same gate ADR-028 pinned for Para ti).
             fs = first_by_email.get(r.get("contact") or "")
             r["novo"] = bool(fs and (now - fs).days <= 14
-                             and corpus_min and (fs - corpus_min).days >= 7)
+                             and corpus_min and (fs - corpus_min).days >= 7
+                             and not NO_REPLY_RE.search(r.get("contact") or ""))
             # cross-thread relations (same contact or shared entity), deduped by thread_root — the
             # double-answer guard. Bounded: one related() call per active thread on a local SQLite.
             n_rel = 0

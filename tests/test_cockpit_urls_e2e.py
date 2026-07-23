@@ -157,6 +157,11 @@ def test_fila_focus_writes_thread_param_and_mounts_dossier(live_app, browser):
         # the dossier mounted the same conversation: verb bar + the thread renderer output
         page.wait_for_selector("#_doss .dverbs", timeout=5000)
         page.wait_for_selector("#_doss .texp", timeout=5000)
+        # …and the thread LEDGER (P4a) arrived with the same fetch — past its loading state
+        page.wait_for_selector("#_doss .dledger", timeout=5000)
+        page.wait_for_function(
+            "!document.querySelector('#_doss .dledger').textContent.includes('a carregar')",
+            timeout=5000)
     finally:
         page.close()
 
