@@ -46,7 +46,7 @@ group.**
    the strip entirely (it is Para ti's business) and lands as a quiet Estado facet, hidden at zero.
 5. **Nav.** *(P5b shipped:)* a stroke icon per lens (scan by shape) + an `e2d` monogram; the Fila
    badge shows **demand** (WE_OWE red+amber — computed in `webapp._nav_counts`, the same number the
-   «Hoje» front shows as «N a responder»), never the total active count. *(P5c deferred:)* Admin +
+   «Hoje» front shows as «N a responder»), never the total active count. *(P5d deferred:)* Admin +
    densidade into a gear, and «Sincronizar» + «correio há N min» merged into one status pill — lower
    value / higher shared-shell coupling; freshness already shows in the strip.
 
