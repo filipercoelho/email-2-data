@@ -1662,6 +1662,14 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         # ADR-033 P2: join what the pipeline already extracted and never showed. Every field is
         # ABSENT when unknown — a missing extraction renders as absence, never a placeholder.
         ent_by_mid: dict[str, dict[str, Any]] = {}
+        # «novo» honesty (live-data finding, 2026-07-23): contacts.first_seen cannot be trusted for
+        # this — a corpus read from a sync watermark makes long-standing clients look brand new (the
+        # live probe flagged EVERY contact as novo). Derive first-seen from the interactions we
+        # actually hold, and only claim «novo» when the corpus is DEEP enough to know: a first
+        # appearance is meaningful only if mail exists from well before it. Otherwise say nothing —
+        # absence of the badge, never a fake fact.
+        first_by_email: dict[str, datetime] = {}
+        corpus_min: datetime | None = None
         for it in ints:
             raw = it.get("entities")
             if raw:
@@ -1671,7 +1679,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                         ent_by_mid[it.get("message_id") or ""] = parsed
                 except (TypeError, ValueError):
                     pass
-        first_seen = {c.get("email"): c.get("first_seen") or "" for c in _crmdb.all_contacts()}
+            dt = cockpit._parse_dt(it.get("date"))
+            if dt:
+                corpus_min = dt if corpus_min is None or dt < corpus_min else corpus_min
+                em = it.get("from_email") or ""
+                if em and (em not in first_by_email or dt < first_by_email[em]):
+                    first_by_email[em] = dt
         for r in rows:
             ents = ent_by_mid.get(r.get("message_id") or "") or {}
             keep = {k: ents[k] for k in ("money", "deadline", "product_or_service",
@@ -1685,9 +1698,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             c = r.get("clock") or {}
             # chase: AWAITING past the 72h cutoff — _band() only ambers AWAITING at that threshold.
             r["chase"] = bool(c.get("state") == "AWAITING" and c.get("band") == "amber")
-            # novo: first contact within 14 days — the rarest, highest-value event (a new lead).
-            fs = cockpit._parse_dt(first_seen.get(r.get("contact") or ""))
-            r["novo"] = bool(fs and (now - fs).days <= 14)
+            # novo: first appearance ≤14d AND the corpus reaches ≥7d further back (else we can't know).
+            fs = first_by_email.get(r.get("contact") or "")
+            r["novo"] = bool(fs and (now - fs).days <= 14
+                             and corpus_min and (fs - corpus_min).days >= 7)
             # cross-thread relations (same contact or shared entity), deduped by thread_root — the
             # double-answer guard. Bounded: one related() call per active thread on a local SQLite.
             n_rel = 0

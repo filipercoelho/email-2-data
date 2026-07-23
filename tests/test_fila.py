@@ -1151,3 +1151,26 @@ def test_fila_tratar_agora_mode(tmp_path):
     assert 'id="_foco"' in html and "Tratar agora" in html
     assert "e.key==='f'||e.key==='F'" in html
     assert "ArrowRight" in html
+
+
+def test_novo_stays_silent_when_the_corpus_cannot_know(tmp_path):
+    """«novo» honesty (live-data finding): a corpus whose OLDEST mail is itself recent cannot
+    distinguish a new contact from an old client it only started reading — so the badge must stay
+    absent rather than flag everyone. It appears only when mail exists from ≥7 days before the
+    contact's first appearance."""
+    real_now = datetime.now(timezone.utc)
+    def at(hours_ago, mid, frm):
+        e = _env(mid, 0, frm=frm)
+        e["date"] = (real_now - timedelta(hours=hours_ago)).isoformat()
+        return e
+    # Shallow corpus: everything within 3 days → no depth → nobody is «novo».
+    shallow = _crm_with([(at(3, "s1", "a@x.pt"), _verdict()),
+                         (at(60, "s2", "b@y.pt"), _verdict())])
+    rows = {x["thread_root"]: x for x in _client(tmp_path, shallow)[0].get("/api/fila").json()["rows"]}
+    assert all(r["novo"] is False for r in rows.values())
+    # Deep corpus: months of history, then a first-time sender 3h ago → that one IS «novo».
+    deep = _crm_with([(at(24 * 60, "d1", "velho@x.pt"), _verdict()),
+                      (at(3, "d2", "novo@z.pt"), _verdict())])
+    rows = {x["thread_root"]: x for x in _client(tmp_path, deep)[0].get("/api/fila").json()["rows"]}
+    assert rows["mid:d2"]["novo"] is True
+    assert rows["mid:d1"]["novo"] is False
