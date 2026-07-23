@@ -546,7 +546,8 @@ def test_fila_timeline_renders_newest_message_first_non_destructively():
     fn = _thread_html_js()
     assert "msgs.slice().reverse()" in fn
     assert "msgs.reverse()" not in fn                  # the destructive form must never appear
-    assert "ordered.map(m=>msgHTML(m))" in fn          # the reversed COPY is what renders
+    assert "ordered.forEach(" in fn                    # the reversed COPY is what the timeline walks
+    assert "msgHTML(m)" in fn                           # …still rendered by the shared kit (one path)
     assert "msgThreadSummary(msgs)" in fn              # summary keeps the chronological range
 
 
@@ -563,6 +564,7 @@ def test_fila_timeline_reversal_is_idempotent_across_renders():
         "function msgHTML(m){return '['+m.message_id+']';}\n"
         "function msgThreadSummary(msgs){return msgs.map(m=>m.message_id).join('>');}\n"
         "function _projHTML(r){return '';}\n"
+        "function _fmtGap(ms){return 'g';} function _gapBand(ms){return '';} const CLOCK_ICON='';\n"
         "function _threadHTML(" + _thread_html_js() + "\n"
         "const msgs=[{message_id:'m1'},{message_id:'m2'},{message_id:'m3'}];\n"
         "const r={_open:true,_threadMsgs:msgs};\n"
@@ -933,31 +935,36 @@ def test_fila_dossier_mounts_focused_thread(tmp_path):
     assert 'data-act="fcp"' in html
 
 
-def test_fila_vertical_timeline_marks_silences_and_now():
-    """The dossier's vertical conversation timeline: one direction-coded marker per message
-    (newest first, matching the message order), silences ≥24h rendered as LABELED gaps rather than
-    compressed away, and the rail terminating at «agora» in the clock's band colour — the current
-    open silence is the response debt, drawn as the growing tail of the thread."""
+def test_fila_gap_label_formats_minutes_hours_days():
+    """ADR-034 P5c: the gap chip between two messages reads the time difference — minutes < 1 h,
+    hours < 24 h, days above — so the rhythm of the thread is legible without reading dates."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available — the shipped JS cannot be executed")
-    fn = "function timelineHTML(" + fila_page._LENS_JS.split("function timelineHTML(")[1].split("/* end-timeline */")[0]
-    harness = (
-        "function esc(s){return String(s==null?'':s);}\n" + fn +
-        "const msgs=[{message_id:'m1',date:'2026-07-01T10:00:00+00:00',direction:'inbound'},\n"
-        "            {message_id:'m2',date:'2026-07-05T10:00:00+00:00',direction:'outbound'},\n"
-        "            {message_id:'m3',date:'2026-07-05T12:00:00+00:00',direction:'inbound'}];\n"
-        "const clock={state:'WE_OWE',band:'red',label:'devemos resposta há 13 dias'};\n"
-        "console.log(timelineHTML(msgs, clock));\n"
-    )
+    fn = "function _fmtGap(" + fila_page._LENS_JS.split("function _fmtGap(")[1].split("\nfunction _gapBand")[0]
+    harness = (fn + "\nconst M=60000,H=3600000,D=86400000;\n"
+               "console.log(JSON.stringify([_fmtGap(20*M),_fmtGap(2*H),_fmtGap(23*H),"
+               "_fmtGap(D),_fmtGap(4*D),_fmtGap(9*D)]));\n")
     out = subprocess.run([node, "-e", harness], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    tl = out.stdout
-    assert tl.count("data-tl=") == 3                       # one marker per message
-    assert 'data-tl="0"' in tl                             # newest-first indexing (matches .tmsg order)
-    assert "4 dias sem resposta" in tl                     # the m1→m2 silence is labeled, not hidden
-    assert "agora" in tl and "vtl-now red" in tl           # the open tail carries the band colour
-    assert "vtl-m in" in tl and "vtl-m out" in tl          # direction is the marker encoding
+    assert json.loads(out.stdout) == ["20 min", "2 h", "23 h", "1 dia", "4 dias", "9 dias"]
+
+
+def test_fila_thread_is_a_vertical_in_out_timeline():
+    """The dossier thread (ADR-034 P5c) is a vertical timeline: newest→oldest with a direction-
+    coloured spine dot per message, inbound/outbound offset to opposite sides, a gap chip between
+    cards, and the segment up to «agora» as the open response debt in the clock's band colour."""
+    fn = _thread_html_js()
+    assert 'class="dt-now ' in fn and "CLOCK_ICON" in fn            # the «agora» cap + clock icon
+    assert "'dt-msg dir-'" in fn or '"dt-msg dir-' in fn            # per-message direction wrapper
+    assert 'class="dt-dot"' in fn                                   # the spine dot
+    assert "dt-gap " in fn and "_fmtGap(gap)" in fn                 # a time-diff chip between cards
+    assert "debt " in fn and "sem resposta há " in fn              # the open debt carries the band
+    assert "(m.direction==='inbound')" in fn                        # direction drives the offset
+    # the shared card now tags direction + an arrow icon, so in/out reads at a glance everywhere
+    shell = fila_page.build_fila_html([], [])
+    assert ".dt-msg.dir-inbound .tmsg{" in shell and ".dt-msg.dir-outbound .tmsg{" in shell
+    assert "dir-'+esc(tag.k)" in shell and ".tdir .dicon{" in shell
 
 
 def test_api_fila_rows_carry_display_name_and_cluster(tmp_path):

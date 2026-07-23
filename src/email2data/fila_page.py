@@ -593,9 +593,8 @@ function dossierHTML(r){
       ?'<span class="dcp-s"><b'+(r.project.estimable?' class="dgreen"':'')+'>'+Math.round((r.project.coverage||0)*100)+'%</b><small>'
         +(r.project.estimable?'pronto a orçamentar':'campos do spec')+'</small></span>':'')
     +'</div>';
-  /* Conversa: vertical timeline + the SAME thread renderer the inline expansion used. */
-  h+='<div class="dconv">'+timelineHTML(r._threadMsgs||[], c)
-    +'<div class="dmsgs">'+_threadHTML(r)+'</div></div>';
+  /* Conversa: the vertical in/out timeline (the spine is integrated into _threadHTML now). */
+  h+='<div class="dmsgs">'+_threadHTML(r)+'</div>';
   return h;
 }
 
@@ -612,34 +611,20 @@ function renderDossier(){
   if(r._threadMsgs==null&&!r._threadErr&&!r._threadBusy) ensureThread(r);
 }
 
-/* ── vertical conversation timeline (ADR-033 §7) ─────────────────────────
-   One direction-coded marker per message, NEWEST FIRST (matching the rendered message order —
-   data-tl is the index into the .tmsg list, so a click can jump). Silences ≥24h between
-   consecutive messages render as LABELED gaps — the rhythm of the thread is visible without
-   reading dates — banded (1d/3d/7d+), never linear, so one long silence cannot eat the screen.
-   The rail tops out at «agora» in the clock's band colour: the current open silence IS the
-   response debt, drawn as the growing tail of the conversation (hollow when the ball is theirs). */
-function timelineHTML(msgs, clock){
-  if(!msgs||!msgs.length) return '';
-  const ms=msgs.map(m=>({dir:m.direction||'outbound', t:Date.parse(m.date||'')||0}));
-  const newest=ms.slice().reverse();
-  const c=clock||{};
-  let out='<div class="vtl" role="navigation" aria-label="Linha do tempo da conversa">';
-  out+='<div class="vtl-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'" title="'+esc(c.label||'')+'">agora</div>';
-  newest.forEach((m,di)=>{
-    const cls=m.dir==='inbound'?'in':(m.dir==='internal'?'int':'out');
-    out+='<button class="vtl-m '+cls+'" data-tl="'+di+'" title="ir para a mensagem"></button>';
-    const prev=newest[di+1];   /* chronologically the previous message */
-    if(prev&&m.t&&prev.t){
-      const gapH=(m.t-prev.t)/3600000;
-      if(gapH>=24){
-        const d=Math.round(gapH/24);
-        out+='<div class="vtl-gap'+(gapH>=168?' g7':(gapH>=72?' g3':''))+'">'+esc(d+' '+(d===1?'dia':'dias')+' sem resposta')+'</div>';
-      }
-    }
-  });
-  return out+'</div>';
+/* ── conversation timeline helpers (ADR-034 P5c) ─────────────────────────
+   The thread is a VERTICAL timeline, newest→oldest, with the time difference between consecutive
+   messages shown as a gap chip: minutes < 1 h, hours < 24 h, days above. The chip's connector
+   height is banded (never linear), so one long silence can't eat the screen. */
+function _fmtGap(ms){
+  const mins=ms/60000;
+  if(mins<60) return Math.max(1,Math.round(mins))+' min';
+  const h=mins/60;
+  if(h<24) return Math.round(h)+' h';
+  const d=Math.round(h/24);
+  return d+(d===1?' dia':' dias');
 }
+function _gapBand(ms){ const h=ms/3600000; return h>=168?'g7':(h>=24?'g3':'g1'); }
+const CLOCK_ICON='<svg class="dicon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M12 7.7V12l3 2.3"/></svg>';
 /* end-timeline */
 
 /* ── mutations (optimistic + undo) ──────────────────────────────────── */
@@ -800,7 +785,33 @@ function _threadHTML(r){
       :'');
   /* The summary line keeps the CHRONOLOGICAL array — its date range must read "first → last". */
   const head='<div class="thead">'+_projHTML(r)+draftBtn+'<span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
-  return '<div class="texp">'+head+draftBox+ordered.map(m=>msgHTML(m)).join('')+'</div>';
+  /* The VERTICAL timeline (ADR-034 P5c): a left spine with a direction-coloured dot per message;
+     newest at the top; inbound and outbound offset to opposite sides and tinted so who-said-what
+     reads at a glance; a gap chip between cards shows the time difference; and the segment from the
+     newest message up to «agora» is the OPEN response debt, drawn in the clock's band colour
+     (hollow when the ball is theirs). */
+  const c=r.clock||{};
+  const nowMs=Date.now();
+  let flow='<div class="dthread">'
+    +'<div class="dt-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'">'+CLOCK_ICON
+    +'<span>agora'+(c.label?' · '+esc(c.label):'')+'</span></div>';
+  ordered.forEach((m,i)=>{
+    const t=Date.parse(m.date||'')||0;
+    const newerT=(i===0)?nowMs:(Date.parse(ordered[i-1].date||'')||0);
+    if(t&&newerT&&newerT>t){
+      const gap=newerT-t;
+      if(gap>=1800000){   /* ≥30 min worth marking */
+        const debt=(i===0);
+        flow+='<div class="dt-gap '+_gapBand(gap)+(debt?(' debt '+esc(c.band||'none')):'')
+          +'"><span class="dt-gline"></span><span class="dt-glab">'
+          +(debt?'sem resposta há ':'')+esc(_fmtGap(gap))+'</span></div>';
+      }
+    }
+    const dir=(m.direction==='inbound')?'inbound':(m.direction==='internal')?'internal':'outbound';
+    flow+='<div class="dt-msg dir-'+dir+'"><span class="dt-dot"></span>'+msgHTML(m)+'</div>';
+  });
+  flow+='</div>';
+  return '<div class="texp">'+head+draftBox+flow+'</div>';
 }
 
 /* ── command bus ────────────────────────────────────────────────────── */
@@ -1518,31 +1529,45 @@ _EXTRA_CSS = """
   .dcp-s b{font-size:14px;font-variant-numeric:tabular-nums}
   .dcp-s b.dred{color:var(--red)}
   .dcp-s small{font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2)}
-  .dconv{display:flex;gap:12px;align-items:stretch}
-  .dmsgs{flex:1;min-width:0}
+  .dmsgs{min-width:0}
   .dempty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
     min-height:220px;color:var(--mut2);text-align:center;font-size:26px}
   .dempty b{font-size:14px;color:var(--mut)}
   .dempty span{font-size:12px;max-width:260px;line-height:1.5}
   .tmsg.flash{outline:2px solid var(--ac);outline-offset:1px}
-  /* ── vertical conversation timeline ───────────────────────────────── */
-  .vtl{flex:0 0 52px;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:6px}
-  .vtl-now{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;
-    border-radius:6px;padding:3px 6px;text-align:center;line-height:1.2}
-  .vtl-now.red{color:var(--red);background:var(--red-bg)}
-  .vtl-now.amber{color:var(--amber);background:var(--amber-bg)}
-  .vtl-now.green{color:var(--green);background:var(--green-bg)}
-  .vtl-now.none{color:var(--mut2);background:var(--bd2)}
-  .vtl-now.hollow{background:transparent;border:1.5px dashed currentColor}
-  .vtl-m{width:11px;height:11px;border-radius:50%;border:none;cursor:pointer;padding:0;flex:0 0 auto}
-  .vtl-m.in{background:var(--ac)}
-  .vtl-m.out{background:var(--int)}
-  .vtl-m.int{background:var(--mut2)}
-  .vtl-m:hover{transform:scale(1.25)}
-  .vtl-gap{font-size:9px;color:var(--mut2);text-align:center;line-height:1.25;max-width:52px;
-    border-left:2px dotted var(--bd);padding:6px 0 6px 0;margin:2px 0}
-  .vtl-gap.g3{padding:12px 0;color:var(--amber)}
-  .vtl-gap.g7{padding:20px 0;color:var(--red)}
+  /* ── the vertical in/out timeline (ADR-034 P5c) ───────────────────────
+     A left spine (the ::before line) carries a direction-coloured dot per message; newest at the
+     top; inbound and outbound offset to opposite sides + tinted; a gap chip shows the time between
+     messages, and the top segment to «agora» is the open response debt in the clock's band colour. */
+  .dthread{position:relative;padding-left:24px;margin-top:2px}
+  .dthread::before{content:"";position:absolute;left:9px;top:9px;bottom:9px;width:2px;background:var(--bd2)}
+  .dt-now{position:relative;display:inline-flex;align-items:center;gap:6px;font:800 10px var(--mono,ui-monospace);
+    letter-spacing:.05em;text-transform:uppercase;color:var(--mut2);margin-bottom:2px}
+  .dt-now .dicon{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .dt-now.red{color:var(--red)} .dt-now.amber{color:var(--amber)} .dt-now.green{color:var(--green)}
+  .dt-now::before{content:"";position:absolute;left:-19px;top:50%;transform:translateY(-50%);
+    width:11px;height:11px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px var(--card)}
+  .dt-now.hollow::before{background:var(--card);border:2px solid currentColor}
+  /* gap chip — connector height banded, never linear */
+  .dt-gap{position:relative;display:flex;align-items:center;min-height:20px;padding:3px 0}
+  .dt-gap.g3{padding:9px 0} .dt-gap.g7{padding:16px 0}
+  .dt-glab{font:700 9.5px var(--mono,ui-monospace);color:var(--mut2);background:var(--bd2);
+    border-radius:20px;padding:1px 8px}
+  .dt-gap.debt.red .dt-glab{color:var(--red);background:var(--red-bg)}
+  .dt-gap.debt.amber .dt-glab{color:var(--amber);background:var(--amber-bg)}
+  .dt-gap.debt.green .dt-glab{color:var(--green);background:var(--green-bg)}
+  /* message row: dot on the spine + the (offset, tinted) card */
+  .dt-msg{position:relative;margin:5px 0}
+  .dt-msg .dt-dot{position:absolute;left:-19px;top:13px;width:10px;height:10px;border-radius:50%;
+    box-shadow:0 0 0 3px var(--card);z-index:1}
+  .dt-msg.dir-inbound .dt-dot{background:var(--forn)}
+  .dt-msg.dir-outbound .dt-dot{background:var(--cli)}
+  .dt-msg.dir-internal .dt-dot{background:var(--mut2)}
+  .dt-msg .tmsg{margin:0}
+  .dt-msg.dir-inbound .tmsg{margin-right:26px;background:var(--card);border-left:3px solid var(--forn)}
+  .dt-msg.dir-outbound .tmsg{margin-left:26px;background:var(--cli-bg);border-left:3px solid var(--cli)}
+  .dt-msg.dir-internal .tmsg{border-left:3px solid var(--mut2)}
+  @media (max-width:1360px){ .dt-msg.dir-inbound .tmsg,.dt-msg.dir-outbound .tmsg{margin-left:0;margin-right:0} }
   /* ── inherited chrome (search, order, fbar, chips, draft box) ─────── */
   #_search{border:1px solid var(--bd);border-radius:8px;padding:4px 10px;font-size:12.5px;color:var(--tx);background:var(--card);outline:none;width:150px;transition:width .15s,border-color .12s}
   #_search:focus{border-color:var(--ac);width:200px}

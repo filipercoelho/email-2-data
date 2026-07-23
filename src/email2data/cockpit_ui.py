@@ -241,7 +241,8 @@ _HEAD = """<!doctype html>
   .tmeta{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;font-size:11px}
   .taddr{font-weight:650;font-size:12px;color:var(--tx)}
   .tarrow{color:var(--mut2)}
-  .tdir{font-weight:700;text-transform:uppercase;font-size:9.5px;letter-spacing:.04em}
+  .tdir{display:inline-flex;align-items:center;gap:3px;font-weight:700;text-transform:uppercase;font-size:9.5px;letter-spacing:.04em}
+  .tdir .dicon{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
   .tdate{color:var(--mut2);margin-left:auto}
   .tatts{flex-basis:100%;margin-top:3px}
   .tbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
@@ -380,10 +381,15 @@ function doUndo(){const u=undo.pop();if(!u){toast(S.nadaDesfazer);return;}u.reve
 /* ── shared email-thread rendering ─────────────────────────────────────
    Used by both the Fila inline thread view and the Projetos source panel.
    Single source of truth: fix once here, both pages benefit.           */
+/* Direction is the primary axis of a thread — tag it with a colour AND an arrow icon (ADR-034 P5c):
+   ↓ recebido (from them), ↑ enviado (from us), · interno. */
+const _DIR_DOWN='<svg class="dicon" viewBox="0 0 24 24"><path d="M12 5v13M7 13l5 5 5-5"/></svg>';
+const _DIR_UP='<svg class="dicon" viewBox="0 0 24 24"><path d="M12 19V6M7 11l5-5 5 5"/></svg>';
+const _DIR_INT='<svg class="dicon" viewBox="0 0 24 24"><path d="M6 12h12"/></svg>';
 function msgDirTag(d){
-  if(d==='inbound') return {t:'recebido',c:'var(--ac)'};
-  if(d==='internal') return {t:'interno',c:'var(--mut)'};
-  return {t:'enviado',c:'var(--int)'};
+  if(d==='inbound') return {t:'recebido',c:'var(--forn)',i:_DIR_DOWN,k:'inbound'};
+  if(d==='internal') return {t:'interno',c:'var(--mut)',i:_DIR_INT,k:'internal'};
+  return {t:'enviado',c:'var(--cli)',i:_DIR_UP,k:'outbound'};
 }
 function msgThreadSummary(msgs){
   const us=msgs.filter(m=>m.direction!=='inbound').length, them=msgs.length-us;
@@ -464,12 +470,12 @@ function msgHTML(m, opts){
     ?'<div class="tract"><button class="trbtn" type="button" data-mid="'+esc(m.message_id||'')
        +'">traduzir (EN)</button></div><div class="trbody hidden"></div>'
     :'';
-  return '<div class="tmsg'+(m.embedded?' embedded':'')+'">'
+  return '<div class="tmsg dir-'+esc(tag.k)+(m.embedded?' embedded':'')+'">'
     +'<div class="tmeta">'
+    +'<span class="tdir" style="color:'+tag.c+'">'+tag.i+tag.t+'</span>'
     +'<span class="taddr">'+esc(m.from_email||'?')+'</span>'
     +'<span class="tarrow">→</span>'
     +'<span class="taddr">'+toStr+'</span>'
-    +'<span class="tdir" style="color:'+tag.c+'">'+tag.t+'</span>'
     +embeddedBadge
     +'<span class="tdate">'+esc((m.date||'').slice(0,16).replace('T',' '))+'</span>'
     +(atts?'<span class="tatts">'+atts+'</span>':'')

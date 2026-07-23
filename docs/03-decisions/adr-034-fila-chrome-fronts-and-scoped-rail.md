@@ -50,6 +50,16 @@ group.**
    densidade into a gear, and «Sincronizar» + «correio há N min» merged into one status pill — lower
    value / higher shared-shell coupling; freshness already shows in the strip.
 
+6. **The thread viewer is a vertical in/out timeline** *(P5c shipped, owner-directed).* The dossier's
+   «Conversa» is rendered newest→oldest down a left **spine** with a direction-coloured dot per
+   message; **inbound and outbound are offset to opposite sides and tinted** (recebido = fornecedor
+   blue, flush-left; enviado = cliente teal, indented + tinted), each tagged with a **↓/↑ arrow
+   icon**; a **gap chip** between cards shows the time difference (minutes < 1 h, hours < 24 h, days
+   above, connector height banded not linear); and the segment from the newest message up to
+   **«agora»** is the **open response debt** in the clock's band colour. It still renders each card
+   through the shared `msgHTML` kit (one render path) — the direction class + arrow were added to
+   that kit, so every surface (Projetos, Para ti) gets the same in/out legibility.
+
 ## 3 · Consequences
 
 - `fila_page.py`: the strip becomes `#_fronts` (hero cards) + search + the retreated order/owner
