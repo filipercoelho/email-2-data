@@ -1316,13 +1316,13 @@ _EXTRA_CSS = """
   .mtab .mn{font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--mut2)}
   .mtab.on .mn{color:var(--tx)}
   .mdot{width:7px;height:7px;border-radius:50%;display:inline-block}
-  .mdot.CLIENT{background:var(--green)} .mdot.SUPPLIER{background:var(--ac)} .mdot.LEAD{background:var(--purple)}
+  .mdot.CLIENT{background:var(--cli)} .mdot.SUPPLIER{background:var(--forn)} .mdot.LEAD{background:var(--lead)}
   /* vistas rail */
   .vrail .rl{font-size:9.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--mut2);padding:10px 8px 5px}
   .vit,.fit{display:flex;align-items:center;gap:8px;border:none;background:none;cursor:pointer;text-align:left;
     font-family:inherit;font-size:12.5px;font-weight:600;color:var(--mut);border-radius:8px;padding:5px 9px;width:100%}
   .vit:hover,.fit:hover{background:var(--bd2);color:var(--tx)}
-  .vit.on,.fit.on{background:#e6ecfb;color:var(--ac);font-weight:700}
+  .vit.on,.fit.on{background:var(--ac-soft);color:var(--ac);font-weight:700}
   .vit .vd{width:7px;height:7px;border-radius:3px;flex:0 0 auto}
   .vd.red{background:var(--red)} .vd.amber{background:var(--amber)} .vd.green{background:var(--green)}
   .vit .vc,.fit .vc{margin-left:auto;font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--mut2)}
@@ -1339,10 +1339,10 @@ _EXTRA_CSS = """
   .ghead .gh-n{font-size:11px;font-weight:700;letter-spacing:0;padding:1px 7px;border-radius:999px;
     font-variant-numeric:tabular-nums}
   .ghead .gh-s{font-size:11px;font-weight:500;letter-spacing:0;text-transform:none;color:var(--mut2)}
-  .ghead.owe{color:var(--red);border-bottom-color:#f3c9c9}
-  .ghead.owe .gh-n{background:#fbeaea;color:var(--red)}
-  .ghead.chase{color:var(--amber);border-bottom-color:#f0dcb0}
-  .ghead.chase .gh-n{background:#fdf4e3;color:var(--amber)}
+  .ghead.owe{color:var(--red);border-bottom-color:var(--red-line)}
+  .ghead.owe .gh-n{background:var(--red-bg);color:var(--red)}
+  .ghead.chase{color:var(--amber);border-bottom-color:var(--amber-line)}
+  .ghead.chase .gh-n{background:var(--amber-bg);color:var(--amber)}
   .ghead.wait{color:var(--mut)}
   .ghead.wait .gh-n{background:var(--bd2);color:var(--mut)}
   .ghead.other{color:var(--ext)}
@@ -1352,10 +1352,10 @@ _EXTRA_CSS = """
   .clock.wait .d{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
   /* ── rows: single line, counterparty rail, clock-first ───────────── */
   .mesa .row{gap:10px;padding:calc(var(--rpad) - 3px) 13px calc(var(--rpad) - 3px) 10px}
-  .mesa .row.cpr-CLIENT{border-left-color:var(--green)!important}
-  .mesa .row.cpr-SUPPLIER{border-left-color:var(--ac)!important}
-  .mesa .row.cpr-LEAD{border-left-color:var(--purple)!important}
-  .mesa .row.on{background:#eef2ff}
+  .mesa .row.cpr-CLIENT{border-left-color:var(--cli)!important}
+  .mesa .row.cpr-SUPPLIER{border-left-color:var(--forn)!important}
+  .mesa .row.cpr-LEAD{border-left-color:var(--lead)!important}
+  .mesa .row.on{background:var(--ac-soft)}
   .mesa .clock{min-width:150px;text-align:left;font-size:11.5px}
   .rline{display:flex;align-items:baseline;gap:8px;min-width:0}
   .rname{font-size:var(--rfont);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:220px}
@@ -1366,18 +1366,18 @@ _EXTRA_CSS = """
   .cp.sm{min-width:0;padding:1px 7px;cursor:pointer;border:none;font-family:inherit}
   .rchips{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px}
   .rchip{font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums}
-  .rchip.draft{color:var(--ac);background:#eef2ff;border-radius:5px;padding:0 5px}
+  .rchip.draft{color:var(--ac);background:var(--ac-soft);border-radius:5px;padding:0 5px}
   /* Off-focus trust dot: dashed ring = proposto, solid = confirmado (the chip returns on focus). */
   .tdot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;vertical-align:middle}
   .tdot.proposed{border:1.5px dashed var(--mut2);background:transparent}
   .tdot.committed{border:1.5px solid var(--int);background:var(--int)}
   /* ── headline chips + freshness ───────────────────────────────────── */
-  .risk{color:var(--red);background:#fbeaea;border-color:#f3c9c9!important;cursor:pointer;font-family:inherit}
+  .risk{color:var(--red);background:var(--red-bg);border-color:var(--red-line)!important;cursor:pointer;font-family:inherit}
   .risk:hover{filter:brightness(.96)}
   .risk.filtering{outline:2px solid var(--red);outline-offset:1px}
-  .risk.clear{color:var(--green);background:#e7f6ee;border-color:#bfe6cf!important}
+  .risk.clear{color:var(--green);background:var(--green-bg);border-color:var(--green-line)!important}
   .risk.pulse{animation:pop .35s ease}
-  #_cobrar{color:var(--amber);background:#fdf4e3;border:1px solid #f0dcb0;cursor:pointer;
+  #_cobrar{color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);cursor:pointer;
     font-family:inherit;font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;
     border-radius:20px;padding:3px 12px}
   #_cobrar:hover{filter:brightness(.96)}
@@ -1389,9 +1389,9 @@ _EXTRA_CSS = """
   #_rever:hover{filter:brightness(.96)}
   /* ── entity chips (P2): dashed € = proposed, ⚑ deadline, ↻ related, novo ── */
   .rchip.money{color:var(--mut);border:1px dashed var(--mut2);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
-  .rchip.ddl{color:var(--amber);background:#fdf4e3;border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
-  .rchip.ddl.late{color:var(--red);background:#fbeaea}
-  .rchip.novo{color:var(--purple);background:#efeafb;border-radius:5px;padding:0 5px;font-size:10px;font-weight:800}
+  .rchip.ddl{color:var(--amber);background:var(--amber-bg);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
+  .rchip.ddl.late{color:var(--red);background:var(--red-bg)}
+  .rchip.novo{color:var(--lead);background:var(--lead-bg);border-radius:5px;padding:0 5px;font-size:10px;font-weight:800}
   .rchip.rel{color:var(--mut2);font-size:10px;font-weight:700}
   /* vistas rail extras */
   .vd.ac{background:var(--ac)} .vd.purple{background:var(--purple)}
@@ -1399,13 +1399,13 @@ _EXTRA_CSS = """
     color:var(--mut);font-size:12px;background:var(--card)}
   /* «Tratar agora» banner */
   .focobar{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:8px 13px;
-    border:1px solid var(--ac);border-radius:9px;background:#eef2ff;font-size:12.5px;color:var(--tx)}
+    border:1px solid var(--ac-line);border-radius:9px;background:var(--ac-soft);font-size:12.5px;color:var(--tx)}
   .focobar b{color:var(--ac)}
   .focobar kbd{background:var(--card);border:1px solid var(--bd);border-radius:4px;padding:0 5px;
     font-family:ui-monospace,monospace;font-size:10.5px}
   /* bulk selection */
   .selbar{display:flex;align-items:center;gap:9px;margin:0 0 8px;padding:7px 12px;
-    border:1px solid #cdd7ff;border-radius:9px;background:#eef2ff;font-size:12.5px}
+    border:1px solid var(--ac-line);border-radius:9px;background:var(--ac-soft);font-size:12.5px}
   .selbar b{color:var(--ac);font-variant-numeric:tabular-nums}
   .mesa .row.picked{outline:2px solid var(--ac);outline-offset:-2px}
   /* dossier signal tiles */
@@ -1428,8 +1428,8 @@ _EXTRA_CSS = """
   .verb{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd);background:var(--card);
     color:var(--tx);border-radius:9px;padding:7px 12px;font-family:inherit;font-size:12.5px;font-weight:650;cursor:pointer}
   .verb:hover:not([disabled]){border-color:var(--ac);color:var(--ac)}
-  .verb.good{color:var(--green);border-color:#bfe6cf}
-  .verb.good:hover{background:#e7f6ee;color:var(--green)}
+  .verb.good{color:var(--green);border-color:var(--green-line)}
+  .verb.good:hover{background:var(--green-bg);color:var(--green)}
   .verb[disabled]{opacity:.5;cursor:not-allowed}
   .verb kbd{background:var(--bg);border:1px solid var(--bd);border-radius:4px;padding:0 5px;
     font-family:ui-monospace,monospace;font-size:10.5px;color:var(--mut)}
@@ -1460,9 +1460,9 @@ _EXTRA_CSS = """
   .vtl{flex:0 0 52px;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:6px}
   .vtl-now{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;
     border-radius:6px;padding:3px 6px;text-align:center;line-height:1.2}
-  .vtl-now.red{color:var(--red);background:#fbeaea}
-  .vtl-now.amber{color:var(--amber);background:#fdf4e3}
-  .vtl-now.green{color:var(--green);background:#e7f6ee}
+  .vtl-now.red{color:var(--red);background:var(--red-bg)}
+  .vtl-now.amber{color:var(--amber);background:var(--amber-bg)}
+  .vtl-now.green{color:var(--green);background:var(--green-bg)}
   .vtl-now.none{color:var(--mut2);background:var(--bd2)}
   .vtl-now.hollow{background:transparent;border:1.5px dashed currentColor}
   .vtl-m{width:11px;height:11px;border-radius:50%;border:none;cursor:pointer;padding:0;flex:0 0 auto}
@@ -1482,18 +1482,18 @@ _EXTRA_CSS = """
     font-family:inherit;color:var(--tx);background:var(--card);outline:none;cursor:pointer}
   #_order:hover,#_ownerf:hover{border-color:var(--ac);color:var(--ac)}
   .fbar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
-  .fchip{display:inline-flex;align-items:center;gap:5px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:20px;padding:3px 10px;font-weight:600;cursor:pointer;font-size:12px}
-  .fchip:hover{background:#dfe8ff}
+  .fchip{display:inline-flex;align-items:center;gap:5px;background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac);border-radius:20px;padding:3px 10px;font-weight:600;cursor:pointer;font-size:12px}
+  .fchip:hover{background:#D5E4EF}
   .cp{border:none;font-family:inherit}
   .pur{font-size:10px;font-weight:650;border-radius:20px;padding:2px 9px;background:#f3f4f6;
     color:var(--mut);border:1px solid var(--bd);cursor:pointer;line-height:1.5}
-  .pur:hover{border-color:var(--ac);color:var(--ac);background:#eef2ff}
+  .pur:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
   .pur.committed{border-color:var(--int);color:var(--int);background:#f0fdfa}
   .mtxt{color:var(--mut)}
   .rmeta .mtxt{font-size:11px}
   .pchip{font-size:11.5px;font-weight:650;border-radius:8px;padding:3px 10px;cursor:pointer;border:1px solid}
-  .pchip.in{background:#eef2ff;border-color:#cdd7ff;color:var(--ac)}
-  .pchip.in:hover{background:#e0e8ff}
+  .pchip.in{background:var(--ac-soft);border-color:var(--ac-line);color:var(--ac)}
+  .pchip.in:hover{background:#D5E4EF}
   .pchip.new{background:#fff;border-color:var(--bd);color:var(--mut)}
   .pchip.new:hover{border-color:var(--int);color:var(--int);background:#effbf7}
   .pchip.draft{background:#fff;border-color:var(--bd);color:var(--mut)}

@@ -148,3 +148,17 @@ def test_failure_strings_distinguish_reverted_from_failed():
     html = _make()
     assert "falhou:'falhou'" in html
     assert "revertido:'falhou — revertido'" in html
+
+
+def test_mesa_palette_tokens_are_canonical():
+    """ADR-033: the shell ships the design-proposal palette — steel-blue accent on cool graphite,
+    and the CVD-validated counterparty trio (cliente teal · fornecedor blue · lead amber; purple
+    LEAD was rejected at ΔE 2.9 protan against supplier blue). Pinned so a future restyle cannot
+    silently regress the validated identity colors."""
+    html = _make()
+    for token in ("--ac:#2C5E80", "--cli:#0A8F72", "--forn:#3B5FC0", "--lead:#A16207",
+                  "--red:#B3392E", "--amber:#96660F", "--green:#2E7D4F", "--bg:#F1F3F6"):
+        assert token in html, token
+    assert ".cp.LEAD{background:var(--lead-bg);color:var(--lead)}" in html
+    assert ".cp.CLIENT{background:var(--cli-bg);color:var(--cli)}" in html
+    assert ".cp.SUPPLIER{background:var(--forn-bg);color:var(--forn)}" in html

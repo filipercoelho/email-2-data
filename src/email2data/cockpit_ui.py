@@ -114,10 +114,20 @@ _HEAD = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>__TITLE__ · email-2-data</title>
 <style>
-  /* ── tokens (kept in sync with report.py) ─────────────────────────────── */
-  :root{--bg:#eef0f3;--card:#fff;--bd:#e3e6ea;--bd2:#eef0f3;--tx:#15181c;--mut:#6b7280;--mut2:#9aa1ab;
-    --ac:#3358d4;--int:#0d9488;--ext:#64748b;--red:#cf3a3a;--amber:#b9791c;--green:#1f9d57;--purple:#6b4fd1;
-    --shadow:0 1px 2px rgba(20,24,28,.05),0 1px 3px rgba(20,24,28,.04);
+  /* ── tokens (kept in sync with report.py) ───────────────────────────────
+     The ADR-033 «Mesa com Foco» palette, ported from the design-proposal artifact: cool graphite
+     neutrals, a steel-blue accent, and a CVD-VALIDATED counterparty trio (cliente teal ·
+     fornecedor blue · lead amber — worst adjacent pair ΔE 19.4 deutan / 21.0 normal, all ≥3:1 on
+     white; lead-purple was REJECTED: ΔE 2.9 protan against supplier blue). Semantic sub-tokens
+     (-bg/-line) exist so component CSS never scatters raw hexes again. */
+  :root{--bg:#F1F3F6;--card:#fff;--bd:#DCE2E9;--bd2:#EAEEF2;--tx:#182027;--mut:#46525E;--mut2:#7C8894;
+    --ac:#2C5E80;--ac-soft:#E3EDF4;--ac-line:#BDD3E2;--int:#0d9488;--ext:#64748b;
+    --red:#B3392E;--red-bg:#F9E9E7;--red-line:#EDCBC7;
+    --amber:#96660F;--amber-bg:#F7EFDC;--amber-line:#E9DBB4;
+    --green:#2E7D4F;--green-bg:#E4F1E9;--green-line:#C6E0D0;
+    --purple:#6b4fd1;
+    --cli:#0A8F72;--cli-bg:#DFF1EC;--forn:#3B5FC0;--forn-bg:#E5EAF9;--lead:#A16207;--lead-bg:#F6ECD7;
+    --shadow:0 1px 2px rgba(20,28,36,.05),0 1px 3px rgba(20,28,36,.04);
     --rpad:12px;--rfont:13.5px;}
   body.compact{--rpad:7px;--rfont:13px}
   *{box-sizing:border-box} html,body{margin:0}
@@ -135,9 +145,9 @@ _HEAD = """<!doctype html>
     padding:5px 10px;border-radius:8px;display:inline-flex;align-items:center;gap:5px}
   .nlink:hover{background:var(--bg);color:var(--tx)}
   .nlink.on{background:var(--ac);color:#fff}
-  .nlink.on:hover{background:#2a52c7}
+  .nlink.on:hover{background:#254F6C}
   .nbadge{background:rgba(255,255,255,.25);border-radius:20px;padding:0 6px;font-size:10px;font-weight:700;font-variant-numeric:tabular-nums}
-  .nlink:not(.on) .nbadge{background:#fbeaea;color:var(--red)}
+  .nlink:not(.on) .nbadge{background:var(--red-bg);color:var(--red)}
   .grow{margin-left:auto}
   .hbtn{color:var(--mut);background:none;border:1px solid var(--bd);cursor:pointer;
     padding:5px 10px;border-radius:8px;font-size:12.5px;font-weight:600}
@@ -152,14 +162,15 @@ _HEAD = """<!doctype html>
   .row{display:flex;align-items:center;gap:12px;padding:var(--rpad) 15px;border-bottom:1px solid var(--bd2);
     border-left:3px solid transparent;cursor:pointer;transition:opacity .16s ease,transform .16s ease,background .12s}
   .row:last-child{border-bottom:none}
-  .row:hover{background:#f8f9fb}
-  .row.on{background:#eef2ff;border-left-color:var(--ac)}
+  .row:hover{background:#F7F9FB}
+  .row.on{background:var(--ac-soft);border-left-color:var(--ac)}
   .row.leaving{opacity:0;transform:translateX(10px)}
+  /* Counterparty identity: the CVD-validated trio — cliente teal · fornecedor blue · lead amber. */
   .cp{flex:0 0 auto;display:inline-block;padding:2px 9px;border-radius:20px;font-size:10px;
     font-weight:700;letter-spacing:.03em;min-width:62px;text-align:center}
-  .cp.CLIENT{background:#e7f6ee;color:var(--green)} .cp.LEAD{background:#efeafb;color:var(--purple)}
-  .cp.SUPPLIER{background:#e8eefc;color:var(--ac)}
-  .cp.INTERNAL,.cp.OTHER,.cp.BULK{background:#eef0f3;color:var(--mut)}
+  .cp.CLIENT{background:var(--cli-bg);color:var(--cli)} .cp.LEAD{background:var(--lead-bg);color:var(--lead)}
+  .cp.SUPPLIER{background:var(--forn-bg);color:var(--forn)}
+  .cp.INTERNAL,.cp.OTHER,.cp.BULK{background:var(--bd2);color:var(--mut)}
   /* ── component kit: row body ─────────────────────────────────────────── */
   .rmain{flex:1;min-width:0}
   .subj{font-weight:620;font-size:var(--rfont);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -184,9 +195,9 @@ _HEAD = """<!doctype html>
   .acts button,.act-btn{border:1px solid var(--bd);background:#fff;border-radius:8px;
     cursor:pointer;font-size:13px;color:var(--mut);line-height:1;padding:0 10px;height:30px}
   .acts button{width:30px;padding:0}
-  .acts button:hover,.act-btn:hover{border-color:var(--ac);color:var(--ac);background:#f1f5ff}
+  .acts button:hover,.act-btn:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
   .act-btn.accept{border-color:var(--green);color:var(--green)}
-  .act-btn.accept:hover{background:#e7f6ee}
+  .act-btn.accept:hover{background:var(--green-bg)}
   /* ── B5 trust grammar ─────────────────────────────────────────────────── */
   .trust{font-size:10.5px;font-weight:650;border-radius:20px;padding:1px 8px;cursor:pointer;
     font-variant-numeric:tabular-nums;background:#fff}
@@ -223,8 +234,8 @@ _HEAD = """<!doctype html>
   .trbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;border-left:2px solid var(--ac);padding-left:8px}
   .trbody.trerr{border-left-color:var(--red,#dc2626);color:var(--red,#dc2626)}
   .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
-  .tatt{display:inline-block;font-size:11px;background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
-  .tatt:hover{background:#dfe8ff}
+  .tatt{display:inline-block;font-size:11px;background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
+  .tatt:hover{background:#D5E4EF}
   /* embedded messages (extracted from forwarded chains, not direct IMAP) */
   .tmsg.embedded{background:#fafbfc;border-style:dashed}
   .tembedded{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:1px 6px;border:1px solid var(--bd);border-radius:5px}
@@ -239,23 +250,23 @@ _HEAD = """<!doctype html>
   .titem .tc{flex:1;min-width:0}
   .titem .ttype{display:inline-block;font-size:9.5px;font-weight:700;text-transform:uppercase;
     letter-spacing:.05em;padding:1px 7px;border-radius:20px;margin-right:6px}
-  .ttype.email{background:#e8eefc;color:var(--ac)}
+  .ttype.email{background:var(--ac-soft);color:var(--ac)}
   .ttype.projeto{background:#efeafb;color:var(--purple)}
   /* ── gate items (C3 Para ti) ─────────────────────────────────────────── */
   .gate{background:var(--card);border:1px solid var(--bd);border-radius:14px;
     padding:16px 18px;margin-bottom:10px;box-shadow:var(--shadow)}
   .gate .gkind{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;
     letter-spacing:.05em;padding:2px 9px;border-radius:20px;margin-bottom:8px}
-  .gkind.rever{background:#fff3f3;color:var(--red)}
+  .gkind.rever{background:var(--red-bg);color:var(--red)}
   .gkind.projeto{background:#efeafb;color:var(--purple)}
-  .gkind.identidade{background:#e8eefc;color:var(--ac)}
+  .gkind.identidade{background:var(--ac-soft);color:var(--ac)}
   .gate .gtitle{font-weight:640;font-size:14px;margin-bottom:4px}
   .gate .gwhy{font-size:12.5px;color:var(--mut);margin-bottom:10px;line-height:1.5}
   .gate .gacts{display:flex;gap:8px}
   /* ── cluster card (C2 list) ──────────────────────────────────────────── */
   .ccard{background:var(--card);border:1px solid var(--bd);border-left:3px solid transparent;
     border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;box-shadow:var(--shadow)}
-  .ccard:hover{background:#f8f9fb} .ccard.on{border-left-color:var(--ac);background:#eef2ff}
+  .ccard:hover{background:#F7F9FB} .ccard.on{border-left-color:var(--ac);background:var(--ac-soft)}
   .ccard .ch{display:flex;align-items:center;gap:8px;margin-bottom:4px}
   .ccard .cname{font-weight:650;font-size:14px}
   .ccard .cstat{margin-left:auto;font-size:11.5px;color:var(--mut)}
@@ -271,7 +282,7 @@ _HEAD = """<!doctype html>
   .menu{position:absolute;background:#fff;border:1px solid var(--bd);border-radius:10px;
     box-shadow:0 4px 16px rgba(20,24,28,.14);z-index:60;min-width:170px;padding:4px}
   .menu .mi{padding:7px 11px;border-radius:7px;cursor:pointer;font-size:13px}
-  .menu .mi:hover,.menu .mi.on{background:#eef2ff;color:var(--ac)}
+  .menu .mi:hover,.menu .mi.on{background:var(--ac-soft);color:var(--ac)}
   .overlay{position:fixed;inset:0;background:rgba(20,24,28,.32);display:flex;align-items:flex-start;
     justify-content:center;z-index:70}
   .overlay.help{align-items:center}
@@ -287,7 +298,7 @@ _HEAD = """<!doctype html>
   #_pq{width:100%;border:0;border-bottom:1px solid var(--bd);padding:15px 18px;font-size:15px;outline:none}
   #_presults{max-height:50vh;overflow:auto;padding:6px}
   .pi{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;cursor:pointer}
-  .pi.on{background:#eef2ff}
+  .pi.on{background:var(--ac-soft)}
   .pi .pik{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
     color:var(--mut2);min-width:72px}
   .pi .pil{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}

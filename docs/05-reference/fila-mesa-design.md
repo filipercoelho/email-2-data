@@ -222,7 +222,29 @@ há 72 h+» · «faltam N campos» · «pronto a orçamentar» · «valor estima
 responderem» · «Tratar agora» · «N de M» · «selecionadas: N» · «rascunho — revê antes de enviar · a
 app nunca envia» · zero states: «Tudo tratado · nada em risco» / «Sem leads novos — bom sinal».
 
-## 13 · Non-goals
+## 13 · Palette (canonical tokens — shipped 2026-07-23)
+
+The design-proposal palette is the app's token system (`cockpit_ui.py` `:root`, synced to
+`report.py`; pinned by `test_mesa_palette_tokens_are_canonical`):
+
+| Role | Token | Value |
+| --- | --- | --- |
+| Ground / surface / lines | `--bg` `#F1F3F6` · `--card` `#fff` · `--bd` `#DCE2E9` · `--bd2` `#EAEEF2` |
+| Ink | `--tx` `#182027` · `--mut` `#46525E` · `--mut2` `#7C8894` |
+| Accent (steel blue) | `--ac` `#2C5E80` · `--ac-soft` `#E3EDF4` · `--ac-line` `#BDD3E2` |
+| Bands | `--red` `#B3392E` · `--amber` `#96660F` · `--green` `#2E7D4F` (each with `-bg`/`-line`) |
+| **Cliente** | `--cli` `#0A8F72` / `--cli-bg` `#DFF1EC` |
+| **Fornecedor** | `--forn` `#3B5FC0` / `--forn-bg` `#E5EAF9` |
+| **Lead** | `--lead` `#A16207` / `--lead-bg` `#F6ECD7` |
+
+The counterparty trio is **CVD-validated** (dataviz six-checks: worst adjacent pair ΔE 19.4 deutan /
+21.0 normal-vision, chroma ≥ 0.1, all ≥ 3:1 on white). **Lead-purple is rejected** — ΔE 2.9 protan
+against fornecedor blue makes them indistinguishable for protanopia; amber also carries the
+new/hot semantics («novo» shares the family). `--purple` survives only for non-counterparty
+identities (Para ti gates, Prazos vista dot). Dark mode is future work; the artifact carries a
+validated dark variant (`#219980`/`#6E85DE`/`#BA8628`) when it lands.
+
+## 14 · Non-goals
 
 No view builder · no manual reorder · no bulk IGNORE · no sender screener · no chat interface ·
 no second list surface · no digest replacing the live queue · no fake placeholder values — a missing

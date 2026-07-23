@@ -103,8 +103,8 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>email-2-data · workspace</title>
 <style>
-  :root{--bg:#eef0f3;--card:#fff;--bd:#e3e6ea;--bd2:#eef0f3;--tx:#15181c;--mut:#6b7280;--mut2:#9aa1ab;
-    --ac:#3358d4;--int:#0d9488;--ext:#64748b;--shadow:0 1px 2px rgba(20,24,28,.05),0 1px 3px rgba(20,24,28,.04);}
+  :root{--bg:#F1F3F6;--card:#fff;--bd:#DCE2E9;--bd2:#EAEEF2;--tx:#182027;--mut:#46525E;--mut2:#7C8894;
+    --ac:#2C5E80;--int:#0d9488;--ext:#64748b;--shadow:0 1px 2px rgba(20,28,36,.05),0 1px 3px rgba(20,28,36,.04);}
   *{box-sizing:border-box} html,body{margin:0}
   body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--tx);background:var(--bg)}
   header{background:var(--card);border-bottom:1px solid var(--bd);padding:16px 28px;position:sticky;top:0;z-index:20;box-shadow:var(--shadow)}
