@@ -955,16 +955,31 @@ def test_fila_thread_is_a_vertical_in_out_timeline():
     coloured spine dot per message, inbound/outbound offset to opposite sides, a gap chip between
     cards, and the segment up to «agora» as the open response debt in the clock's band colour."""
     fn = _thread_html_js()
-    assert 'class="dt-now ' in fn and "CLOCK_ICON" in fn            # the «agora» cap + clock icon
+    assert 'class="dt-now ' in fn                                   # the «agora» anchor
     assert "'dt-msg dir-'" in fn or '"dt-msg dir-' in fn            # per-message direction wrapper
     assert 'class="dt-dot"' in fn                                   # the spine dot
     assert "dt-gap " in fn and "_fmtGap(gap)" in fn                 # a time-diff chip between cards
     assert "debt " in fn and "sem resposta há " in fn              # the open debt carries the band
     assert "(m.direction==='inbound')" in fn                        # direction drives the offset
+    # THE FIX (P5c-fix): the open debt is the AUTHORITATIVE clock age, not a client Date.now()
+    # recompute that drifts a day out of step («10 dias» header vs «11 dias» chip).
+    assert "c.age_hours*3600000" in fn
+    assert "Date.now()" not in fn
     # the shared card now tags direction + an arrow icon, so in/out reads at a glance everywhere
     shell = fila_page.build_fila_html([], [])
     assert ".dt-msg.dir-inbound .tmsg{" in shell and ".dt-msg.dir-outbound .tmsg{" in shell
     assert "dir-'+esc(tag.k)" in shell and ".tdir .dicon{" in shell
+    # fonts align with the interface (sans, not ui-monospace) — the «horrible font» fix
+    assert "var(--mono,ui-monospace)" not in shell.split(".dt-now{")[1].split(".dt-msg{")[0]
+
+
+def test_msg_attachments_collapse_when_many():
+    """ADR-034 P5c-fix: a message with many attachments (a real 14-file email exists) collapses
+    behind a «N anexos» summary so it never eats the pane; ≤4 render inline; long names truncate."""
+    html = fila_page.build_fila_html([], [])
+    assert "tatts-d" in html and "anexos" in html and "_attL.length<=4" in html
+    assert "tatts-row" in html
+    assert "max-width:170px;overflow:hidden;text-overflow:ellipsis" in html   # long names truncate
 
 
 def test_api_fila_rows_carry_display_name_and_cluster(tmp_path):

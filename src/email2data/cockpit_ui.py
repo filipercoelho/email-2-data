@@ -245,6 +245,10 @@ _HEAD = """<!doctype html>
   .tdir .dicon{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
   .tdate{color:var(--mut2);margin-left:auto}
   .tatts{flex-basis:100%;margin-top:3px}
+  .tatts-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+  .tatts-d{margin-top:3px} .tatts-d>summary{cursor:pointer;font-size:11px;font-weight:650;color:var(--ac);list-style:none}
+  .tatts-d>summary::-webkit-details-marker{display:none}
+  .tatts-d[open]>summary{margin-bottom:4px}
   .tbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
   .qtoggle,.rawtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0;display:block}
   .qtoggle:hover,.rawtoggle:hover{color:var(--ac)}
@@ -256,8 +260,10 @@ _HEAD = """<!doctype html>
   .trbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;border-left:2px solid var(--ac);padding-left:8px}
   .trbody.trerr{border-left-color:var(--red,#dc2626);color:var(--red,#dc2626)}
   .tquote{margin-top:5px;padding-left:9px;border-left:2px solid var(--bd);font-size:12px;line-height:1.45;color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
-  .tatt{display:inline-block;font-size:11px;background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac);border-radius:6px;padding:1px 7px;margin:0 5px 3px 0;text-decoration:none}
-  .tatt:hover{background:#D5E4EF}
+  .tatt{display:inline-block;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    vertical-align:middle;font-size:10.5px;background:var(--ac-soft);border:1px solid var(--ac-line);
+    color:var(--ac);border-radius:6px;padding:1px 6px;text-decoration:none}
+  .tatt:hover{filter:brightness(.97)}
   /* embedded messages (extracted from forwarded chains, not direct IMAP) */
   .tmsg.embedded{background:#fafbfc;border-style:dashed}
   .tembedded{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:1px 6px;border:1px solid var(--bd);border-radius:5px}
@@ -424,9 +430,16 @@ function msgHTML(m, opts){
   const tag=msgDirTag(m.direction);
   const to=(m.to||[]);
   const toStr=to.length?(esc(to[0])+(to.length>1?' +'+(to.length-1):'')):'—';
-  const atts=(m.attachments||[]).map((a,idx)=>
+  // Attachments compact (ADR-034 P5c-fix): chips truncate long names (full name in the title), and
+  // a thread with many (a real 14-attachment email exists) collapses behind a «N anexos» summary so
+  // it never eats the pane. Native <details> — no JS, and no data-act so the dossier click ignores it.
+  const _attL=(m.attachments||[]);
+  const _attChips=_attL.map((a,idx)=>
     '<a class="tatt" href="/api/attachment/'+encodeURIComponent(m.message_id)+'/'+idx
-    +'" target="_blank" rel="noopener">📎 '+esc(a.name)+'</a>').join('');
+    +'" target="_blank" rel="noopener" title="'+esc(a.name||'')+'">📎 '+esc(a.name||'anexo')+'</a>').join('');
+  const atts=!_attL.length ? ''
+    : (_attL.length<=4 ? '<div class="tatts-row">'+_attChips+'</div>'
+       : '<details class="tatts-d"><summary>📎 '+_attL.length+' anexos</summary><div class="tatts-row">'+_attChips+'</div></details>');
   // Use the cleaned body by default; fall back to raw if no clean version available.
   const cleanBody = (m.body_clean !== undefined ? m.body_clean : m.body) || '';
   const rawBody   = m.body || '';

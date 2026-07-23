@@ -791,20 +791,22 @@ function _threadHTML(r){
      newest message up to «agora» is the OPEN response debt, drawn in the clock's band colour
      (hollow when the ball is theirs). */
   const c=r.clock||{};
-  const nowMs=Date.now();
+  /* The open debt (now → newest message) uses the AUTHORITATIVE clock age (server-computed, the
+     same value the row/dossier clock shows) — NOT a client-side wall-clock recompute, which drifts
+     a day out of step over time (the «10 dias» vs «11 dias» bug). Verb follows the clock state. */
+  const debtVerb=(c.state==='AWAITING')?'à espera há ':'sem resposta há ';
+  const debtMs=(c.age_hours!=null)?c.age_hours*3600000:0;
   let flow='<div class="dthread">'
-    +'<div class="dt-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'">'+CLOCK_ICON
-    +'<span>agora'+(c.label?' · '+esc(c.label):'')+'</span></div>';
+    +'<div class="dt-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'"><span class="dt-dot"></span>agora</div>';
+  if(debtMs>=1800000)
+    flow+='<div class="dt-gap debt '+esc(c.band||'none')+'"><span class="dt-glab">'+esc(debtVerb+_fmtGap(debtMs))+'</span></div>';
   ordered.forEach((m,i)=>{
-    const t=Date.parse(m.date||'')||0;
-    const newerT=(i===0)?nowMs:(Date.parse(ordered[i-1].date||'')||0);
-    if(t&&newerT&&newerT>t){
-      const gap=newerT-t;
-      if(gap>=1800000){   /* ≥30 min worth marking */
-        const debt=(i===0);
-        flow+='<div class="dt-gap '+_gapBand(gap)+(debt?(' debt '+esc(c.band||'none')):'')
-          +'"><span class="dt-gline"></span><span class="dt-glab">'
-          +(debt?'sem resposta há ':'')+esc(_fmtGap(gap))+'</span></div>';
+    /* Inter-message gaps only (the debt chip above already spans now → newest). */
+    if(i>0){
+      const t=Date.parse(m.date||'')||0, newerT=Date.parse(ordered[i-1].date||'')||0;
+      if(t&&newerT&&newerT>t){
+        const gap=newerT-t;
+        if(gap>=1800000) flow+='<div class="dt-gap '+_gapBand(gap)+'"><span class="dt-glab">'+esc(_fmtGap(gap))+'</span></div>';
       }
     }
     const dir=(m.direction==='inbound')?'inbound':(m.direction==='internal')?'internal':'outbound';
@@ -1541,18 +1543,19 @@ _EXTRA_CSS = """
      messages, and the top segment to «agora» is the open response debt in the clock's band colour. */
   .dthread{position:relative;padding-left:24px;margin-top:2px}
   .dthread::before{content:"";position:absolute;left:9px;top:9px;bottom:9px;width:2px;background:var(--bd2)}
-  .dt-now{position:relative;display:inline-flex;align-items:center;gap:6px;font:800 10px var(--mono,ui-monospace);
-    letter-spacing:.05em;text-transform:uppercase;color:var(--mut2);margin-bottom:2px}
-  .dt-now .dicon{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  /* «agora» anchor + gap chips use the SANS interface font (not ui-monospace) so the timeline
+     aligns with the rest of the UI. */
+  .dt-now{position:relative;display:inline-flex;align-items:center;font:650 11px/1 inherit;
+    letter-spacing:.02em;color:var(--mut2);margin-bottom:2px}
   .dt-now.red{color:var(--red)} .dt-now.amber{color:var(--amber)} .dt-now.green{color:var(--green)}
-  .dt-now::before{content:"";position:absolute;left:-19px;top:50%;transform:translateY(-50%);
-    width:11px;height:11px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px var(--card)}
-  .dt-now.hollow::before{background:var(--card);border:2px solid currentColor}
+  .dt-now .dt-dot{position:absolute;left:-19px;top:50%;transform:translateY(-50%);width:11px;height:11px;
+    border-radius:50%;background:currentColor;box-shadow:0 0 0 3px var(--card)}
+  .dt-now.hollow .dt-dot{background:var(--card);border:2px solid currentColor;box-shadow:0 0 0 2px var(--card)}
   /* gap chip — connector height banded, never linear */
-  .dt-gap{position:relative;display:flex;align-items:center;min-height:20px;padding:3px 0}
-  .dt-gap.g3{padding:9px 0} .dt-gap.g7{padding:16px 0}
-  .dt-glab{font:700 9.5px var(--mono,ui-monospace);color:var(--mut2);background:var(--bd2);
-    border-radius:20px;padding:1px 8px}
+  .dt-gap{position:relative;display:flex;align-items:center;min-height:18px;padding:3px 0}
+  .dt-gap.g3{padding:8px 0} .dt-gap.g7{padding:14px 0}
+  .dt-glab{font:600 11px inherit;color:var(--mut2);background:var(--bd2);border-radius:20px;padding:2px 9px}
+  .dt-gap.debt .dt-glab{font-weight:700}
   .dt-gap.debt.red .dt-glab{color:var(--red);background:var(--red-bg)}
   .dt-gap.debt.amber .dt-glab{color:var(--amber);background:var(--amber-bg)}
   .dt-gap.debt.green .dt-glab{color:var(--green);background:var(--green-bg)}
