@@ -339,6 +339,15 @@ function render(){
     else if(mode!=='tratados'&&vista==='prazos'){ vb.textContent='Prazos extraídos dos emails — do mais próximo para o mais distante'; vb.classList.remove('hidden'); }
     else vb.classList.add('hidden');
   }
+  /* «Tratar agora» progress banner (F). */
+  const fo=$('#_foco');
+  if(fo){
+    if(focoMode&&mode==='ativos'&&v.length){
+      fo.classList.remove('hidden');
+      fo.innerHTML='<b>Tratar agora</b> — '+(focus+1)+' de '+v.length
+        +' · <kbd>E</kbd> tratado · <kbd>H</kbd> adiar · <kbd>R</kbd> responder · <kbd>→</kbd> salta · <kbd>Esc</kbd> sai';
+    } else { fo.classList.add('hidden'); if(focoMode&&!v.length) focoMode=false; }
+  }
   /* Bulk selection bar — the verbs are tratado/dono ONLY, structurally: a mass silent bin is the
      one unrecoverable triage mistake, so bulk IGNORE does not exist as a control (ADR-033 §2.11). */
   if(mode==='ativos') selected.forEach(root=>{ if(!rows.some(r=>r.thread_root===root)) selected.delete(root); });
@@ -483,8 +492,8 @@ function dossierHTML(r){
      honestly disabled until Phase 3 ships them: a verb that explains itself beats a missing verb. */
   h+='<div class="dverbs">'
     +'<button class="verb good" data-act="handled">✓ '+(mode==='tratados'?'Reabrir':'Tratado')+'<kbd>E</kbd></button>'
-    +'<button class="verb" disabled title="Responder contextual — chega na fase 3 (ADR-033 §10)">✍ Responder<kbd>R</kbd></button>'
-    +'<button class="verb" disabled title="Adiar (acorda na data OU quando responderem) — fase 3">Adiar<kbd>H</kbd></button>'
+    +'<button class="verb" data-act="reply" title="rascunho contextual — o tipo da conversa escolhe o modelo; nada é enviado">✍ Responder<kbd>R</kbd></button>'
+    +'<button class="verb" data-act="snooze" title="adiar — acorda na data OU quando responderem">Adiar<kbd>H</kbd></button>'
     +'<button class="verb" data-act="owner">@ Dono<kbd>A</kbd></button>'
     +'<button class="verb" data-act="'+(r.project?'openproj':'mkproj')+'">▦ '+(r.project?'Abrir projeto':'Criar projeto')+'<kbd>P</kbd></button>'
     +'</div>';
@@ -725,7 +734,7 @@ function _threadHTML(r){
     :(r._draft!=null
       ?'<div class="draftbox"><textarea readonly rows="9" aria-label="Rascunho de resposta">'+esc(r._draft)+'</textarea>'
        +'<div class="dfoot"><button class="act-btn" data-act="copydraft">Copiar</button>'
-       +'<span class="tsum">rascunho — revê antes de enviar · a app nunca envia</span></div></div>'
+       +'<span class="tsum">rascunho'+(r._draftKind?' · modelo: '+esc(r._draftKind):'')+' — revê antes de enviar · a app nunca envia</span></div></div>'
       :'');
   /* The summary line keeps the CHRONOLOGICAL array — its date range must read "first → last". */
   const head='<div class="thead">'+_projHTML(r)+draftBtn+'<span class="tsum">'+esc(msgThreadSummary(msgs))+'</span></div>';
@@ -739,6 +748,8 @@ function dispatch(action,i){
   else if(action==='reclassCp')reclassMenu(i,'counterparty');
   else if(action==='reclassPur')reclassMenu(i,'purpose');
   else if(action==='thread')focusTo(i);
+  else if(action==='snooze')snoozeMenu(i);
+  else if(action==='reply')contextualReply(i);
   else if(action==='fcp'){const r=view()[i]; if(r) setFilter('counterparty', filters.counterparty===r.counterparty?null:r.counterparty);}
   else if(action==='mkproj')makeProject(i);
   else if(action==='openproj')openProject(i);
@@ -751,6 +762,62 @@ function focusTo(i){
   const v=view(); if(!v[i]) return;
   focus=i; focusRoot=v[i].thread_root;
   urlThread=focusRoot; syncURL(); render();
+}
+
+/* ── Adiar (ADR-033 P3): optimistic, undoable, and it can never lose a client —
+   build_fila wakes the thread on the date OR on their next inbound, whichever first. */
+function snoozeMenu(i){
+  const r=view()[i]; if(!r) return;
+  const m=$('#_menu');
+  m.innerHTML='<div class="mhdr">Adiar — acorda antes se responderem</div>'
+    +'<div class="mi" data-sn="amanha">amanhã 09:00</div>'
+    +'<div class="mi" data-sn="segunda">2ª feira 09:00</div>'
+    +'<div class="mi" data-sn="semana">daqui a 7 dias</div>'
+    +'<div class="mi reset" data-sn="limpar">não adiar</div>';
+  m.dataset.i=i; m.dataset.kind='snooze'; m.classList.remove('hidden'); positionMenu(i);
+}
+function _snoozeUntil(k){
+  const d=new Date();
+  if(k==='amanha'){ d.setDate(d.getDate()+1); d.setHours(9,0,0,0); }
+  else if(k==='segunda'){ d.setDate(d.getDate()+(((8-d.getDay())%7)||7)); d.setHours(9,0,0,0); }
+  else { d.setDate(d.getDate()+7); }
+  return d.toISOString();
+}
+async function snoozeThread(i,k){
+  const v=view(), r=v[i]; if(!r) return;
+  if(k==='limpar'){
+    try{ await post('/api/thread/snooze',{thread_root:r.thread_root,until:null}); toast('não adiada'); }
+    catch(e){ toast(S.falhou); }
+    return;
+  }
+  const until=_snoozeUntil(k);
+  const at=rows.indexOf(r); if(at<0) return;
+  const nxt=v[i+1]||v[i-1];
+  rows.splice(at,1); focusRoot=nxt?nxt.thread_root:null;
+  undo.push({label:'adiada',revert:()=>{
+    rows.splice(Math.min(at,rows.length),0,r); focusRoot=r.thread_root; render();
+    post('/api/thread/snooze',{thread_root:r.thread_root,until:null}).catch(()=>toast(S.revertido));
+  }});
+  announce('adiada'); render();
+  toast('adiada até '+until.slice(0,10)+' — acorda antes se responderem · Z desfaz');
+  try{ await post('/api/thread/snooze',{thread_root:r.thread_root,until}); }
+  catch(e){ rows.splice(Math.min(at,rows.length),0,r); focusRoot=r.thread_root; undo.pop(); render(); toast(S.revertido); }
+}
+
+/* ── contextual R (ADR-033 §10): the conversation's kind picks the composer ──
+   One deterministic endpoint maps purpose × state; a JobSpec thread is redirected to the tested
+   /api/reply (the honest-conditional ask draft). NOTHING is ever sent. */
+async function contextualReply(i){
+  const v=view(), r=v[i]; if(!r||r._draftBusy) return;
+  if(r._draft!=null){ r._draft=null; r._draftKind=''; renderDossier(); return; }   /* toggle off */
+  r._draftBusy=true; renderDossier();
+  try{
+    const d=await post('/api/thread/reply-draft',{thread_root:r.thread_root});
+    if(d.redirect){ const d2=await post(d.redirect,{message_id:r.message_id}); r._draft=d2.reply||''; }
+    else r._draft=d.draft||'';
+    r._draftKind=d.kind||'';
+  }catch(e){ toast(S.falhou); }
+  r._draftBusy=false; renderDossier();
 }
 
 /* ── reply draft (the queue that names the debt can start the reply) ─────
@@ -816,10 +883,20 @@ function onKey(e){
   else if(e.key==='x'){ const r=v[focus]; if(r&&mode==='ativos'){ selected.has(r.thread_root)?selected.delete(r.thread_root):selected.add(r.thread_root); render(); } }
   else if(e.key==='X'){ const r=v[focus]; if(r&&mode==='ativos'){ const sg=semGroup(r); const roots=v.filter(x=>semGroup(x)===sg).map(x=>x.thread_root); const all=roots.every(root=>selected.has(root)); roots.forEach(root=>all?selected.delete(root):selected.add(root)); render(); } }
   else if(e.key==='a'||e.key==='A'){ if(selected.size&&mode==='ativos'){bulkOwnerMenu();} else dispatch('owner',focus); }
+  else if(e.key==='h'||e.key==='H')dispatch('snooze',focus);
+  else if(e.key==='r'||e.key==='R')dispatch('reply',focus);
+  else if(e.key==='f'||e.key==='F'){ focoMode=!focoMode; render(); }
+  else if(e.key==='ArrowRight'&&focoMode){ focus=Math.min(v.length-1,focus+1); focusRoot=v[focus]?v[focus].thread_root:null; render(); e.preventDefault(); }
   else if(e.key==='p'||e.key==='P'){const r=v[focus]; if(r)dispatch(r.project?'openproj':'mkproj',focus);}
   else if(e.key==='Enter'||e.key==='o'||e.key==='O'){dispatch('thread',focus);e.preventDefault();}
 }
+
+/* ── «Tratar agora» (ADR-033 §3.4): F walks the SAME filtered, risk-ordered queue one decision at
+   a time — E/H advance (they already act-and-advance), → skips free, Esc exits. One queue, one
+   order, zero divergence: this is a lens over view(), never a second surface. */
+let focoMode=false;
 function onEsc(){
+  if(focoMode){ focoMode=false; render(); return; }
   if(selected.size){ selected.clear(); render(); return; }
   if(hasFilters()) clearFilters();
 }
@@ -1047,6 +1124,7 @@ $('#_menu').addEventListener('click',e=>{
   const m=$('#_menu'), i=parseInt(m.dataset.i,10);
   if(m.dataset.kind==='reclass'){ reclassify(i,m.dataset.field,mi.dataset.val||''); m.classList.add('hidden'); return; }
   if(m.dataset.kind==='bulkowner'){ if(mi.dataset.n) bulkOwner(mi.dataset.n); m.classList.add('hidden'); return; }
+  if(m.dataset.kind==='snooze'){ if(mi.dataset.sn) snoozeThread(i,mi.dataset.sn); m.classList.add('hidden'); return; }
   // owner (multi-select): toggle keeps the picker open; clear / new are explicit
   if(mi.dataset.new){ addFilaOwner(i); return; }
   if(mi.dataset.clear){ setThreadOwners(i,[]); m.classList.add('hidden'); return; }
@@ -1201,6 +1279,7 @@ _BODY_HTML = """
   <div class="mesa-body">
     <nav id="_vrail" class="vrail" aria-label="Vistas e filtros"></nav>
     <div class="mcol">
+      <div id="_foco" class="focobar hidden" aria-live="polite"></div>
       <div id="_selbar" class="selbar hidden" aria-label="Seleção em massa"></div>
       <div id="_vbanner" class="vbanner hidden" aria-live="polite"></div>
       <div id="_list" class="list" role="list" aria-label="Fila de resposta"></div>
@@ -1318,6 +1397,12 @@ _EXTRA_CSS = """
   .vd.ac{background:var(--ac)} .vd.purple{background:var(--purple)}
   .vbanner{margin:0 0 8px;padding:7px 12px;border:1px dashed var(--mut2);border-radius:9px;
     color:var(--mut);font-size:12px;background:var(--card)}
+  /* «Tratar agora» banner */
+  .focobar{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:8px 13px;
+    border:1px solid var(--ac);border-radius:9px;background:#eef2ff;font-size:12.5px;color:var(--tx)}
+  .focobar b{color:var(--ac)}
+  .focobar kbd{background:var(--card);border:1px solid var(--bd);border-radius:4px;padding:0 5px;
+    font-family:ui-monospace,monospace;font-size:10.5px}
   /* bulk selection */
   .selbar{display:flex;align-items:center;gap:9px;margin:0 0 8px;padding:7px 12px;
     border:1px solid #cdd7ff;border-radius:9px;background:#eef2ff;font-size:12.5px}

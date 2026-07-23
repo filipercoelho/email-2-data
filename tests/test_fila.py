@@ -1087,3 +1087,67 @@ def test_fila_rever_chip_surfaces_needs_review(tmp_path):
     html = _p0_page(tmp_path)
     assert 'id="_rever"' in html and "const NEEDS_REVIEW" in html
     assert "paintRever" in html and "/para-ti" in html
+
+
+# ── ADR-033 Phase 3 — Adiar + contextual R + Tratar agora ────────────────────
+
+def test_api_thread_snooze_defers_and_clear_restores(tmp_path):
+    cl, ws = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.post("/api/thread/snooze", json={}).status_code == 400
+    until = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    assert cl.post("/api/thread/snooze",
+                   json={"thread_root": "mid:t1", "until": until}).status_code == 200
+    assert "mid:t1" not in [x["thread_root"] for x in cl.get("/api/fila").json()["rows"]]
+    assert ws.thread_snoozes()["mid:t1"]["until_ts"] == until      # precious, survives re-runs
+    assert cl.post("/api/thread/snooze",
+                   json={"thread_root": "mid:t1", "until": None}).status_code == 200
+    assert "mid:t1" in [x["thread_root"] for x in cl.get("/api/fila").json()["rows"]]
+
+
+def test_api_reply_draft_maps_purpose_to_composer(tmp_path):
+    """Contextual R (design §10, shipped mapping): a JobSpec thread points at the tested /api/reply;
+    OUTBOUND_INVOICE gets the payment composer; everything else gets follow_up. Deterministic — no
+    LLM in this route; never sends."""
+    crm = _crm_with([
+        (_env("t1", 3), _verdict()),                                          # plain client ask
+        (_env("t2", 4, frm="fat@acme.pt", subject="Fatura 123"),
+         _verdict(purpose="OUTBOUND_INVOICE")),
+    ])
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": ["Diogo"]}, workspace=ws, jobspecs={"t1": {}},       # t1 has a JobSpec (keyed by message_id, not thread_root)
+                     prepared=([], [], {}), reply_pb="", crm_store=crm)
+    cl = TestClient(app)
+    assert cl.post("/api/thread/reply-draft", json={}).status_code == 400
+    assert cl.post("/api/thread/reply-draft",
+                   json={"thread_root": "mid:nope"}).status_code == 404
+    d1 = cl.post("/api/thread/reply-draft", json={"thread_root": "mid:t1"}).json()
+    assert d1["kind"] == "jobspec_ask" and d1["redirect"] == "/api/reply"
+    d2 = cl.post("/api/thread/reply-draft", json={"thread_root": "mid:t2"}).json()
+    assert d2["kind"] == "payment" and d2["draft"]                 # deterministic template body
+
+
+def test_fila_snooze_verb_menu_and_wake_copy(tmp_path):
+    """H adiar: quick choices, the wake-on-reply promise in the copy, optimistic + undoable."""
+    html = _p0_page(tmp_path)
+    assert 'data-act="snooze"' in html and "function snoozeMenu(" in html
+    assert "amanhã 09:00" in html and "2ª feira 09:00" in html
+    assert "acorda antes se responderem" in html                   # the never-lose-a-client promise
+    assert "'/api/thread/snooze'" in html
+    assert "e.key==='h'||e.key==='H'" in html
+
+
+def test_fila_contextual_r_wiring(tmp_path):
+    html = _p0_page(tmp_path)
+    assert 'data-act="reply"' in html and "function contextualReply(" in html
+    assert "'/api/thread/reply-draft'" in html
+    assert "d.redirect" in html                                    # JobSpec path stays on /api/reply
+    assert "e.key==='r'||e.key==='R'" in html
+
+
+def test_fila_tratar_agora_mode(tmp_path):
+    """F walks the SAME filtered, risk-ordered queue one decision at a time — progress «N de M»,
+    → skips free, Esc exits. No second queue, no separate order (ADR-033 rejected any)."""
+    html = _p0_page(tmp_path)
+    assert 'id="_foco"' in html and "Tratar agora" in html
+    assert "e.key==='f'||e.key==='F'" in html
+    assert "ArrowRight" in html

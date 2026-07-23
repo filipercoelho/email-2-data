@@ -325,7 +325,7 @@ def test_v6_to_v7_adds_inference_columns_and_roundtrips(tmp_path):
     ws = Workspace(db).connect()
     conn = ws._conn
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION   # ends at CURRENT (v9+)
     assert {"extracted_fields_json", "confidence"} <= _cols(conn, "captures")
 
     cap = CaptureStore(conn)
@@ -349,7 +349,7 @@ def test_v7_to_v8_adds_dismissals_and_names_tables_and_roundtrips(tmp_path):
     _make_v6_db(db)   # any pre-v8 DB exercises the same additive path
 
     ws = Workspace(db).connect()
-    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION   # ends at CURRENT (v9+)
 
     # dismissals: persist → survive a reconnect → undo removes
     ws.dismiss_para_ti("propor_projeto|t-root-1", kind="propor_projeto")
@@ -424,4 +424,31 @@ def test_worker_open_accepts_a_current_db_without_migrating(tmp_path):
     Workspace(db).connect().close()              # the webapp/CLI migrates to v5
     ws = Workspace(db).connect(migrate=False)     # the worker opens a current DB cleanly
     assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    ws.close()
+
+
+def test_v9_thread_snooze_table_and_roundtrip(tmp_path):
+    """v9 (ADR-033 P3): the Adiar store — a NEW table (delivered by SCHEMA, no ALTER), so a fresh
+    DB and an upgraded v8 DB both end at user_version 9 with a working set/clear/read roundtrip on
+    the precious, never-rebuilt store."""
+    import sqlite3
+    from email2data.workspace import SCHEMA_VERSION, Workspace
+    assert SCHEMA_VERSION >= 9
+    # simulate an existing pre-v9 DB (older stamp, no snooze table)
+    db = tmp_path / "w.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 8")
+    conn.execute("CREATE TABLE decisions (message_id TEXT, field TEXT, value TEXT, ts TEXT, "
+                 "PRIMARY KEY (message_id, field))")
+    conn.commit()
+    conn.close()
+    ws = Workspace(db).connect()
+    assert ws._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    ws.set_thread_snooze("t1", "2026-08-01T09:00:00+00:00")
+    got = ws.thread_snoozes()["t1"]
+    assert got["until_ts"] == "2026-08-01T09:00:00+00:00" and got["created_ts"]
+    ws.set_thread_snooze("t1", "2026-08-02T09:00:00+00:00")        # idempotent upsert
+    assert ws.thread_snoozes()["t1"]["until_ts"] == "2026-08-02T09:00:00+00:00"
+    ws.clear_thread_snooze("t1")
+    assert ws.thread_snoozes() == {}
     ws.close()

@@ -1624,6 +1624,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         rows = cockpit.build_fila(ints, ws.thread_states(),
                                   now=now,
                                   reclassified=ws.get_reclassifications(),
+                                  snoozes=ws.thread_snoozes(),
                                   include_resolved=include_resolved)
         # Annotate each thread with the project it already belongs to (if any), so the Fila can show
         # "already in project X" and offer open-vs-create — preventing duplicate projects from one lead.
@@ -1843,6 +1844,46 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         ws.set_thread_owners(root, owners)
         return JSONResponse({"ok": True, "thread_root": root,
                              "owner": owners[0] if owners else "", "owners": owners})
+
+    @app.post("/api/thread/snooze")
+    async def thread_snooze(request: Request):
+        """Adiar (ADR-033 P3): defer a thread to ``until`` (UTC ISO); ``until: null`` clears (the
+        undo path). The wake rule — date OR new inbound, whichever first — lives in build_fila."""
+        body = await request.json()
+        root = str(body.get("thread_root", "")).strip()
+        if not root:
+            return JSONResponse({"error": "thread_root required"}, status_code=400)
+        until = body.get("until")
+        if until:
+            ws.set_thread_snooze(root, str(until))
+        else:
+            ws.clear_thread_snooze(root)
+        return JSONResponse({"ok": True, "thread_root": root, "until": until or None})
+
+    @app.post("/api/thread/reply-draft")
+    async def thread_reply_draft(request: Request):
+        """Contextual R (ADR-033 §10, shipped mapping): route the queue's reply intent to the right
+        composer. Deterministic — no LLM in this route, and it NEVER sends. A JobSpec thread points
+        at the tested /api/reply (the honest-conditional ask draft keeps its own route); an
+        OUTBOUND_INVOICE gets the ADR-031 payment template; everything else gets follow_up. The
+        project-aware ask/quote variants stay on the Projetos composer where their inputs live."""
+        body = await request.json()
+        root = str(body.get("thread_root", "")).strip()
+        if not root:
+            return JSONResponse({"error": "thread_root required"}, status_code=400)
+        row = next((x for x in _fila_rows(include_resolved=True)
+                    if x.get("thread_root") == root), None)
+        if row is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if row.get("can_draft"):
+            return JSONResponse({"kind": "jobspec_ask", "redirect": "/api/reply"})
+        kind = "payment" if (row.get("purpose") or "") == "OUTBOUND_INVOICE" else "follow_up"
+        tmpl = clientdraft.load_purpose_template(kind, _config_dir())
+        p = clientdraft.PURPOSES_BY_ID[kind]
+        draft = (clientdraft.build_purpose_draft(kind, tmpl, questions=[])
+                 if p.input_kind == "questions"
+                 else clientdraft.build_purpose_draft(kind, tmpl, content=""))
+        return JSONResponse({"kind": kind, "draft": draft})
 
     # -- in-app owner roster (v4): effective roster = settings.team ∪ ws.roster() ------------------
     @app.get("/api/roster")

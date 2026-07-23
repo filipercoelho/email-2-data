@@ -353,6 +353,7 @@ def build_fila(interactions: Iterable[dict[str, Any]],
                thread_states: Optional[dict[str, dict[str, Any]]] = None,
                *, now: Optional[datetime] = None, include_resolved: bool = False,
                reclassified: Optional[dict[str, dict[str, str]]] = None,
+               snoozes: Optional[dict[str, dict[str, str]]] = None,
                order: str = ORDER_RISK) -> list[dict[str, Any]]:
     """Top-level: fold → reclassification overlay → clock → sort. Returns Fila rows for the UI/JSON.
 
@@ -362,6 +363,11 @@ def build_fila(interactions: Iterable[dict[str, Any]],
     use the human value, mark the row ``committed``, and — since the override happens BEFORE the clock —
     a correction can move a thread INTO or OUT of the active queue (e.g. OTHER→CLIENT, or CLIENT→OTHER).
     ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them (shrink-to-zero).
+    ``snoozes``: ``{thread_root: {"until_ts", "created_ts"}}`` (workspace v9, ADR-033 P3). A snoozed
+    thread leaves the ACTIVE queue while it sleeps — but it wakes when ``until_ts`` passes OR when a
+    NEW INBOUND arrives after ``created_ts``, whichever first: a thread hidden by the human can never
+    be lost to the counterparty's move (non-negotiable #2). The resolved view keeps snoozed rows,
+    stamped with ``snoozed_until``, so a deferral stays reviewable (ADR-028).
     ``order``: ``"risk"`` (default since ADR-033 — the response-risk tuple) or ``"recent"`` (newest
     thread activity first). Unknown values raise instead of silently falling back, so a typo can never
     quietly reorder the queue. Each row also carries ``order_keys`` = both keys, for a client-side
@@ -394,6 +400,15 @@ def build_fila(interactions: Iterable[dict[str, Any]],
         clock = thread_clock(s, now, handled=bool(st.get("handled")), handled_ts=st.get("handled_ts"))
         if not include_resolved and clock["state"] in (HANDLED, INTERNAL):
             continue
+        # Adiar (v9): asleep only while BOTH wake conditions are unmet — see the docstring.
+        sn = (snoozes or {}).get(s.thread_root)
+        if sn:
+            until = _parse_dt(sn.get("until_ts"))
+            created = _parse_dt(sn.get("created_ts"))
+            woke_time = until is None or until <= now
+            woke_inbound = bool(s.last_inbound_date and created and s.last_inbound_date > created)
+            if not (woke_time or woke_inbound) and not include_resolved:
+                continue
         risk_k, recent_k = list(sort_key(clock, s.counterparty)), recency_key(s)
         rows.append({
             "thread_root": s.thread_root,
@@ -410,6 +425,8 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "clock": clock,
             # «Ritmo» (ADR-033 §8): the thread's own cadence vs its current silence.
             "momentum": momentum(s.dates, now),
+            # Present only on snoozed rows (the resolved/«Adiadas» view shows when it wakes).
+            **({"snoozed_until": sn.get("until_ts")} if sn else {}),
             "trust": {"confidence": round(s.confidence, 2), "decided_by": s.decided_by,
                       "reason": s.reason, "committed": committed},
             # Last activity in the thread (any direction) — what the "recent" order sorts on, and the

@@ -172,6 +172,15 @@ CREATE TABLE IF NOT EXISTS para_ti_dismissals (
     kind     TEXT,               -- rever_classificacao | propor_projeto | confirmar_identidade (v8)
     ts       TEXT                -- UTC ISO when dismissed (v8)
 );
+-- Adiar / snooze (v9, ADR-033 P3): a thread the human deferred. PRECIOUS and hand-set. The row is
+-- only half the rule — cockpit.build_fila wakes a snoozed thread when until_ts passes OR when a NEW
+-- INBOUND arrives after created_ts (never silently bin a client: a hidden thread can never be lost
+-- to the counterparty's move). Deleting the row un-defers (the undo path).
+CREATE TABLE IF NOT EXISTS thread_snooze (
+    thread_root TEXT PRIMARY KEY,
+    until_ts    TEXT NOT NULL,   -- UTC ISO wake time (v9)
+    created_ts  TEXT             -- when it was snoozed — the wake-on-inbound reference (v9)
+);
 -- Human display names for counterparty clusters (v8): the clustering keys (nif:274023911,
 -- free:someone@gmail.com) are machine identity, not something to show a person managing clients.
 -- A row here overrides the derived display_name everywhere the cluster is rendered. Precious and
@@ -198,7 +207,9 @@ CREATE TABLE IF NOT EXISTS counterparty_names (
 # v8 (2026-07-20): para_ti_dismissals (persisted "Ignorar" on decision cards — was a JS Set that lost
 # every dismissal on reload) + counterparty_names (human display-name override for cluster keys).
 # Both brand-new TABLES, delivered by SCHEMA's CREATE IF NOT EXISTS with no ALTER needed.
-SCHEMA_VERSION = 8
+# v9 (2026-07-23): thread_snooze — the Fila's Adiar store (ADR-033 P3). A brand-new TABLE, delivered
+# by SCHEMA with no ALTER; the wake-on-date-OR-new-inbound rule lives in cockpit.build_fila.
+SCHEMA_VERSION = 9
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -332,6 +343,7 @@ class Workspace:
             self._add_column("captures", "confidence", "REAL")
         # v8 (para_ti_dismissals + counterparty_names) adds only NEW TABLES — delivered by SCHEMA
         # above (CREATE IF NOT EXISTS runs before _migrate), so there is no ALTER to do here.
+        # v9 (thread_snooze) likewise: a new TABLE only, delivered by SCHEMA — no ALTER.
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 
@@ -472,6 +484,38 @@ class Workspace:
                          "handled": bool(h["handled"]) if h else False,
                          "handled_ts": h["handled_ts"] if h else None}
         return out
+
+    # -- Adiar / snooze (v9, ADR-033 P3) ----------------------------------------------------------
+
+    def set_thread_snooze(self, thread_root: str, until_ts: str, ts: str = "") -> None:
+        """Defer a thread until ``until_ts``. Idempotent upsert; ``created_ts`` restarts on each
+        re-snooze so the wake-on-inbound reference is the LATEST human decision."""
+        assert self._conn is not None, "call connect() first"
+        root = (thread_root or "").strip()
+        if not root or not until_ts:
+            return
+        self._conn.execute(
+            "INSERT INTO thread_snooze(thread_root, until_ts, created_ts) VALUES (?,?,?) "
+            "ON CONFLICT(thread_root) DO UPDATE SET until_ts=excluded.until_ts, "
+            "created_ts=excluded.created_ts",
+            (root, until_ts, ts or self._now_iso()),
+        )
+        self._conn.commit()
+
+    def clear_thread_snooze(self, thread_root: str) -> None:
+        """Un-defer (the undo path) — the thread rejoins the active queue on the next build."""
+        assert self._conn is not None, "call connect() first"
+        self._conn.execute("DELETE FROM thread_snooze WHERE thread_root=?",
+                           ((thread_root or "").strip(),))
+        self._conn.commit()
+
+    def thread_snoozes(self) -> dict[str, dict[str, str]]:
+        """``{thread_root: {until_ts, created_ts}}`` — consumed by ``cockpit.build_fila``."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT thread_root, until_ts, created_ts FROM thread_snooze").fetchall()
+        return {r["thread_root"]: {"until_ts": r["until_ts"], "created_ts": r["created_ts"] or ""}
+                for r in rows}
 
     # -- in-app owner roster (v4: "define new owners" without editing settings.json) --------------
 

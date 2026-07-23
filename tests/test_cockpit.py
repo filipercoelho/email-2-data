@@ -402,3 +402,30 @@ def test_money_value_parses_pt_formats():
     assert money_value("12,5") == 12.5
     assert money_value("sem valor") is None
     assert money_value("") is None and money_value(None) is None
+
+
+# ── ADR-033 P3 — Adiar (snooze) wake rules: never silently bin a client ─────
+
+def test_snoozed_thread_sleeps_until_its_time():
+    rows = [_row("t1", "m1", ago(6))]
+    sn = {"t1": {"until_ts": ago(-24), "created_ts": ago(2)}}      # wakes in 24h
+    assert build_fila(rows, snoozes=sn, now=NOW) == []             # asleep → out of the active queue
+    [r] = build_fila(rows, snoozes=sn, now=NOW, include_resolved=True)
+    assert r["snoozed_until"] == ago(-24)                          # the ledger shows WHEN it wakes
+
+
+def test_snooze_wakes_on_time():
+    sn = {"t1": {"until_ts": ago(1), "created_ts": ago(48)}}       # wake time passed 1h ago
+    [r] = build_fila([_row("t1", "m1", ago(6))], snoozes=sn, now=NOW)
+    assert r["clock"]["state"] == WE_OWE                           # back in the queue
+
+
+def test_snooze_wakes_on_new_inbound_never_silently_bins():
+    """THE load-bearing rule (non-negotiable #2): a thread hidden by the human can never be lost to
+    the counterparty's move — a new inbound after the snooze was created wakes it immediately,
+    days before its timer."""
+    rows = [_row("t1", "m1", ago(6)),
+            _row("t1", "m2", ago(1))]                              # client wrote again 1h ago
+    sn = {"t1": {"until_ts": ago(-72), "created_ts": ago(3)}}      # snoozed 3h ago, until +3 days
+    [r] = build_fila(rows, snoozes=sn, now=NOW)
+    assert r["clock"]["state"] == WE_OWE                           # awake, not waiting for the timer
