@@ -23,14 +23,14 @@ let _prevRisk = null, urlThread = null;
 let mode = 'ativos', resolvedRows = null;
 
 /* ── queue ordering ─────────────────────────────────────────────────────
-   'recent' (default) = newest thread activity first — what you want when you open the queue.
-   'risk'   = the response-risk order (who owes a reply, and for how long), the cockpit's
-   opinionated view — still one click away, never deleted.
-   The server ships rows already in 'recent' order AND stamps BOTH keys on every row
+   'risk' (default, ADR-033) = the response-risk order (who owes a reply, and for how long) — the
+   highest-stakes thread is on top at load, so the next move is never a question.
+   'recent' = newest thread activity first, the mailbox-shaped view — still one click away.
+   The server ships rows already in 'risk' order AND stamps BOTH keys on every row
    (r.order_keys, from cockpit.build_fila), so flipping here is a local re-sort — the risk tuple
    is never re-derived in JS and so can never drift from the Python definition. */
 const ORDER_RECENT='recent', ORDER_RISK='risk';
-let order = ORDER_RECENT;
+let order = ORDER_RISK;
 function cmpOrderKey(a,b){
   const x=Array.isArray(a)?a:[a], y=Array.isArray(b)?b:[b];
   for(let i=0;i<Math.max(x.length,y.length);i++){
@@ -101,7 +101,7 @@ function syncURL(){
   if(filters.hasAttachment) p.set('attachment','1');
   if(filters.minAgeDays!=null) p.set('minDays', String(filters.minAgeDays));
   if(filters.search) p.set('search', filters.search);
-  if(order!==ORDER_RECENT) p.set('order', order);   /* the default stays out of the address bar */
+  if(order!==ORDER_RISK) p.set('order', order);   /* the default stays out of the address bar */
   if(urlThread) p.set('thread', urlThread);
   const base = location.pathname.split('?')[0];
   const qs = p.toString(), url = base + (qs ? ('?'+qs) : '');
@@ -124,14 +124,41 @@ const G_LABEL={0:'Precisam de resposta', 1:'À espera deles', 2:'Internos'};
 const G_HINT ={0:'a bola está do nosso lado', 1:'já respondemos — a bola está do lado deles', 2:'sem relógio de resposta'};
 const G_CLASS={0:'owe', 1:'wait', 2:'other'};
 
-/* ── view with multi-filter ─────────────────────────────────────────── */
+/* ── group collapse (ADR-033 P0) ────────────────────────────────────────
+   «À espera deles» is a status report, not a to-do list — it STARTS collapsed to a counted header,
+   and any group can be folded. The choice persists (localStorage). Collapsed rows leave view()
+   entirely, so J/K, focus and data-i can never land on an invisible row. */
+const DEFAULT_COLLAPSED={[G_WAIT]:true};
+let collapsed=(function(){
+  try{const s=localStorage.getItem('fila-collapsed'); return s?JSON.parse(s):{...DEFAULT_COLLAPSED};}
+  catch(_e){return {...DEFAULT_COLLAPSED};}
+})();
+function isCollapsed(g){ return mode!=='tratados' && !!collapsed[g]; }
+function toggleGroup(g){
+  collapsed[g]=!collapsed[g];
+  try{localStorage.setItem('fila-collapsed',JSON.stringify(collapsed));}catch(_e){}
+  focus=0; render();
+}
+
+/* ── view with multi-filter ─────────────────────────────────────────────
+   viewAll() = filters + group partition (the full active set — headline counts + group counts read
+   this). view() = viewAll() minus collapsed groups (what is actually rendered and keyboard-walked). */
 function view(){
+  const va=viewAll();
+  if(mode==='tratados') return va;
+  return va.filter(r=>!isCollapsed(groupOf(r)));
+}
+function viewAll(){
   const src = mode==='tratados' ? (resolvedRows||[]) : rows;
   const out = src.filter(r=>{
     if('counterparty' in filters && (r.counterparty||'')!==filters.counterparty) return false;
     if('band' in filters){
-      const b=(r.clock||{}).band;
-      if(filters.band==='risk'){ if(b!=='red'&&b!=='amber') return false; }
+      const c=r.clock||{}, b=c.band;
+      /* Pseudo-bands carry OBLIGATION, not just colour (ADR-033): 'risk' = the reply debt we owe
+         (WE_OWE red|amber); 'chase' = suppliers/clients silent past the 72h chase threshold
+         (AWAITING amber — _band() only ambers AWAITING at the chase cutoff). */
+      if(filters.band==='risk'){ if(!(c.state==='WE_OWE'&&(b==='red'||b==='amber'))) return false; }
+      else if(filters.band==='chase'){ if(!(c.state==='AWAITING'&&b==='amber')) return false; }
       else if(b!==filters.band) return false;
     }
     if('purpose' in filters && (r.purpose||'')!==filters.purpose) return false;
@@ -157,13 +184,16 @@ function view(){
   return out.sort((a,b)=>groupOf(a)-groupOf(b));
 }
 
-function riskCount(){ return view().filter(r=>['red','amber'].includes((r.clock||{}).band)).length; }
+/* Honest headline counts (ADR-033): only what actually demands the user. The old chip counted every
+   red+amber row — including the passive AWAITING pile — and inflated the workload. */
+function respondCount(list){ return list.filter(r=>{const c=r.clock||{};return c.state==='WE_OWE'&&(c.band==='red'||c.band==='amber');}).length; }
+function chaseCount(list){ return list.filter(r=>{const c=r.clock||{};return c.state==='AWAITING'&&c.band==='amber';}).length; }
 
 /* ── filter bar ─────────────────────────────────────────────────────── */
 const _FLABEL = {
   counterparty: v=>'contraparte: '+v,
   purpose: v=>'tipo: '+v.toLowerCase().replace(/_/g,' '),
-  band: v=>({'red':'urgente','amber':'a atrasar','green':'recente','risk':'em risco'}[v]||v),
+  band: v=>({'red':'urgente','amber':'a atrasar','green':'recente','risk':'a responder','chase':'a cobrar'}[v]||v),
   owner: v=>v?'dono: @'+v:'sem dono',
   domain: v=>'domínio: '+v,
   hasAttachment: ()=>'com anexo',
@@ -183,15 +213,24 @@ function renderFbar(){
 
 /* ── render ────────────────────────────────────────────────────────── */
 function render(){
-  const v=view(), n=riskCount();
+  const v=view(), va=(mode==='tratados')?v:viewAll();
+  const n=respondCount(va), nc=chaseCount(va);
   const risk=$('#_risk');
   if(risk){
     risk.classList.toggle('hidden',mode==='tratados');   /* the ledger has no response risk */
-    risk.textContent=v.length?S.risk(n):'0 em risco';
+    risk.textContent=n+' a responder';
     risk.classList.toggle('clear',n===0);
     risk.classList.toggle('filtering',filters.band==='risk');
     if(_prevRisk!==null&&_prevRisk!==n&&!reduceMotion()){risk.classList.remove('pulse');void risk.offsetWidth;risk.classList.add('pulse');}
     _prevRisk=n;
+  }
+  /* The chase half of the honest headline: suppliers/clients silent past 72h. Hidden at zero —
+     a chip that always reads «0 a cobrar» would be noise, not signal. */
+  const cob=$('#_cobrar');
+  if(cob){
+    cob.classList.toggle('hidden',mode==='tratados'||(nc===0&&filters.band!=='chase'));
+    cob.textContent=nc+' a cobrar';
+    cob.classList.toggle('filtering',filters.band==='chase');
   }
   const cnt=$('#_count'); if(cnt) cnt.textContent=v.length?S.threads(v.length):S.semDados;
   renderFbar();
@@ -204,38 +243,47 @@ function render(){
         ?'Nada tratado ainda<span class="s">as decisões que marcares como tratadas ficam registadas aqui</span>'
         :(noRes
           ?'Sem resultados<span class="s">nenhuma thread corresponde aos filtros activos</span>'
-          :'✓ Tudo tratado<span class="s">nada está a cair · 0 em risco</span>');
+          :'✓ Tudo tratado<span class="s">nada está a cair · 0 a responder</span>');
     }
   }
   announce(mode==='tratados'?(v.length+' tratados'):(v.length?S.threads(v.length)+' por tratar':'Tudo tratado'));
   if(focus>=v.length) focus=Math.max(0,v.length-1);
 
-  /* Section sizes, precomputed so a header can carry its own count. */
-  const gCount={}; if(mode!=='tratados') for(const r of v){const g=groupOf(r); gCount[g]=(gCount[g]||0)+1;}
-  let lastG=null;
+  /* Section sizes from the UN-collapsed set (va), so a folded header still carries its true count. */
+  const gCount={}; if(mode!=='tratados') for(const r of va){const g=groupOf(r); gCount[g]=(gCount[g]||0)+1;}
+  let lastG=null, vi=0;
 
   const list=$('#_list');
-  list.innerHTML=v.map((r,i)=>{
+  list.innerHTML=va.map(r=>{
     const c=r.clock||{},tr=r.trust||{};
-    /* Header rides in the SAME map as the rows (not a separate pass) so `i` stays the index into
-       view() — every consumer (data-i lookups, focus, j/k, the menu anchor) keeps working unchanged.
+    /* Headers ride in the SAME map as the rows. The map walks va (all groups, so a collapsed group
+       still emits its counted header) while `vi` indexes into view() — collapsed rows return only
+       their header, so data-i / focus / j/k keep matching exactly what is rendered.
        .ghead is not .row, so closest('.row') never matches it and it is skipped by keyboard nav. */
     let head='';
     if(mode!=='tratados'){
       const g=groupOf(r);
       if(g!==lastG){
         lastG=g;
-        head='<div class="ghead '+G_CLASS[g]+'" role="presentation">'
+        head='<div class="ghead '+G_CLASS[g]+'" data-g="'+g+'" role="button" '
+          +'title="'+(isCollapsed(g)?'expandir secção':'encolher secção')+'">'
+          +'<span class="gchev" aria-hidden="true">'+(isCollapsed(g)?'▸':'▾')+'</span>'
           +'<span class="gh-t">'+esc(G_LABEL[g]||'')+'</span>'
           +'<span class="gh-n">'+(gCount[g]||0)+'</span>'
           +'<span class="gh-s">'+esc(G_HINT[g]||'')+'</span></div>';
       }
+      if(isCollapsed(g)) return head;   /* folded: the counted header stands in for its rows */
     }
+    const i=vi++;
     const owner=ownerLabel(r);
     const decided=decidedShort(tr.decided_by);
     const conf=tr.confidence?(' · '+Math.round(tr.confidence*100)+'%'):'';
+    /* Off focus, trust collapses to a 2px dot — «Gemini · 95%» repeated on ~every row carries zero
+       bits and camouflages the clock (cockpit-design §9). The full chip returns on the focused row. */
     const trust=decided
-      ?'<button class="trust '+(tr.committed?'committed':'proposed')+'" data-act="why" aria-label="ver porquê">'+esc(decided)+conf+'</button>'
+      ?(i===focus
+        ?'<button class="trust '+(tr.committed?'committed':'proposed')+'" data-act="why" aria-label="ver porquê">'+esc(decided)+conf+'</button>'
+        :'<span class="tdot '+(tr.committed?'committed':'proposed')+'" title="'+esc(decided)+conf+'"></span>')
       :'';
     // PT-labelled, clickable badges: the counterparty pill and the purpose chip each open a picker
     // to CORRECT the LLM's verdict from the Fila (was: raw enum text, no way to fix it here).
@@ -260,7 +308,11 @@ function render(){
       +'<span class="clock '+esc(c.band||'none')+((c.band==='red'&&(c.age_hours||0)>=72)?' crit':'')
       +(groupOf(r)===G_WAIT?' wait':'')
       +'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
-      +'<button class="owner'+((r.owners&&r.owners.length)?'':' empty')+'" data-act="owner" aria-label="atribuir donos">'+owner+'</button>'
+      /* «sem dono» ×112 said nothing (0 threads owned): the empty chip renders only on the focused
+         row; owned rows always show their owner. A is unaffected — it acts on the focused row. */
+      +(((r.owners&&r.owners.length)||i===focus)
+        ?'<button class="owner'+((r.owners&&r.owners.length)?'':' empty')+'" data-act="owner" aria-label="atribuir donos">'+owner+'</button>'
+        :'')
       +'<div class="acts"><button data-act="handled" aria-label="'+(mode==='tratados'?'reabrir':'marcar tratado')+'" title="'+(mode==='tratados'?'reabrir — volta à fila (E)':'tratado (E)')+'">'+(mode==='tratados'?'↺':'✓')+'</button>'
       +'<button data-act="owner" aria-label="atribuir dono" title="dono (A)">@</button></div></div>';
   }).join('');
@@ -496,6 +548,18 @@ async function makeProject(i){
 /* ── lens keyboard handler ──────────────────────────────────────────── */
 function onKey(e){
   const v=view(); if(!v.length) return;
+  /* Shift+J/K jumps between section starts — reaching «À espera deles» used to cost ~5 screens of
+     scrolling. Wraps around; in the flat Tratados ledger it degenerates to jump-to-top (harmless). */
+  if(e.shiftKey&&(e.key==='J'||e.key==='K')){
+    const starts=[]; let lg=null;
+    v.forEach((r,i)=>{const g=groupOf(r); if(g!==lg){lg=g; starts.push(i);}});
+    if(starts.length){
+      if(e.key==='J'){const nx=starts.find(s=>s>focus); focus=(nx===undefined)?starts[0]:nx;}
+      else{const pv=starts.slice().reverse().find(s=>s<focus); focus=(pv===undefined)?starts[starts.length-1]:pv;}
+      render(); const el=document.querySelector('.row.on'); if(el)el.scrollIntoView({block:'nearest'});
+    }
+    e.preventDefault(); return;
+  }
   if(e.key==='j'||e.key==='ArrowDown'){focus=Math.min(v.length-1,focus+1);render();const r=document.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'});e.preventDefault();}
   else if(e.key==='k'||e.key==='ArrowUp'){focus=Math.max(0,focus-1);render();const r=document.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'});e.preventDefault();}
   else if(e.key==='e'||e.key==='E')dispatch('handled',focus);
@@ -503,6 +567,31 @@ function onKey(e){
   else if(e.key==='Enter'||e.key==='o'||e.key==='O'){dispatch('thread',focus);e.preventDefault();}
 }
 function onEsc(){ if(hasFilters()) clearFilters(); }
+
+/* `/` focuses the visible search box (the natural gesture) — the shell falls back to the palette on
+   lenses that define no onSlash. ⌘K keeps the palette here too. */
+function onSlash(){ const si=$('#_search'); if(si){ si.focus(); si.select(); } }
+
+/* ── freshness stamp (ADR-033 P0) ───────────────────────────────────────
+   The clocks' honesty depends on sync recency: say how old the synced mail is, and turn amber when
+   ingestion has stalled (the poll works but nothing new is being read — ADR-023's failure case). */
+let _syncedAt=(typeof SYNCED_AT!=='undefined'&&SYNCED_AT)?SYNCED_AT:null;
+function _agoLabel(iso){
+  if(!iso) return '';
+  const secs=Math.max(0,(Date.now()-Date.parse(iso))/1000);
+  if(secs<90) return 'agora mesmo';
+  const mins=Math.round(secs/60);
+  if(mins<60) return 'há '+mins+' min';
+  const hrs=Math.round(mins/60);
+  return 'há '+hrs+(hrs===1?' hora':' horas');
+}
+function paintFreshness(){
+  const el=$('#_fresh'); if(!el) return;
+  if(!_syncedAt){ el.textContent=''; return; }
+  el.textContent='correio '+_agoLabel(_syncedAt);
+  el.classList.toggle('stale',(Date.now()-Date.parse(_syncedAt))/1000>45*60);
+}
+paintFreshness(); setInterval(paintFreshness,60000);
 
 /* ── palette items ──────────────────────────────────────────────────── */
 function paletteItems(q){
@@ -542,6 +631,9 @@ function paletteItems(q){
     if(rows.some(r=>(r.clock||{}).band===b))
       items.push({kind:'urgência',label:_blab[b]||b,run:()=>setFilter('band',b)});
   });
+  // The obligation pseudo-bands (the headline chips, reachable by keyboard too)
+  items.push({kind:'urgência',label:'a responder',sub:'devemos resposta, vermelho+laranja',run:()=>setFilter('band','risk')});
+  items.push({kind:'urgência',label:'a cobrar',sub:'à espera deles há 72h+',run:()=>setFilter('band','chase')});
 
   // Owner filters
   [...new Set(rows.map(r=>r.owner).filter(Boolean))].forEach(o=>
@@ -573,6 +665,9 @@ function paletteItems(q){
 
 /* ── list events ────────────────────────────────────────────────────── */
 $('#_list').addEventListener('click',e=>{
+  /* Collapsible section headers (ADR-033 P0). */
+  const gh=e.target.closest('.ghead');
+  if(gh&&gh.dataset.g!==undefined){ toggleGroup(parseInt(gh.dataset.g,10)); return; }
   const row=e.target.closest('.row'); if(!row) return;
   // quote/raw toggle: local show/hide, no re-render
   const qt=e.target.closest('.qtoggle');
@@ -586,7 +681,12 @@ $('#_list').addEventListener('click',e=>{
   const i=parseInt(row.dataset.i,10); focus=i;
   const act=e.target.closest('[data-act]');
   const inThread=act&&act.dataset.act==='thread'&&e.target.closest('.texp');
-  if(act&&!inThread){dispatch(act.dataset.act,i);e.stopPropagation();}else render();
+  if(act&&!inThread){dispatch(act.dataset.act,i);e.stopPropagation();}
+  /* The whole row is one target (ADR-033 P0): a background click — outside buttons and outside the
+     expanded thread — opens the conversation. A pointer that only focuses invites the click and
+     discards it (cockpit-design §9). */
+  else if(!e.target.closest('.texp')){dispatch('thread',i);}
+  else render();
 });
 $('#_menu').addEventListener('click',e=>{
   const mi=e.target.closest('.mi'); if(!mi) return;
@@ -630,9 +730,11 @@ if(_of) _of.addEventListener('change',e=>{
   setFilter('owner', v==='__all'?null:v);
 });
 
-/* the "em risco" chip is a FILTER, not a label — click toggles down to what is actually at risk */
+/* the headline chips are FILTERS, not labels — each half toggles down to what it counts */
 const _rk=$('#_risk');
 if(_rk) _rk.addEventListener('click',()=>setFilter('band',filters.band==='risk'?null:'risk'));
+const _cb=$('#_cobrar');
+if(_cb) _cb.addEventListener('click',()=>setFilter('band',filters.band==='chase'?null:'chase'));
 
 /* ativos ↔ tratados (the decided ledger) */
 const _tr=$('#_tratados');
@@ -651,13 +753,13 @@ function applyURLState(){
   const md=p.get('minDays'); if(md) filters.minAgeDays=parseFloat(md);
   const sv=p.get('search'); if(sv) filters.search=sv;
   const si=$('#_search'); if(si) si.value=filters.search||'';
-  /* Order: an explicit ?order= wins; otherwise the STORED preference (sticky) — so the person who
-     works by risk doesn't reopen on 'recent' every morning with the oldest debts at the bottom. */
+  /* Order: an explicit ?order= wins; otherwise the STORED preference (sticky); otherwise the
+     ADR-033 default (risk) — the oldest debts open on top, not at the bottom. */
   const stored=(function(){try{return localStorage.getItem('fila-order');}catch(_e){return null;}})();
   const urlOrder=p.get('order');
   order = urlOrder===ORDER_RISK ? ORDER_RISK
         : urlOrder===ORDER_RECENT ? ORDER_RECENT
-        : (stored===ORDER_RISK ? ORDER_RISK : ORDER_RECENT);
+        : (stored===ORDER_RECENT ? ORDER_RECENT : ORDER_RISK);
   const so=$('#_order'); if(so) so.value=order;
   renderOwnerFilter();
   sortRows();
@@ -668,6 +770,11 @@ function applyURLState(){
   render();
   const tgt = open || legacyFocus;
   if(tgt){
+    /* A deep-link may point into a collapsed group (e.g. an AWAITING thread linked from a
+       contraparte timeline) — unfold that group in memory (not persisted: the link asked to see
+       one thread, not to change the standing preference). */
+    const hit = viewAll().find(r => r.thread_root === tgt);
+    if(hit && isCollapsed(groupOf(hit))){ collapsed[groupOf(hit)]=false; render(); }
     const i = view().findIndex(r => r.thread_root === tgt);
     if(i>=0){ focus=i;
       if(open) toggleThread(i);                 // expand it (syncURL is a no-op — URL already matches)
@@ -693,13 +800,15 @@ applyURLState();
 _BODY_HTML = """
 <div class="wrap">
   <div class="bar">
-    <button id="_risk" class="risk" aria-live="polite" title="mostrar só o que está em risco (clica para filtrar)"
+    <button id="_risk" class="risk" aria-live="polite" title="devemos resposta, vermelho+laranja (clica para filtrar)"
       style="font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;border-radius:20px;padding:3px 12px;border:1px solid"></button>
+    <button id="_cobrar" class="hidden" title="à espera deles há 72h+ — candidatas a cobrança (clica para filtrar)"></button>
     <span id="_count"></span>
+    <span id="_fresh" class="fresh" title="idade do correio sincronizado"></span>
     <input id="_search" type="text" placeholder="filtrar…" autocomplete="off" aria-label="Filtrar threads"/>
     <select id="_order" aria-label="Ordenar a fila" title="Ordenar a fila">
-      <option value="recent">Mais recentes</option>
       <option value="risk">Risco de resposta</option>
+      <option value="recent">Mais recentes</option>
     </select>
     <select id="_ownerf" aria-label="Filtrar por dono" title="Filtrar por dono">
       <option value="__all">dono: todos</option>
@@ -741,8 +850,25 @@ _EXTRA_CSS = """
   .ghead.other{color:var(--ext)}
   .ghead.other .gh-n{background:var(--bd2);color:var(--ext)}
   @media (max-width:820px){ .ghead .gh-s{display:none} }
+  /* Collapsible headers (ADR-033 P0): the chevron is the affordance, the count keeps working folded. */
+  .ghead{cursor:pointer}
+  .ghead:hover .gh-t{text-decoration:underline}
+  .gchev{font-size:10px;color:var(--mut2);width:11px;display:inline-block;flex:0 0 auto}
   /* Hollow dot = we already replied, the ball is theirs. Colour keeps meaning urgency. */
   .clock.wait .d{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+  /* Off-focus trust dot: dashed ring = proposto, solid = confirmado (the chip returns on focus). */
+  .tdot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;vertical-align:middle}
+  .tdot.proposed{border:1.5px dashed var(--mut2);background:transparent}
+  .tdot.committed{border:1.5px solid var(--int);background:var(--int)}
+  /* The chase chip — the amber half of the honest headline. */
+  #_cobrar{color:var(--amber);background:#fdf4e3;border:1px solid #f0dcb0;cursor:pointer;
+    font-family:inherit;font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;
+    border-radius:20px;padding:3px 12px}
+  #_cobrar:hover{filter:brightness(.96)}
+  #_cobrar.filtering{outline:2px solid var(--amber);outline-offset:1px}
+  /* Freshness stamp — amber once the mail behind the clocks is older than 45 min. */
+  .fresh{color:var(--mut2);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .fresh.stale{color:var(--amber);font-weight:700}
 
   /* Fila-specific (shared thread CSS lives in cockpit_ui) */
   .risk{color:var(--red);background:#fbeaea;border-color:#f3c9c9!important;cursor:pointer;font-family:inherit}
@@ -807,13 +933,15 @@ _EXTRA_CSS = """
 
 
 def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
-                    *, now_iso: str = "",
+                    *, now_iso: str = "", synced_at: str = "",
                     nav_counts: dict[str, int] | None = None) -> str:
     return cockpit_ui.page(
         "Fila",
         "fila",
         _BODY_HTML,
         embeds={"rows": rows, "team": list(team or []), "now": now_iso,
+                # Freshness (ADR-033 P0): when the mail behind the clocks was last synced.
+                "synced_at": synced_at,
                 "labels": _labels.fila_labels()},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,

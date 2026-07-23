@@ -578,14 +578,16 @@ def test_fila_timeline_reversal_is_idempotent_across_renders():
     assert "m1>m2>m3" in d["a"]                          # summary line still chronological
 
 
-def test_fila_page_offers_selectable_order_defaulting_to_most_recent(tmp_path):
-    """(b) The queue order is user-selectable and DEFAULTS to most-recent-first, with response risk —
-    the documented core of the cockpit — kept as the other option, and the choice carried in the URL."""
+def test_fila_page_offers_selectable_order_defaulting_to_risk(tmp_path):
+    """ADR-033: the queue order is user-selectable and DEFAULTS to response risk — the highest-stakes
+    thread is on top at load ('the next move is never a question'). `Mais recentes` stays one click
+    away, and the choice is still carried in the URL (the default stays out of the address bar)."""
     html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/").text
     assert 'id="_order"' in html
     assert 'value="recent">Mais recentes' in html            # pt-PT labels
-    assert 'value="risk">Risco de resposta' in html          # risk still reachable, not deleted
-    assert "let order = ORDER_RECENT" in html                # newest-first is the default
+    assert 'value="risk">Risco de resposta' in html          # both orders reachable
+    assert "let order = ORDER_RISK" in html                  # risk is the default
+    assert "order!==ORDER_RISK" in html                      # …and stays out of the URL
     assert "function setOrder(" in html and "function sortRows(" in html
     assert "p.set('order'" in html and "p.get('order')" in html    # shareable / survives refresh
     assert "(r2.order_keys||{})[order]" in html              # sorts on the server-supplied keys…
@@ -622,13 +624,13 @@ console.log(JSON.stringify({r1:r1,r2:r2,k1:k1,k2:k2,back:back}));
     assert d["back"] == d["r1"]                                    # the flip is reversible
 
 
-def test_api_fila_defaults_to_most_recent_first_and_ships_both_keys(tmp_path):
-    """End to end through the route the page actually loads: newest thread on top by default, and
-    every row carries both order keys so the lens can flip without a round-trip."""
+def test_api_fila_defaults_to_risk_first_and_ships_both_keys(tmp_path):
+    """End to end through the route the page actually loads (ADR-033): the oldest reply debt on top
+    by default, and every row carries both order keys so the lens can flip without a round-trip."""
     crm = _crm_with([(_env("t1", 30), _verdict()),
                      (_env("t2", 2, subject="Pedido novo"), _verdict())])
     rows = _client(tmp_path, crm)[0].get("/api/fila").json()["rows"]
-    assert [r["thread_root"] for r in rows] == ["mid:t2", "mid:t1"]
+    assert [r["thread_root"] for r in rows] == ["mid:t1", "mid:t2"]
     assert all(set(r["order_keys"]) == {"recent", "risk"} for r in rows)
     assert all(r["last_date"] for r in rows)
 
@@ -770,3 +772,98 @@ def test_fila_page_groups_queue_by_obligation(tmp_path):
     # obligation also encoded per-row: hollow dot for "waiting on them"
     assert "groupOf(r)===G_WAIT?' wait':''" in html
     assert ".clock.wait .d{background:transparent" in html
+
+
+# ── ADR-033 Phase 0 — «Mesa com Foco» quick relief ───────────────────────────
+
+def _p0_page(tmp_path):
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    return cl.get("/").text
+
+
+def test_fila_headline_counts_only_what_demands_us(tmp_path):
+    """The old chip counted every red+amber row — including the passive AWAITING pile — so «88 em
+    risco» inflated the workload. The headline now splits honestly: «a responder» = WE_OWE
+    red+amber; «a cobrar» = AWAITING past the chase threshold; each half click-filters."""
+    html = _p0_page(tmp_path)
+    assert "a responder" in html
+    assert 'id="_cobrar"' in html and "a cobrar" in html
+    assert "c.state==='WE_OWE'" in html          # respondCount predicate
+    assert "c.state==='AWAITING'" in html        # chaseCount predicate
+    # both chips filter via pseudo-band values, like the old risk chip did
+    assert "'chase'" in html
+    assert "0 a responder" in html               # the zero state stays honest too
+
+
+def test_fila_sections_collapse_and_awaiting_starts_collapsed(tmp_path):
+    """«À espera deles» is a status report, not a to-do list (ADR-029) — it must be collapsible to a
+    counted header, START collapsed, and remember the choice. Collapsed rows leave view() so J/K
+    never walks invisible rows."""
+    html = _p0_page(tmp_path)
+    assert "DEFAULT_COLLAPSED" in html and "[G_WAIT]:true" in html
+    assert "fila-collapsed" in html              # persisted choice
+    assert "function toggleGroup(" in html and 'data-g="' in html
+    assert "function viewAll(" in html           # counts come from the un-collapsed set
+    assert "isCollapsed(groupOf(r))" in html     # …and view() excludes collapsed groups
+    # the grouping contract of ADR-029 is untouched
+    assert "out.sort((a,b)=>groupOf(a)-groupOf(b))" in html
+
+
+def test_fila_trust_and_owner_chips_collapse_off_focus(tmp_path):
+    """«sem dono» ×112 and «Gemini · 95%» ×~100 said nothing (a repeated label is not signal —
+    cockpit-design §9). Off-focus rows carry a 2px trust dot and no owner chip; the focused row
+    keeps the full chips and every action."""
+    html = _p0_page(tmp_path)
+    assert 'class="tdot' in html                 # dot rendering exists
+    assert ".tdot.proposed" in html and ".tdot.committed" in html
+    # both suppressions are focus-conditional, not deletions
+    assert html.count("i===focus") >= 2
+
+
+def test_fila_freshness_stamp_present(tmp_path):
+    """The clocks demand trust they could not prove: the page now says how old the synced mail is
+    («correio há N min»), turning amber when ingestion stalls (ADR-023's failure case)."""
+    html = _p0_page(tmp_path)
+    assert "const SYNCED_AT" in html and 'id="_fresh"' in html
+    assert "function _agoLabel(" in html and "paintFreshness" in html
+    assert "45*60" in html                       # the stale threshold
+
+
+def test_build_fila_html_accepts_synced_at():
+    html = fila_page.build_fila_html([], [], now_iso="2026-07-23T10:00:00",
+                                     synced_at="2026-07-23T09:56:00+00:00")
+    assert "SYNCED_AT" in html and "2026-07-23T09:56:00+00:00" in html
+
+
+def test_slash_focuses_fila_search_via_shell_hook(tmp_path):
+    """`/` must focus the visible search box on the Fila (the natural gesture), while every other
+    lens keeps `/` = palette: the shell dispatches through an optional onSlash() hook."""
+    html = _p0_page(tmp_path)
+    assert "typeof onSlash==='function'" in html   # shell hook plumbing
+    assert "function onSlash()" in html            # the Fila override…
+    fn = html.split("function onSlash()")[1].split("\n")[0]
+    assert "_search" in fn                         # …focuses the search input
+
+
+def test_para_ti_keeps_palette_on_slash(tmp_path):
+    """The hook must not change other lenses: Para ti defines no onSlash, so `/` still opens the
+    palette there (the typeof check falls through)."""
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    html = cl.get("/para-ti").text
+    assert "typeof onSlash==='function'" in html
+    assert "function onSlash()" not in html
+
+
+def test_fila_shift_jk_jumps_sections(tmp_path):
+    """Reaching «À espera deles» cost ~5 screens of scrolling; Shift+J/K now jumps between group
+    headers directly."""
+    html = _p0_page(tmp_path)
+    assert "e.shiftKey" in html and "(e.key==='J'||e.key==='K')" in html
+
+
+def test_fila_row_background_click_opens_thread(tmp_path):
+    """A row is one big target: clicking anywhere on it (outside buttons and the expanded thread)
+    opens the conversation — a cursor:pointer that only focuses invites the click and discards it
+    (cockpit-design §9)."""
+    html = _p0_page(tmp_path)
+    assert "dispatch('thread',i)" in html

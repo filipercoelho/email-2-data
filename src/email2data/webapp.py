@@ -1721,6 +1721,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return HTMLResponse(fila_page.build_fila_html(
             frows, _roster(),
             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            # The freshness stamp (ADR-033 P0): same source as /api/para-ti's synced_at, so the
+            # hero page can say how old the mail behind its clocks actually is.
+            synced_at=_sync["last_ts"] or "",
             nav_counts=_nav_counts(frows=frows)))
 
     @app.get("/api/fila")

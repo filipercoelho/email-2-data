@@ -6,10 +6,11 @@ by per-message priority. This is the core of [docs/05-reference/cockpit-design.m
 
 Two orderings, one queue (``build_fila(..., order=...)``)
 ---------------------------------------------------------
-``"recent"`` (the DEFAULT) — newest thread activity first: the mailbox-shaped view people expect when
-they open the queue, and what the user asked for. ``"risk"`` — the response-risk tuple above
-(``sort_key``), this product's opinionated "what is falling over" order. Risk stays a first-class,
-always-available option; the default only decides which lens opens first, never what the cockpit knows.
+``"risk"`` (the DEFAULT since ADR-033, owner-approved 2026-07-23) — the response-risk tuple
+(``sort_key``): who owes a reply, and for how long. A queue whose top item is not the highest-stakes
+item fails "the next move is never a question" on every load. ``"recent"`` — newest thread activity
+first, the mailbox-shaped view — stays a first-class, always-available option (it was the default
+before ADR-033; the flip only decides which lens opens first, never what the cockpit knows).
 Every row carries BOTH keys under ``order_keys`` so the UI can re-sort client-side without re-deriving
 (and drifting from) this logic — one source of truth for the risk tuple, here in Python.
 
@@ -79,8 +80,8 @@ _NON_COUNTERPARTY = {"INTERNAL", "BULK", "OTHER", ""}
 _STATE_RANK = {WE_OWE: 3, AWAITING: 2, INTERNAL: 1, HANDLED: 0}
 
 # Fila orderings (see the module docstring). Both are ORDER BY DESC over their key.
-ORDER_RECENT = "recent"   # newest thread activity first — the default
-ORDER_RISK = "risk"       # response-risk tuple (``sort_key``) — the cockpit's opinionated order
+ORDER_RECENT = "recent"   # newest thread activity first
+ORDER_RISK = "risk"       # response-risk tuple (``sort_key``) — the default since ADR-033
 ORDERS = (ORDER_RECENT, ORDER_RISK)
 
 # Clock-colour thresholds, in hours-in-state. FIRST-DRAFT — calibrate against how the shop actually
@@ -295,7 +296,7 @@ def build_fila(interactions: Iterable[dict[str, Any]],
                thread_states: Optional[dict[str, dict[str, Any]]] = None,
                *, now: Optional[datetime] = None, include_resolved: bool = False,
                reclassified: Optional[dict[str, dict[str, str]]] = None,
-               order: str = ORDER_RECENT) -> list[dict[str, Any]]:
+               order: str = ORDER_RISK) -> list[dict[str, Any]]:
     """Top-level: fold → reclassification overlay → clock → sort. Returns Fila rows for the UI/JSON.
 
     ``thread_states``: ``{thread_root: {"owner": str, "handled": bool, "handled_ts": str}}`` (workspace).
@@ -304,9 +305,10 @@ def build_fila(interactions: Iterable[dict[str, Any]],
     use the human value, mark the row ``committed``, and — since the override happens BEFORE the clock —
     a correction can move a thread INTO or OUT of the active queue (e.g. OTHER→CLIENT, or CLIENT→OTHER).
     ``include_resolved``: keep HANDLED/INTERNAL rows (an "all" view); default drops them (shrink-to-zero).
-    ``order``: ``"recent"`` (default — newest thread activity first) or ``"risk"`` (the response-risk
-    tuple). Unknown values raise instead of silently falling back, so a typo can never quietly reorder
-    the queue. Each row also carries ``order_keys`` = both keys, for a client-side re-sort."""
+    ``order``: ``"risk"`` (default since ADR-033 — the response-risk tuple) or ``"recent"`` (newest
+    thread activity first). Unknown values raise instead of silently falling back, so a typo can never
+    quietly reorder the queue. Each row also carries ``order_keys`` = both keys, for a client-side
+    re-sort."""
     if order not in ORDERS:
         raise ValueError(f"unknown Fila order {order!r} — expected one of {ORDERS}")
     now = now or datetime.now(timezone.utc)

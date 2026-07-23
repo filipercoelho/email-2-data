@@ -176,14 +176,14 @@ def test_fila_sort_we_owe_client_first_then_awaiting():
     assert order == ["owe_client_old", "owe_client_new", "owe_supplier", "await"]
 
 
-def test_fila_default_order_is_most_recent_first():
-    """The DEFAULT queue order is newest activity first — the mailbox-shaped view people expect when
-    they open the Fila. Response risk deliberately does NOT apply here: the oldest WE_OWE thread, which
-    the risk order puts on top, must sink to the bottom."""
+def test_fila_default_order_is_response_risk():
+    """ADR-033: the DEFAULT queue order is the response-risk tuple — a queue whose top item is not
+    the highest-stakes item fails 'the next move is never a question' on every load. The oldest
+    WE_OWE debt surfaces first; recency is one explicit argument away, never deleted."""
     rows = [_row("old", "a", ago(30)),
             _row("newest", "b", ago(2)),
             _row("middle", "c", ago(9))]
-    assert [r["thread_root"] for r in build_fila(rows, now=NOW)] == ["newest", "middle", "old"]
+    assert [r["thread_root"] for r in build_fila(rows, now=NOW)] == ["old", "middle", "newest"]
 
 
 def test_recent_order_uses_last_activity_not_thread_start():
@@ -192,19 +192,19 @@ def test_recent_order_uses_last_activity_not_thread_start():
     rows = [_row("old_thread_fresh_msg", "a", ago(50)),
             _row("old_thread_fresh_msg", "b", ago(1)),
             _row("started_later", "c", ago(20))]
-    order = [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    order = [r["thread_root"] for r in build_fila(rows, now=NOW, order="recent")]
     assert order == ["old_thread_fresh_msg", "started_later"]
 
 
-def test_risk_order_still_available_and_really_differs():
-    """The response-risk order is the documented core of this module — the new default must not delete
-    it. Same rows, two orders, genuinely different answers."""
+def test_recent_order_still_available_and_really_differs():
+    """`Mais recentes` survives ADR-033 as the explicit non-default — same rows, two orders,
+    genuinely different answers (the flip stays meaningful, not cosmetic)."""
     rows = [_row("owe_client_old", "a", ago(30)),
             _row("owe_client_new", "b", ago(2)),
             _row("await", "d", ago(50)),
             _row("await", "e", ago(5), direction="outbound", from_email="diogo@lindoservico.pt")]
-    recent = [r["thread_root"] for r in build_fila(rows, now=NOW)]
-    risk = [r["thread_root"] for r in build_fila(rows, now=NOW, order="risk")]
+    recent = [r["thread_root"] for r in build_fila(rows, now=NOW, order="recent")]
+    risk = [r["thread_root"] for r in build_fila(rows, now=NOW)]
     assert recent == ["owe_client_new", "await", "owe_client_old"]   # by last activity
     assert risk == ["owe_client_old", "owe_client_new", "await"]     # by who owes, and for how long
 
@@ -223,15 +223,15 @@ def test_undated_thread_sinks_to_the_bottom_of_the_recent_order():
     """A thread with no parseable date must not float to the TOP of a newest-first queue (it would
     look like the most urgent thing in the shop). It sorts as epoch 0."""
     rows = [_row("dated", "a", ago(30)), _row("undated", "b", "not a date")]
-    assert [r["thread_root"] for r in build_fila(rows, now=NOW)] == ["dated", "undated"]
+    assert [r["thread_root"] for r in build_fila(rows, now=NOW, order="recent")] == ["dated", "undated"]
 
 
 def test_recent_order_is_deterministic_on_identical_timestamps():
     """The Fila is rebuilt on every request; two threads with the same last activity must not shuffle
     between builds or rows would move under the cursor mid-decision."""
     rows = [_row("t1", "a", ago(3)), _row("t2", "b", ago(3), subject="Outro")]
-    first = [r["thread_root"] for r in build_fila(rows, now=NOW)]
-    assert first == [r["thread_root"] for r in build_fila(rows, now=NOW)]
+    first = [r["thread_root"] for r in build_fila(rows, now=NOW, order="recent")]
+    assert first == [r["thread_root"] for r in build_fila(rows, now=NOW, order="recent")]
 
 
 def test_unknown_order_raises_instead_of_silently_falling_back():

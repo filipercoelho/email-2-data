@@ -538,7 +538,9 @@ document.addEventListener('keydown',e=>{
   }
   const tag=(e.target.tagName||'').toLowerCase();
   if(tag==='input'||tag==='textarea'){if(e.key==='Escape')e.target.blur();return;}
-  if(e.key==='/'){ openPalette();e.preventDefault();return;}
+  /* '/' dispatches through an optional lens hook (ADR-033 P0): the Fila focuses its visible search
+     box — the natural gesture — while every lens that defines no onSlash keeps '/' = palette. */
+  if(e.key==='/'){ if(typeof onSlash==='function'){onSlash();}else{openPalette();} e.preventDefault();return;}
   if(e.key==='?'){$('#_help').classList.toggle('hidden');return;}
   if(e.key==='Escape'){$('#_help').classList.add('hidden');closePalette();onEsc();return;}
   if(!$('#_help').classList.contains('hidden'))return;
