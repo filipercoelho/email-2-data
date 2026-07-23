@@ -14,7 +14,7 @@ commits it (the cockpit trust grammar).
 
 ## 1 · Screen regions
 
-```
+```text
 ┌ header ──────────────────────────────────────────────────────────────────┐
 │ email-2-data  Fila·112  Para ti·15  Projetos  Contrapartes  Capturas     │
 │                        correio há 4 min   ⌘K   Sincronizar   densidade   │
@@ -81,7 +81,7 @@ finally visible). **No view builder** — five presets, period.
 
 ## 5 · Row anatomy (single line, ~34 px)
 
-```
+```text
 │rail│ clock │ name            ↻3 │ scan line………………… │ €4 900? ⚑3d ✍ 📎PDF novo │
 ```
 
@@ -227,8 +227,8 @@ app nunca envia» · zero states: «Tudo tratado · nada em risco» / «Sem lead
 The design-proposal palette is the app's token system (`cockpit_ui.py` `:root`, synced to
 `report.py`; pinned by `test_mesa_palette_tokens_are_canonical`):
 
-| Role | Token | Value |
-| --- | --- | --- |
+| Role | Tokens |
+| --- | --- |
 | Ground / surface / lines | `--bg` `#F1F3F6` · `--card` `#fff` · `--bd` `#DCE2E9` · `--bd2` `#EAEEF2` |
 | Ink | `--tx` `#182027` · `--mut` `#46525E` · `--mut2` `#7C8894` |
 | Accent (steel blue) | `--ac` `#2C5E80` · `--ac-soft` `#E3EDF4` · `--ac-line` `#BDD3E2` |
