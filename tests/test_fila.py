@@ -709,7 +709,8 @@ def test_fila_page_ships_the_review_fix_controls(tmp_path):
     assert '<button id="_risk"' in html                      # the chip is a control, not a label
     assert "setFilter('band',filters.band==='risk'" in html  # …that toggles the risk filter
     assert 'id="_ownerf"' in html                            # visible owner filter
-    assert 'id="_tratados"' in html and "include=resolved" in html   # the decided ledger
+    # the decided ledger stays one action away — since ADR-033 P1 it lives in the vistas rail
+    assert 'data-vista="tratados"' in html and "include=resolved" in html
     assert "localStorage.setItem('fila-order'" in html       # sticky ordering
     assert ">=72)?' crit':''" in html                        # only the critical tier pulses
     assert "rascunho de resposta" in html and "can_draft" in html    # reply path from the queue
@@ -762,15 +763,18 @@ def test_fila_page_groups_queue_by_obligation(tmp_path):
     assert "function groupOf(" in html
     assert "'WE_OWE'" in html and "'AWAITING'" in html
     assert "Precisam de resposta" in html and "À espera deles" in html
-    # group is the primary key; the chosen sort survives *within* a group (stable sort, no 2nd key)
+    # group is the primary key; the chosen sort survives *within* a group (stable sort, no 2nd key).
+    # Since ADR-033 groupOf() returns the TAB-AWARE RANK (semGroup() carries the semantic id), so
+    # the same one-line stable partition also lets Fornecedores lead with «A cobrar».
     assert "out.sort((a,b)=>groupOf(a)-groupOf(b))" in html
+    assert "function semGroup(" in html
     # the ledger stays one flat pile — grouping applies to the active queue only
     assert "if(mode==='tratados') return out;" in html
     # headers render with a count, and are sticky so they survive scrolling a long queue
     assert 'class="ghead ' in html and 'class="gh-n"' in html
     assert ".ghead{position:sticky" in html
-    # obligation also encoded per-row: hollow dot for "waiting on them"
-    assert "groupOf(r)===G_WAIT?' wait':''" in html
+    # obligation also encoded per-row: hollow dot whenever the ball is NOT ours (wait + chase)
+    assert "semGroup(r)!==G_OWE?' wait':''" in html
     assert ".clock.wait .d{background:transparent" in html
 
 
@@ -804,7 +808,9 @@ def test_fila_sections_collapse_and_awaiting_starts_collapsed(tmp_path):
     assert "fila-collapsed" in html              # persisted choice
     assert "function toggleGroup(" in html and 'data-g="' in html
     assert "function viewAll(" in html           # counts come from the un-collapsed set
-    assert "isCollapsed(groupOf(r))" in html     # …and view() excludes collapsed groups
+    # …and view() excludes collapsed groups, keyed SEMANTICALLY (folding «À espera» must fold the
+    # same pile on every tab, whatever rank the tab gives it — ADR-033 P1)
+    assert "isCollapsed(semGroup(r))" in html
     # the grouping contract of ADR-029 is untouched
     assert "out.sort((a,b)=>groupOf(a)-groupOf(b))" in html
 
@@ -867,3 +873,102 @@ def test_fila_row_background_click_opens_thread(tmp_path):
     (cockpit-design §9)."""
     html = _p0_page(tmp_path)
     assert "dispatch('thread',i)" in html
+
+
+# ── ADR-033 Phase 1 — the Mesa (split-pane + tabs + dossier + timeline) ──────
+
+def test_fila_ships_counterparty_tabs_with_counts(tmp_path):
+    """Counterparty fronts are structure, not a filter chip (hard owner requirement): first-class
+    tabs Hoje · Clientes · Fornecedores · Leads with live counts, carried in the URL (?tab=) and
+    cyclable from the keyboard (t / T)."""
+    html = _p0_page(tmp_path)
+    assert 'id="_tabs"' in html
+    for label in ("Hoje", "Clientes", "Fornecedores", "Leads"):
+        assert label in html
+    assert "p.set('tab'" in html and "get('tab')" in html
+    assert "function cycleTab(" in html and "e.key==='t'" in html
+
+
+def test_fila_mesa_layout_split_pane(tmp_path):
+    """The Mesa: full-width split pane — bounded queue left, dossier right — stacked below 1100px.
+    The 1000px .wrap cap (a third of the screen was dead gutter) is gone on this lens."""
+    html = _p0_page(tmp_path)
+    assert 'class="mesa"' in html and 'id="_doss"' in html
+    assert "mesa-body" in html and "@media (max-width:1100px)" in html
+    assert 'id="_vrail"' in html            # the vistas rail
+    for vista in ("Em risco", "Cobranças", "Tratados"):
+        assert vista in html
+
+
+def test_fila_group_order_is_tab_aware_chase_first_for_suppliers(tmp_path):
+    """Inside the Fornecedores tab the queue leads with «A cobrar» (the actionable chase list),
+    while Hoje/Clientes lead with «Precisam de resposta». One partition mechanism, per-tab rank."""
+    html = _p0_page(tmp_path)
+    assert "A cobrar" in html                              # the chase group label exists
+    assert "G_CHASE" in html and "TAB_SEQ" in html
+    assert "SUPPLIER:[G_CHASE" in html                     # suppliers: chase first
+
+
+def test_fila_focus_is_keyed_by_thread_root(tmp_path):
+    """Focus is content-keyed (ADR-023 prerequisite): a re-render or refresh can reorder the queue
+    without re-pointing the caret at a different conversation."""
+    html = _p0_page(tmp_path)
+    assert "let focusRoot" in html
+    assert "r.thread_root===focusRoot" in html             # focus derived from the id, not the index
+
+
+def test_fila_dossier_mounts_focused_thread(tmp_path):
+    """The dossier auto-mounts the focused (riskiest, at load) thread: identity strip, verb bar with
+    PRINTED keys, the AI's reason always visible, the staged-draft slot («a app nunca envia»), and
+    the conversation — rendered by the SAME _threadHTML/msgHTML kit as before (one render path:
+    reading never inserts markup into the list)."""
+    html = _p0_page(tmp_path)
+    assert "function dossierHTML(" in html and "function renderDossier(" in html
+    assert "<kbd>E</kbd>" in html and "<kbd>A</kbd>" in html    # verbs teach their keys
+    assert "Responder" in html and "Adiar" in html              # P3 verbs visible, honestly disabled
+    assert "a app nunca envia" in html
+    # one render path: _threadHTML appears exactly twice — its definition and the dossier call
+    assert html.count("_threadHTML(") == 2
+    # the reclassify pickers moved to the dossier; row badges now FILTER (the natural gesture)
+    assert 'data-act="fcp"' in html
+
+
+def test_fila_vertical_timeline_marks_silences_and_now():
+    """The dossier's vertical conversation timeline: one direction-coded marker per message
+    (newest first, matching the message order), silences ≥24h rendered as LABELED gaps rather than
+    compressed away, and the rail terminating at «agora» in the clock's band colour — the current
+    open silence is the response debt, drawn as the growing tail of the thread."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    fn = "function timelineHTML(" + fila_page._LENS_JS.split("function timelineHTML(")[1].split("/* end-timeline */")[0]
+    harness = (
+        "function esc(s){return String(s==null?'':s);}\n" + fn +
+        "const msgs=[{message_id:'m1',date:'2026-07-01T10:00:00+00:00',direction:'inbound'},\n"
+        "            {message_id:'m2',date:'2026-07-05T10:00:00+00:00',direction:'outbound'},\n"
+        "            {message_id:'m3',date:'2026-07-05T12:00:00+00:00',direction:'inbound'}];\n"
+        "const clock={state:'WE_OWE',band:'red',label:'devemos resposta há 13 dias'};\n"
+        "console.log(timelineHTML(msgs, clock));\n"
+    )
+    out = subprocess.run([node, "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    tl = out.stdout
+    assert tl.count("data-tl=") == 3                       # one marker per message
+    assert 'data-tl="0"' in tl                             # newest-first indexing (matches .tmsg order)
+    assert "4 dias sem resposta" in tl                     # the m1→m2 silence is labeled, not hidden
+    assert "agora" in tl and "vtl-now red" in tl           # the open tail carries the band colour
+    assert "vtl-m in" in tl and "vtl-m out" in tl          # direction is the marker encoding
+
+
+def test_api_fila_rows_carry_display_name_and_cluster(tmp_path):
+    """Rows lead with the curated human name, never the raw address when a name exists: the v8
+    counterparty_names override wins, and each row carries its cluster's rollup (the counterparty
+    history card reads it without a second request)."""
+    cl, ws = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    rows = {x["thread_root"]: x for x in cl.get("/api/fila").json()["rows"]}
+    assert rows["mid:t1"]["display_name"]                  # always present (derived fallback)
+    assert rows["mid:t1"]["cluster"]["key"] == "acme.pt"
+    assert isinstance(rows["mid:t1"]["cluster"]["msg_count"], int)
+    ws.set_counterparty_name("acme.pt", "ACME Metalomecânica")
+    rows = {x["thread_root"]: x for x in cl.get("/api/fila").json()["rows"]}
+    assert rows["mid:t1"]["display_name"] == "ACME Metalomecânica"   # the precious override wins

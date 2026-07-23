@@ -143,18 +143,20 @@ def test_projetos_deep_link_opens_detail_and_unknown_404s(live_app, browser):
         page.close()
 
 
-def test_fila_expand_writes_thread_param_and_collapse_clears(live_app, browser):
-    """Expanding a Fila thread writes ?thread=<root> to the URL; collapsing it clears the param."""
+def test_fila_focus_writes_thread_param_and_mounts_dossier(live_app, browser):
+    """Since ADR-033 (Mesa) focusing IS opening: clicking a row writes ?thread=<root> and mounts
+    the conversation in the dossier pane — there is no collapse gesture to clear it, because the
+    dossier always shows the focused conversation (one queue, one focus, one URL)."""
     base, _pid = live_app
     page = browser.new_page()
     try:
         page.goto(f"{base}/")
-        page.click(".row .subj")   # the subject line is unambiguously the thread toggle
+        page.click(".row .rname")                       # anywhere on the row focuses + opens
         page.wait_for_function("location.search.includes('thread=')", timeout=5000)
         assert "thread=mid%3At1" in page.url
-        page.click(".row .subj")   # the subject line is unambiguously the thread toggle
-        page.wait_for_function("!location.search.includes('thread=')", timeout=5000)
-        assert "thread=" not in page.url
+        # the dossier mounted the same conversation: verb bar + the thread renderer output
+        page.wait_for_selector("#_doss .dverbs", timeout=5000)
+        page.wait_for_selector("#_doss .texp", timeout=5000)
     finally:
         page.close()
 

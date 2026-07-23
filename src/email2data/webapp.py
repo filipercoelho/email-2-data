@@ -1636,6 +1636,23 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             # Reply path from the queue: a draft exists only for messages with a JobSpec, so tell
             # the Fila which rows can offer "rascunho de resposta" instead of 404-ing on click.
             r["can_draft"] = (r.get("message_id") or "") in jspecs
+        # ADR-033 P1: rows lead with the curated human name, never a raw address when a name exists,
+        # and carry their cluster's rollup so the dossier's counterparty card needs no second call.
+        # Precedence mirrors _clusters_as_dicts: v8 override (precious) → derived name → the contact.
+        by_email: dict[str, dict[str, Any]] = {}
+        for cd in _clusters_as_dicts(_clusters(), frows=rows):
+            for e in cd.get("emails") or []:
+                by_email.setdefault(e, cd)
+        for r in rows:
+            cd = by_email.get(r.get("contact") or "")
+            if cd:
+                r["display_name"] = cd["display_name"]
+                r["cluster"] = {k: cd[k] for k in
+                                ("key", "kind", "msg_count", "we_owe_count",
+                                 "response_risk", "open_projects")}
+            else:
+                r["display_name"] = r.get("contact") or ""
+                r["cluster"] = None
         return rows
 
     # -------------------------------------------------------------------------
