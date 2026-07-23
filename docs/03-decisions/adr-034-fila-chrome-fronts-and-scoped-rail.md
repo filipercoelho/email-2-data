@@ -44,9 +44,11 @@ group.**
 4. **Honest facets.** A facet earns a row only when it would filter to a meaningful subset
    (`0 < count < total`) — «Sem dono» at 121/121 discriminates nothing, so it hides. «rever N» leaves
    the strip entirely (it is Para ti's business) and lands as a quiet Estado facet, hidden at zero.
-5. **Nav (P5b, in progress):** a stroke icon per lens; the Fila badge shows **demand** (WE_OWE
-   red+amber), not the total; Admin + densidade retreat into a gear; «Sincronizar» and «correio há N
-   min» merge into one status pill you click to sync. *(Not yet shipped — tracked as P5b.)*
+5. **Nav.** *(P5b shipped:)* a stroke icon per lens (scan by shape) + an `e2d` monogram; the Fila
+   badge shows **demand** (WE_OWE red+amber — computed in `webapp._nav_counts`, the same number the
+   «Hoje» front shows as «N a responder»), never the total active count. *(P5c deferred:)* Admin +
+   densidade into a gear, and «Sincronizar» + «correio há N min» merged into one status pill — lower
+   value / higher shared-shell coupling; freshness already shows in the strip.
 
 ## 3 · Consequences
 

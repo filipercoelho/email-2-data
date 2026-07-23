@@ -1300,3 +1300,19 @@ def test_fila_rail_facets_hide_when_they_dont_discriminate(tmp_path):
     html = _p0_page(tmp_path)
     assert "semD>0&&semD<act.length" in html                 # Sem dono hides at all-or-nothing
     assert "attN<act.length*0.9" in html                     # Com anexo hides when ~everyone has one
+
+
+def test_fila_nav_badge_is_demand_not_total(tmp_path):
+    """ADR-034 P5b: the Fila nav badge carries DEMAND (WE_OWE — what needs a reply), the same number
+    the «Hoje» front shows as «N a responder», never the total active count. An AWAITING thread (we
+    replied; the ball is theirs) is inventory but not demand, regardless of age."""
+    crm = _crm_with([
+        (_env("t1", 30), _verdict()),                        # WE_OWE → demand
+        (_env("t2", 10), _verdict()),                        # inbound…
+        ({**_env_out("t2b", 2), "references": ["t2"], "in_reply_to": "t2"},
+         {**_verdict(), "direction": "outbound"}),            # …then our reply → t2 is AWAITING
+    ])
+    d = _client(tmp_path, crm)[0].get("/api/fila").json()
+    states = sorted((r["clock"]["state"] for r in d["rows"]))
+    assert states == ["AWAITING", "WE_OWE"]                  # two active threads (inventory)…
+    assert d["nav_counts"]["fila"] == 1                      # …but the badge is the 1 that demands

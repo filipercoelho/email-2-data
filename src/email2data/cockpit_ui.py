@@ -84,19 +84,35 @@ def page(
     )
 
 
+# One stroke glyph per lens (ADR-034 P5b) so the nav scans by shape; `currentColor` tints each
+# icon for its state for free. 24-unit grid, matched to the rail's icon family.
+_NAV_ICON = {
+    "fila": '<svg viewBox="0 0 24 24"><path d="M4 12h4l2 3h4l2-3h4M4 12l2-7h12l2 7M4 12v7h16v-7"/></svg>',
+    "contrapartes": '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="9" r="2.3"/><path d="M16 14.4c2.6.5 4.5 2.8 4.5 5.6"/></svg>',
+    "projetos": '<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h5l2 2"/></svg>',
+    "para-ti": '<svg viewBox="0 0 24 24"><path d="M12 4a6 6 0 0 1 6 6v3l2 3H4l2-3v-3a6 6 0 0 1 6-6z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>',
+    "capturas": '<svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7l1.5-3h5L16 7"/><circle cx="12" cy="13" r="3.3"/></svg>',
+    "admin": '<svg viewBox="0 0 24 24"><path d="M4 7h11M19 7h1M4 12h6M14 12h6M4 17h9M17 17h3"/><circle cx="17" cy="7" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="15" cy="17" r="2"/></svg>',
+}
+
+
 def _nav_html(active: str, counts: dict[str, int]) -> str:
     links = []
     for key, label, href in _NAV:
         n = counts.get(key)
+        # The badge carries DEMAND, not inventory (ADR-034): the Fila count is what needs a reply
+        # (WE_OWE red+amber), computed in webapp._nav_counts — never the total active count.
         badge = (
             f' <span class="nbadge">{n}</span>' if n else ""
         )
         cls = "nlink on" if key == active else "nlink"
+        icon = _NAV_ICON.get(key, "")
         # data-nav lets a lens refresh its badges in place from a poll, without a page reload.
-        links.append(f'<a class="{cls}" data-nav="{key}" href="{href}">{label}{badge}</a>')
+        links.append(
+            f'<a class="{cls}" data-nav="{key}" href="{href}">{icon}<span class="nlbl">{label}</span>{badge}</a>')
     return (
         "<header>\n<div class='htop'>"
-        + "<span class='logo'>email-2-data</span>"
+        + "<span class='logo'><span class='mark'>e2d</span>email-2-data</span>"
         + "".join(links)
         + "<span class='grow'></span>"
         + "<button class='hbtn' id='_syncbtn'>Sincronizar</button>"
@@ -140,11 +156,16 @@ _HEAD = """<!doctype html>
   header{background:var(--card);border-bottom:1px solid var(--bd);padding:13px 26px;
     position:sticky;top:0;z-index:20;box-shadow:var(--shadow)}
   .htop{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .logo{font-weight:720;font-size:13px;letter-spacing:-.01em;color:var(--mut);margin-right:4px}
+  .logo{display:inline-flex;align-items:center;gap:7px;font-weight:720;font-size:13px;letter-spacing:-.01em;color:var(--mut);margin-right:4px}
+  .logo .mark{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
+    border-radius:7px;background:var(--ac);color:#fff;font:800 10.5px ui-monospace,monospace}
   .nlink{color:var(--mut);text-decoration:none;font-size:13px;font-weight:600;
-    padding:5px 10px;border-radius:8px;display:inline-flex;align-items:center;gap:5px}
+    padding:5px 10px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
+  .nlink svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;
+    stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto;opacity:.85}
   .nlink:hover{background:var(--bg);color:var(--tx)}
   .nlink.on{background:var(--ac);color:#fff}
+  .nlink.on svg{opacity:1}
   .nlink.on:hover{background:#254F6C}
   .nbadge{background:rgba(255,255,255,.25);border-radius:20px;padding:0 6px;font-size:10px;font-weight:700;font-variant-numeric:tabular-nums}
   .nlink:not(.on) .nbadge{background:var(--red-bg);color:var(--red)}

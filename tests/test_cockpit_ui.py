@@ -53,7 +53,7 @@ def test_nav_has_the_admin_item_and_marks_exactly_one_link_active():
     actually matches a nav key — before it existed the page rendered with NOTHING highlighted, which
     reads as "you are nowhere"."""
     html = _make(active="admin")
-    assert 'data-nav="admin" href="/admin">Admin' in html
+    assert 'data-nav="admin" href="/admin">' in html and 'class="nlbl">Admin<' in html
     assert html.count('class="nlink on"') == 1
     assert 'class="nlink on" data-nav="admin"' in html
     # …and it is last in the strip: config comes after the queues, never between them
@@ -162,3 +162,14 @@ def test_mesa_palette_tokens_are_canonical():
     assert ".cp.LEAD{background:var(--lead-bg);color:var(--lead)}" in html
     assert ".cp.CLIENT{background:var(--cli-bg);color:var(--cli)}" in html
     assert ".cp.SUPPLIER{background:var(--forn-bg);color:var(--forn)}" in html
+
+
+def test_nav_lens_links_carry_icons_and_a_monogram():
+    """ADR-034 P5b: every lens link gets a stroke glyph (scan by shape), the label wraps in .nlbl,
+    and the wordmark gains a monogram — the nav becomes iconic, not plain text."""
+    html = _make()
+    for key in ("fila", "contrapartes", "projetos", "para-ti", "capturas", "admin"):
+        assert f'data-nav="{key}"' in html
+    assert html.count("<svg viewBox") >= 6            # one glyph per lens
+    assert ".nlink svg{" in html and 'class="nlbl"' in html
+    assert "class='mark'" in html                     # the e2d monogram

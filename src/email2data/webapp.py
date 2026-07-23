@@ -1864,14 +1864,19 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         cluster set a second time per request (F3)."""
         frows = _fila_rows() if frows is None else frows
         clusters = _clusters() if clusters is None else clusters
-        active = len(frows)
+        # The Fila badge carries DEMAND, not inventory (ADR-034): what actually needs a reply
+        # (WE_OWE red+amber) — the same number the «Hoje» front shows as «N a responder» — never the
+        # total active count, which reads as N fires when far fewer demand the operator.
+        fila_demand = sum(1 for r in frows
+                          if (r.get("clock") or {}).get("state") == cockpit.WE_OWE
+                          and (r.get("clock") or {}).get("band") in ("red", "amber"))
         para_ti_count = len(para_ti.all_items(
             frows, clusters,
             {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])},
         ))
         # Pending captures awaiting validation (ADR-019 §5 / R9) — the Caixa de Capturas badge.
         capturas_count = len(cstore.list_pending())
-        return {k: v for k, v in {"fila": active, "para-ti": para_ti_count,
+        return {k: v for k, v in {"fila": fila_demand, "para-ti": para_ti_count,
                                   "capturas": capturas_count}.items() if v}
 
     @app.get("/", response_class=HTMLResponse)
