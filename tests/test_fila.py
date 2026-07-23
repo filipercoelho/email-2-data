@@ -701,16 +701,15 @@ def test_fila_rows_carry_can_draft_flag(tmp_path):
 
 
 def test_fila_page_ships_the_review_fix_controls(tmp_path):
-    """The Fila page carries: the clickable 'em risco' filter chip, the visible owner filter, the
-    Tratados ledger toggle, the sticky-order storage, the critical-tier pulse (only ≥72 h red
-    animates), and the reply-draft affordance."""
+    """The Fila page carries: the risk filter (reachable from the palette since ADR-034 moved the
+    headline chip into the fronts), the visible owner filter, the Tratados ledger, the sticky-order
+    storage, the critical-tier pulse (only ≥72 h red animates), and the reply-draft affordance."""
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
     html = cl.get("/fila").text
-    assert '<button id="_risk"' in html                      # the chip is a control, not a label
-    assert "setFilter('band',filters.band==='risk'" in html  # …that toggles the risk filter
+    assert "setFilter('band','risk')" in html                # the risk filter (now via palette/rail)
     assert 'id="_ownerf"' in html                            # visible owner filter
     # the decided ledger stays one action away — since ADR-033 P1 it lives in the vistas rail
-    assert 'data-vista="tratados"' in html and "include=resolved" in html
+    assert "vit('tratados'" in html and "include=resolved" in html
     assert "localStorage.setItem('fila-order'" in html       # sticky ordering
     assert ">=72)?' crit':''" in html                        # only the critical tier pulses
     assert "rascunho de resposta" in html and "can_draft" in html    # reply path from the queue
@@ -785,18 +784,19 @@ def _p0_page(tmp_path):
     return cl.get("/").text
 
 
-def test_fila_headline_counts_only_what_demands_us(tmp_path):
-    """The old chip counted every red+amber row — including the passive AWAITING pile — so «88 em
-    risco» inflated the workload. The headline now splits honestly: «a responder» = WE_OWE
-    red+amber; «a cobrar» = AWAITING past the chase threshold; each half click-filters."""
+def test_fila_fronts_carry_their_own_demand(tmp_path):
+    """ADR-034: the abstract «N a responder» headline is gone — each counterparty front is a hero
+    card whose OWN demand («N a responder · N a cobrar») lives inside it, computed per-front so a
+    count can never be misread as global. «a responder»/«a cobrar» survive as card text; the
+    predicates (WE_OWE red+amber / AWAITING chase) are unchanged; no abstract strip chip remains."""
     html = _p0_page(tmp_path)
-    assert "a responder" in html
-    assert 'id="_cobrar"' in html and "a cobrar" in html
+    assert "function frontDemand(" in html and "function renderFronts(" in html
+    assert 'id="_fronts"' in html and 'class="fc' in html
+    assert "a responder" in html and "a cobrar" in html      # now inside the cards
     assert "c.state==='WE_OWE'" in html          # respondCount predicate
     assert "c.state==='AWAITING'" in html        # chaseCount predicate
-    # both chips filter via pseudo-band values, like the old risk chip did
-    assert "'chase'" in html
-    assert "0 a responder" in html               # the zero state stays honest too
+    assert 'id="_cobrar"' not in html and 'id="_risk"' not in html   # the abstract headline is gone
+    assert "em dia" in html                      # calm-at-zero copy (colour only on real demand)
 
 
 def test_fila_sections_collapse_and_awaiting_starts_collapsed(tmp_path):
@@ -882,7 +882,7 @@ def test_fila_ships_counterparty_tabs_with_counts(tmp_path):
     tabs Hoje · Clientes · Fornecedores · Leads with live counts, carried in the URL (?tab=) and
     cyclable from the keyboard (t / T)."""
     html = _p0_page(tmp_path)
-    assert 'id="_tabs"' in html
+    assert 'id="_fronts"' in html                            # ADR-034: fronts are the hero cards
     for label in ("Hoje", "Clientes", "Fornecedores", "Leads"):
         assert label in html
     assert "p.set('tab'" in html and "get('tab')" in html
@@ -1066,7 +1066,9 @@ def test_fila_money_and_prazos_vistas(tmp_path):
     """€ em jogo (money desc, explicitly AI-estimated) and Prazos (days-left asc) on keys 2/3 —
     fixed vistas over the same queue, flat-rendered, honestly bannered."""
     html = _p0_page(tmp_path)
-    assert 'data-vista="money"' in html and 'data-vista="prazos"' in html
+    # ADR-034: vista buttons are built by vit(vk,…) → data-vista from the key, plus a stroke icon.
+    assert 'data-vista="\'+vk+\'"' in html
+    assert "vit('money'" in html and "vit('prazos'" in html and "V_ICON" in html
     assert "e.key==='2'" in html and "e.key==='3'" in html
     assert "valores estimados pela IA" in html               # the € vista banner
     assert "p.set('vista'" in html and "get('vista')" in html
@@ -1081,11 +1083,15 @@ def test_fila_bulk_select_structurally_excludes_ignore(tmp_path):
     assert 'data-bulk="ignore"' not in html and "bulkIgnore" not in html
 
 
-def test_fila_rever_chip_surfaces_needs_review(tmp_path):
-    """NEEDS_REVIEW finally gets a surface: a quiet chip in the strip, linking to Para ti."""
+def test_fila_rever_surfaces_needs_review_in_the_rail(tmp_path):
+    """NEEDS_REVIEW gets a surface — but not in the strip: ADR-034 moved «rever N» into the rail's
+    Estado group (it is Para ti's business), quiet and hidden at zero, linking there."""
     html = _p0_page(tmp_path)
-    assert 'id="_rever"' in html and "const NEEDS_REVIEW" in html
-    assert "paintRever" in html and "/para-ti" in html
+    assert "const NEEDS_REVIEW" in html
+    assert 'data-fest="rever"' in html and "Rever classificação" in html
+    assert "if(_needsReview>0)" in html                        # hidden at zero
+    assert "location.href='/para-ti'" in html
+    assert 'id="_rever"' not in html                           # not a strip chip anymore
 
 
 # ── ADR-033 Phase 3 — Adiar + contextual R + Tratar agora ────────────────────
@@ -1255,3 +1261,42 @@ def test_novo_never_badges_automated_senders(tmp_path):
             for x in _client(tmp_path, _crm_with([(old, _verdict()),
                                                   (bot, _verdict())]))[0].get("/api/fila").json()["rows"]}
     assert rows["mid:t1"]["novo"] is False
+
+
+# ── ADR-034 — chrome P5a: fronts-as-hero + scoped iconic rail ────────────────
+
+def test_fila_fronts_demand_is_scoped_per_counterparty(tmp_path):
+    """Each front card computes its OWN demand, scoped to its counterparty regardless of the active
+    front — so «Clientes · 2 a responder» and «Fornecedores · 1 a cobrar» are independent truths,
+    never a global number reprinted. Hoje = the whole active queue."""
+    html = _p0_page(tmp_path)
+    assert "k==='all' ? rows : rows.filter(r=>(r.counterparty||'')===k)" in html   # per-front scope
+    assert "respondCount(s)" in html and "chaseCount(s)" in html
+    assert "novo hoje" in html or "sem leads novos" in html                        # Leads calm state
+
+
+def test_fila_rail_counts_are_scoped_to_the_active_front(tmp_path):
+    """The 58-vs-32 contradiction is gone: the rail counts read the ACTIVE FRONT's subset, not the
+    whole queue — so a rail number can never disagree with the front card above it. The scope is
+    named in the caption («Vistas · Fornecedores»)."""
+    html = _p0_page(tmp_path)
+    assert "tab==='all' ? rows : rows.filter(r=>(r.counterparty||'')===tab)" in html
+    assert 'class="scope"' in html and "Vistas <span class=" in html
+    assert "const act=rows;" not in html                     # the old unscoped read is gone
+
+
+def test_fila_rail_is_iconic_with_hover_keys(tmp_path):
+    """Every vista gets a stroke glyph (scan by shape before words) and the keyboard digit moves to
+    a hover-only chip — ending the two-numbers-per-row illusion the owner flagged."""
+    html = _p0_page(tmp_path)
+    assert "const V_ICON=" in html and "<svg viewBox" in html
+    assert '<kbd class="kh">' in html and ".kh{opacity:0" in html
+    assert ".vit svg{" in html
+
+
+def test_fila_rail_facets_hide_when_they_dont_discriminate(tmp_path):
+    """A facet earns a row only when it filters to a MEANINGFUL subset (0 < count < total):
+    «Sem dono 121/121» discriminates nothing, so it hides (the owner's exact complaint)."""
+    html = _p0_page(tmp_path)
+    assert "semD>0&&semD<act.length" in html                 # Sem dono hides at all-or-nothing
+    assert "attN<act.length*0.9" in html                     # Com anexo hides when ~everyone has one

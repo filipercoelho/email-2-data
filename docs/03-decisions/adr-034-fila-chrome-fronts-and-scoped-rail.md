@@ -1,0 +1,67 @@
+# ADR-034 — Fila chrome: counterparty fronts as hero, one scope for every number, an iconic rail
+
+- **Status:** Accepted (owner-directed 2026-07-23; P5a shipped, P5b nav in progress)
+- **Date:** 2026-07-23
+- **Extends:** ADR-033 (Mesa) — this redesigns the Mesa's *framing* (nav · command strip · left rail),
+  not its work surface (list + dossier).
+
+## 1 · Context
+
+After ADR-033 landed, the owner audited the three framing areas and found the chrome "speaks three
+dialects at once". Verified against the live HTML:
+
+- **Numbers without a shared scope.** The rail counted the whole queue (`const act=rows`) while the
+  headline and tabs counted the active front — so the screen honestly showed «Em risco 58» next to
+  «32 a responder» next to «Fila 121» next to «96 threads»: four numbers, four scopes, none labeled.
+- **Badges carry inventory, not demand.** «Fila 121» is the total active count; it reads as 121 fires
+  when what demands the operator is 58.
+- **The command strip gives ten controls equal weight**, with an abstract «N a responder · N a
+  cobrar · rever 1 · N threads» headline dominating — the exact thing the owner said was
+  over-weighted — while the counterparty fronts (the operator's real first question, "which front is
+  burning?") sat as small secondary pills.
+- **The rail shows two numbers per row** (count + keyboard digit) and lists facets that don't
+  discriminate («Sem dono 121/121», «Com anexo 101/121»).
+
+## 2 · Decision
+
+Reframe the three areas around one rule — **critical demand dominates, orientation guides, ambient
+whispers** — and one invariant: **no number appears without its scope visible in the same gestalt
+group.**
+
+1. **Counterparty fronts are the hero** *(owner-directed)*. Each front (Hoje · Clientes ·
+   Fornecedores · Leads) is a status-bearing card whose **own demand** — «N a responder · N a
+   cobrar», computed per-counterparty regardless of the active front — lives **inside the button it
+   describes**. Navigation and status in one glance; a count physically inside «Fornecedores» can
+   never be misread as global. The abstract strip headline (`#_risk`/`#_cobrar`/`#_count`) and the
+   secondary tab pills are deleted. Cards are **calm at zero** («em dia» green whisper) — colour only
+   appears when something actually demands you.
+2. **One scope for every number.** The rail counts are scoped to the active front and the rail
+   declares it («Vistas · Fornecedores»). The 58-vs-32 contradiction disappears because there is no
+   unscoped number left on screen.
+3. **An iconic rail.** Each vista carries a stroke glyph (clock · euro · flag · chase-cycle · check)
+   so the rail scans by shape before words; the keyboard digit moves to a **hover-only** chip,
+   ending the two-numbers-per-row illusion.
+4. **Honest facets.** A facet earns a row only when it would filter to a meaningful subset
+   (`0 < count < total`) — «Sem dono» at 121/121 discriminates nothing, so it hides. «rever N» leaves
+   the strip entirely (it is Para ti's business) and lands as a quiet Estado facet, hidden at zero.
+5. **Nav (P5b, in progress):** a stroke icon per lens; the Fila badge shows **demand** (WE_OWE
+   red+amber), not the total; Admin + densidade retreat into a gear; «Sincronizar» and «correio há N
+   min» merge into one status pill you click to sync. *(Not yet shipped — tracked as P5b.)*
+
+## 3 · Consequences
+
+- `fila_page.py`: the strip becomes `#_fronts` (hero cards) + search + the retreated order/owner
+  selects; `renderTabs`→`renderFronts` (per-front `frontDemand`); `renderRail` gains the scope
+  caption, `V_ICON` glyphs, hover-key chips, front-scoped counts, and the honest-facet guards; the
+  risk/chase filters stay reachable via the palette and the rail vistas.
+- The demand-vs-inventory nav-badge change and the gear/freshness-pill are P5b (shared shell,
+  `cockpit_ui.py` + `webapp._nav_counts`).
+- No change to the list rows, the dossier, the data model, or any invariant (read-only, never-sends,
+  precious stores). This is a projection/legibility change on the framing only.
+
+## 4 · Rejected / deferred
+
+- **Keeping the abstract headline** — it answers no question the operator asks; the demand belongs on
+  the front it describes.
+- **A build-your-own rail / draggable fronts** — the fronts and vistas are fixed (ADR-033 §4 holds).
+- **Freshness as a separate strip label** — merged into the sync pill (P5b); one concern, one control.

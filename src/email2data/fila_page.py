@@ -227,19 +227,52 @@ function cycleTab(d){
   const ks=TABS.map(x=>x[0]);
   setTab(ks[(ks.indexOf(tab)+d+ks.length)%ks.length]);
 }
-function renderTabs(){
-  const el=$('#_tabs'); if(!el) return;
-  const cts=tabCounts();
-  el.innerHTML=TABS.map(([k,lab])=>
-    '<button class="mtab'+(tab===k?' on':'')+'" role="tab" aria-selected="'+(tab===k)+'" data-tab="'+k+'">'
-    +(k!=='all'?'<span class="mdot '+k+'" aria-hidden="true"></span>':'')
-    +lab+'<span class="mn">'+(cts[k]||0)+'</span></button>').join('');
+const FRONT_META={all:{lab:'Hoje'},CLIENT:{lab:'Clientes'},SUPPLIER:{lab:'Fornecedores'},LEAD:{lab:'Leads'}};
+/* Per-front demand (ADR-034): scoped to the counterparty REGARDLESS of the active front, so each
+   card always tells its own truth. Hoje = the whole active queue. */
+function frontDemand(k){
+  const s = k==='all' ? rows : rows.filter(r=>(r.counterparty||'')===k);
+  return {total:s.length, resp:respondCount(s), chase:chaseCount(s), novo:s.some(r=>r.novo)};
+}
+function renderFronts(){
+  const el=$('#_fronts'); if(!el) return;
+  el.innerHTML=TABS.map(([k,lab])=>{
+    const d=frontDemand(k), on=tab===k;
+    let fs;
+    if(mode==='tratados'){ fs='<span class="fmut">registo</span>'; }
+    else if(d.resp>0||d.chase>0){
+      const bits=[];
+      if(d.resp>0) bits.push('<b class="r">'+d.resp+'</b> a responder');
+      if(d.chase>0) bits.push('<b class="c">'+d.chase+'</b> a cobrar');
+      fs=bits.join('<span class="fdiv">·</span>');
+    } else {
+      /* Calm at zero — colour only appears when something demands you (the design guardrail). */
+      fs='<span class="ok">'+(k==='LEAD'?(d.novo?'novo hoje':'sem leads novos'):'em dia')+'</span>';
+    }
+    const dot=k!=='all'?'<span class="mdot '+k+'" aria-hidden="true"></span>':'';
+    return '<button class="fc'+(on?' on':'')+'" role="tab" aria-selected="'+on+'" data-tab="'+k+'">'
+      +'<span class="fn">'+dot+lab+'<span class="tot">'+d.total+'</span></span>'
+      +'<span class="fs">'+fs+'</span></button>';
+  }).join('');
 }
 
-/* ── vistas rail (fixed set — no view builder, ADR-033 §4) ──────────── */
+/* ── vistas rail (fixed set — no view builder, ADR-033 §4; scoped + iconic, ADR-034) ──────────
+   One stroke glyph per vista so the rail scans by SHAPE before words; the keyboard digit moves to
+   a hover-only chip (ending the two-numbers-per-row illusion); counts are SCOPED to the active
+   front (so a rail number can never contradict the front card above it — the 58-vs-32 confusion);
+   and a facet only earns a row when it would filter to a MEANINGFUL subset (0 < count < total) —
+   «Sem dono 121/121» discriminates nothing, so it hides. */
+const V_ICON={
+  risco:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M12 7.7V12l3 2.3"/></svg>',
+  money:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M15 9.2a3.4 3.4 0 0 0-5.8 2.4c0 2.4 1.9 2.4 2.8 2.4M8.6 12h4.8"/></svg>',
+  prazos:'<svg viewBox="0 0 24 24"><path d="M6 21V4"/><path d="M6 4.5h10.5L14.2 8l2.3 3.4H6"/></svg>',
+  cobrar:'<svg viewBox="0 0 24 24"><path d="M4.5 11a7.5 7.5 0 0 1 13-4.4M19.5 13a7.5 7.5 0 0 1-13 4.4"/><path d="M17.5 3.2v3.4h-3.4M6.5 20.8v-3.4h3.4"/></svg>',
+  tratados:'<svg viewBox="0 0 24 24"><path d="M4.5 12.5l4.8 4.8L19.5 7"/></svg>'};
 function renderRail(){
   const el=$('#_vrail'); if(!el) return;
-  const act=rows;   /* rail counts read the whole active queue, not the current subset */
+  /* Scope every count to the active front — see the block comment. */
+  const act = tab==='all' ? rows : rows.filter(r=>(r.counterparty||'')===tab);
+  const scopeLab=(FRONT_META[tab]||{}).lab||'Hoje';
   const nR=respondCount(act), nC=chaseCount(act);
   const semD=act.filter(r=>!(r.owners&&r.owners.length)).length;
   const attN=act.filter(r=>r.has_attachment).length;
@@ -249,18 +282,26 @@ function renderRail(){
   const purLab=k=>(LABELS.purpose&&LABELS.purpose[k])||k.toLowerCase().replace(/_/g,' ');
   const nM=act.filter(r=>((r.entities||{}).money_value!=null)&&((r.clock||{}).state==='WE_OWE')).length;
   const nD=act.filter(r=>(r.entities||{}).deadline).length;
-  el.innerHTML='<div class="rl">Vistas</div>'
-    +'<button class="vit'+((mode==='ativos'&&vista==='fila'&&!('band' in filters))?' on':'')+'" data-vista="risco"><span class="vd red"></span>Em risco<span class="vc">'+nR+'</span><kbd>1</kbd></button>'
-    +'<button class="vit'+(vista==='money'?' on':'')+'" data-vista="money"><span class="vd ac"></span>€ em jogo<span class="vc">'+nM+'</span><kbd>2</kbd></button>'
-    +'<button class="vit'+(vista==='prazos'?' on':'')+'" data-vista="prazos"><span class="vd purple"></span>Prazos<span class="vc">'+nD+'</span><kbd>3</kbd></button>'
-    +'<button class="vit'+(vista==='fila'&&filters.band==='chase'?' on':'')+'" data-vista="cobrar"><span class="vd amber"></span>Cobranças<span class="vc">'+nC+'</span><kbd>4</kbd></button>'
-    +'<button class="vit'+(mode==='tratados'?' on':'')+'" data-vista="tratados"><span class="vd green"></span>Tratados<kbd>5</kbd></button>'
-    +'<div class="rl">Tipo</div>'
-    +tops.map(([k,n])=>'<button class="fit'+(filters.purpose===k?' on':'')+'" data-fpur="'+esc(k)+'">'+esc(purLab(k))+'<span class="vc">'+n+'</span></button>').join('')
-    +'<div class="rl">Estado</div>'
-    +'<button class="fit'+(('owner' in filters&&filters.owner==='')?' on':'')+'" data-fest="semdono">Sem dono<span class="vc">'+semD+'</span></button>'
-    +'<button class="fit'+(filters.hasAttachment?' on':'')+'" data-fest="anexo">Com anexo<span class="vc">'+attN+'</span></button>'
-    +(draftN?'<button class="fit ro" disabled title="rascunhos prontos — visíveis nas linhas ✍">Com rascunho ✍<span class="vc">'+draftN+'</span></button>':'');
+  const vit=(vk,lab,cnt,key,on)=>'<button class="vit'+(on?' on':'')+'" data-vista="'+vk+'">'
+      +V_ICON[vk]+'<span class="vl">'+lab+'</span>'
+      +(cnt!=null?'<span class="vc">'+cnt+'</span>':'')+'<kbd class="kh">'+key+'</kbd></button>';
+  let h='<div class="rl">Vistas <span class="scope">· '+esc(scopeLab)+'</span></div>'
+    +vit('risco','Em risco',nR,'1',(mode==='ativos'&&vista==='fila'&&!('band' in filters)))
+    +vit('money','€ em jogo',nM,'2',vista==='money')
+    +vit('prazos','Prazos',nD,'3',vista==='prazos')
+    +vit('cobrar','Cobranças',nC,'4',(vista==='fila'&&filters.band==='chase'))
+    +vit('tratados','Tratados',null,'5',mode==='tratados');
+  const est=[];
+  if(tops.length) h+='<div class="rl">Tipo de pedido</div>'
+    +tops.map(([k,n])=>'<button class="fit'+(filters.purpose===k?' on':'')+'" data-fpur="'+esc(k)+'">'+esc(purLab(k))+'<span class="vc">'+n+'</span></button>').join('');
+  if(semD>0&&semD<act.length) est.push('<button class="fit'+(('owner' in filters&&filters.owner==='')?' on':'')+'" data-fest="semdono">Sem dono<span class="vc">'+semD+'</span></button>');
+  if(attN>0&&attN<act.length*0.9) est.push('<button class="fit'+(filters.hasAttachment?' on':'')+'" data-fest="anexo">Com anexo<span class="vc">'+attN+'</span></button>');
+  if(draftN>0) est.push('<button class="fit ro" disabled title="rascunhos prontos — ✍ nas linhas">Com rascunho ✍<span class="vc">'+draftN+'</span></button>');
+  /* «rever N» leaves the strip (owner feedback) — NEEDS_REVIEW is Para ti's business; it lands
+     here as a quiet Estado facet linking there, hidden at zero. */
+  if(_needsReview>0) est.push('<button class="fit rev" data-fest="rever">Rever classificação<span class="vc">'+_needsReview+'</span></button>');
+  if(est.length) h+='<div class="rl">Estado</div>'+est.join('');
+  el.innerHTML=h;
 }
 
 /* ── filter bar ─────────────────────────────────────────────────────── */
@@ -297,25 +338,8 @@ function render(){
     focus=Math.max(0,Math.min(focus,v.length-1));
     focusRoot=v[focus]?v[focus].thread_root:null;
   }
-  const n=respondCount(va), nc=chaseCount(va);
-  const risk=$('#_risk');
-  if(risk){
-    risk.classList.toggle('hidden',mode==='tratados');   /* the ledger has no response risk */
-    risk.textContent=n+' a responder';
-    risk.classList.toggle('clear',n===0);
-    risk.classList.toggle('filtering',filters.band==='risk');
-    if(_prevRisk!==null&&_prevRisk!==n&&!reduceMotion()){risk.classList.remove('pulse');void risk.offsetWidth;risk.classList.add('pulse');}
-    _prevRisk=n;
-  }
-  /* The chase half of the honest headline. Hidden at zero — «0 a cobrar» would be noise. */
-  const cob=$('#_cobrar');
-  if(cob){
-    cob.classList.toggle('hidden',mode==='tratados'||(nc===0&&filters.band!=='chase'));
-    cob.textContent=nc+' a cobrar';
-    cob.classList.toggle('filtering',filters.band==='chase');
-  }
-  const cnt=$('#_count'); if(cnt) cnt.textContent=v.length?S.threads(v.length):S.semDados;
-  renderTabs(); renderRail(); renderFbar();
+  /* The demand headline lives INSIDE the fronts now (ADR-034) — no abstract strip number. */
+  renderFronts(); renderRail(); renderFbar();
   const zero=$('#_zero');
   if(zero){
     zero.classList.toggle('hidden',v.length>0);
@@ -1004,13 +1028,9 @@ paintFreshness(); setInterval(paintFreshness,60000);
 
 /* ── NEEDS_REVIEW chip: tier-1 failures finally get a surface (quiet, links to Para ti) ── */
 let _needsReview=(typeof NEEDS_REVIEW!=='undefined')?(NEEDS_REVIEW|0):0;
-function paintRever(){
-  const el=$('#_rever'); if(!el) return;
-  el.textContent='rever '+_needsReview;
-  el.classList.toggle('hidden',!_needsReview);
-}
-paintRever();
-const _rv=$('#_rever'); if(_rv)_rv.addEventListener('click',()=>{location.href='/para-ti';});
+/* «rever N» now lives in the rail's Estado group (ADR-034) — re-render it after a poll updates the
+   count. renderRail() is hoisted, so calling it here is safe regardless of source order. */
+function paintRever(){ if($('#_vrail')) renderRail(); }
 
 /* ── live refresh (ADR-023 reaches the hero, ADR-033 P2) ────────────────
    The server keeps ingesting on its own schedule; an open tab must converge without a reload.
@@ -1201,14 +1221,8 @@ if(_of) _of.addEventListener('change',e=>{
   setFilter('owner', v==='__all'?null:v);
 });
 
-/* the headline chips are FILTERS, not labels — each half toggles down to what it counts */
-const _rk=$('#_risk');
-if(_rk) _rk.addEventListener('click',()=>setFilter('band',filters.band==='risk'?null:'risk'));
-const _cb=$('#_cobrar');
-if(_cb) _cb.addEventListener('click',()=>setFilter('band',filters.band==='chase'?null:'chase'));
-
-/* tabs + rail */
-const _tb=$('#_tabs');
+/* fronts (the hero cards) + rail */
+const _tb=$('#_fronts');
 if(_tb) _tb.addEventListener('click',e=>{
   const t=e.target.closest('[data-tab]'); if(t) setTab(t.dataset.tab);
 });
@@ -1229,6 +1243,7 @@ if(_vr) _vr.addEventListener('click',e=>{
   if(fe){
     if(fe.dataset.fest==='semdono') setFilter('owner',('owner' in filters&&filters.owner==='')?null:'');
     else if(fe.dataset.fest==='anexo') setFilter('hasAttachment',filters.hasAttachment?null:true);
+    else if(fe.dataset.fest==='rever') location.href='/para-ti';
   }
 });
 
@@ -1296,19 +1311,18 @@ applyURLState();
 _BODY_HTML = """
 <div class="mesa">
   <div class="bar">
-    <button id="_risk" class="risk" aria-live="polite" title="devemos resposta, vermelho+laranja (clica para filtrar)"
-      style="font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;border-radius:20px;padding:3px 12px;border:1px solid"></button>
-    <button id="_cobrar" class="hidden" title="à espera deles há 72h+ — candidatas a cobrança (clica para filtrar)"></button>
-    <button id="_rever" class="hidden" title="classificações que a cascata não conseguiu decidir — rever no Para ti"></button>
-    <span id="_count"></span>
+    <!-- The fronts are the hero (ADR-034): each counterparty front is a status-bearing card whose
+         OWN demand («N a responder · N a cobrar») lives inside the button it describes — navigation
+         and status in one glance, and a count that can never be misread as a global headline. -->
+    <div id="_fronts" class="fronts" role="tablist" aria-label="Contraparte"></div>
+    <span class="bgrow"></span>
     <span id="_fresh" class="fresh" title="idade do correio sincronizado"></span>
-    <div id="_tabs" class="mtabs" role="tablist" aria-label="Contraparte"></div>
     <input id="_search" type="text" placeholder="/ procurar…" autocomplete="off" aria-label="Filtrar threads"/>
-    <select id="_order" aria-label="Ordenar a fila" title="Ordenar a fila">
+    <select id="_order" class="tsel" aria-label="Ordenar a fila" title="Ordenar a fila">
       <option value="risk">Risco de resposta</option>
       <option value="recent">Mais recentes</option>
     </select>
-    <select id="_ownerf" aria-label="Filtrar por dono" title="Filtrar por dono">
+    <select id="_ownerf" class="tsel" aria-label="Filtrar por dono" title="Filtrar por dono">
       <option value="__all">dono: todos</option>
       <option value="">sem dono</option>
     </select>
@@ -1347,25 +1361,47 @@ _EXTRA_CSS = """
     .vrail{position:static;flex-direction:row;flex-wrap:wrap;gap:4px}
     .vrail .rl{width:100%}
   }
-  /* counterparty tabs */
-  .mtabs{display:flex;gap:2px;background:var(--bd2);border-radius:10px;padding:3px}
-  .mtab{display:inline-flex;align-items:center;gap:6px;border:none;background:none;cursor:pointer;
-    font-family:inherit;font-size:12.5px;font-weight:650;color:var(--mut);border-radius:8px;padding:4px 10px}
-  .mtab.on{background:var(--card);color:var(--tx);box-shadow:var(--shadow)}
-  .mtab .mn{font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--mut2)}
-  .mtab.on .mn{color:var(--tx)}
-  .mdot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  /* ── counterparty fronts (the hero cards, ADR-034) ─────────────────────
+     The demand lives inside the button it describes; the card is calm (no colour) until something
+     actually demands you, then the numbers carry the band colour. */
+  .bar{align-items:stretch}
+  .bgrow{flex:1}
+  .fronts{display:flex;gap:8px;align-items:stretch;flex-wrap:wrap}
+  .fc{display:flex;flex-direction:column;gap:3px;align-items:flex-start;border:1px solid var(--bd);
+    background:var(--card);border-radius:11px;padding:8px 13px;min-width:158px;cursor:pointer;text-align:left;
+    font-family:inherit}
+  .fc:hover{border-color:var(--ac-line);background:var(--surface2,#f7f9fb)}
+  .fc.on{border-color:var(--ac);background:var(--ac-soft);box-shadow:inset 0 -2.5px 0 var(--ac)}
+  .fc .fn{display:flex;align-items:center;gap:7px;font-weight:750;font-size:14px;color:var(--tx)}
+  .fc .fn .tot{font-size:10.5px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut2)}
+  .fc .fs{font-size:11.5px;font-weight:600;color:var(--mut);display:flex;align-items:center;gap:6px}
+  .fc .fs b{font-size:12.5px;font-weight:800;font-variant-numeric:tabular-nums}
+  .fc .fs b.r{color:var(--red)} .fc .fs b.c{color:var(--amber)}
+  .fc .fs .ok{color:var(--green)} .fc .fs .fmut{color:var(--mut2)}
+  .fc .fs .fdiv{color:var(--bd)}
+  .mdot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}
   .mdot.CLIENT{background:var(--cli)} .mdot.SUPPLIER{background:var(--forn)} .mdot.LEAD{background:var(--lead)}
-  /* vistas rail */
+  /* right-side controls retreat to a modest scale */
+  .tsel{font-size:12px}
+  /* ── vistas rail (scoped, iconic) ─────────────────────────────────────── */
   .vrail .rl{font-size:9.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--mut2);padding:10px 8px 5px}
-  .vit,.fit{display:flex;align-items:center;gap:8px;border:none;background:none;cursor:pointer;text-align:left;
+  .vrail .rl .scope{color:var(--ac);letter-spacing:.04em}
+  .vit,.fit{display:flex;align-items:center;gap:9px;border:none;background:none;cursor:pointer;text-align:left;
     font-family:inherit;font-size:12.5px;font-weight:600;color:var(--mut);border-radius:8px;padding:5px 9px;width:100%}
   .vit:hover,.fit:hover{background:var(--bd2);color:var(--tx)}
   .vit.on,.fit.on{background:var(--ac-soft);color:var(--ac);font-weight:700}
-  .vit .vd{width:7px;height:7px;border-radius:3px;flex:0 0 auto}
-  .vd.red{background:var(--red)} .vd.amber{background:var(--amber)} .vd.green{background:var(--green)}
+  .vit svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;
+    stroke-linejoin:round;flex:0 0 auto;color:var(--mut2)}
+  .vit:hover svg,.vit.on svg{color:currentColor}
+  .vit .vl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fit{gap:0}
   .vit .vc,.fit .vc{margin-left:auto;font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--mut2)}
-  .vit kbd{font-size:9.5px;color:var(--mut2);background:var(--bd2);border-radius:4px;padding:0 4px;font-family:ui-monospace,monospace}
+  .fit.rev{color:var(--lead)} .fit.rev .vc{color:var(--lead)}
+  /* keyboard digit: hover-only chip, so the count column reads as ONE number per row */
+  .vit .kh{opacity:0;transition:opacity .12s ease;font-size:9.5px;color:var(--mut2);background:var(--bd2);
+    border-radius:4px;padding:0 4px;font-family:ui-monospace,monospace;margin-left:6px}
+  .vit:hover .kh{opacity:1}
+  @media (prefers-reduced-motion:reduce){.vit .kh{transition:none}}
   .fit.ro{cursor:default;opacity:.75}
   /* ── obligation section headers (sticky, collapsible) ─────────────── */
   .ghead{position:sticky;top:0;z-index:2;display:flex;align-items:baseline;gap:9px;
@@ -1411,22 +1447,9 @@ _EXTRA_CSS = """
   .tdot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;vertical-align:middle}
   .tdot.proposed{border:1.5px dashed var(--mut2);background:transparent}
   .tdot.committed{border:1.5px solid var(--int);background:var(--int)}
-  /* ── headline chips + freshness ───────────────────────────────────── */
-  .risk{color:var(--red);background:var(--red-bg);border-color:var(--red-line)!important;cursor:pointer;font-family:inherit}
-  .risk:hover{filter:brightness(.96)}
-  .risk.filtering{outline:2px solid var(--red);outline-offset:1px}
-  .risk.clear{color:var(--green);background:var(--green-bg);border-color:var(--green-line)!important}
-  .risk.pulse{animation:pop .35s ease}
-  #_cobrar{color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);cursor:pointer;
-    font-family:inherit;font-size:12.5px;font-weight:680;font-variant-numeric:tabular-nums;
-    border-radius:20px;padding:3px 12px}
-  #_cobrar:hover{filter:brightness(.96)}
-  #_cobrar.filtering{outline:2px solid var(--amber);outline-offset:1px}
+  /* ── freshness stamp ──────────────────────────────────────────────── */
   .fresh{color:var(--mut2);font-size:11.5px;font-variant-numeric:tabular-nums}
   .fresh.stale{color:var(--amber);font-weight:700}
-  #_rever{color:var(--purple);background:#efeafb;border:1px solid #ddd2f5;cursor:pointer;
-    font-family:inherit;font-size:11.5px;font-weight:680;border-radius:20px;padding:3px 11px}
-  #_rever:hover{filter:brightness(.96)}
   /* ── entity chips (P2): dashed € = proposed, ⚑ deadline, ↻ related, novo ── */
   .rchip.money{color:var(--mut);border:1px dashed var(--mut2);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
   .rchip.ddl{color:var(--amber);background:var(--amber-bg);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
