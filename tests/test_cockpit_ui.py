@@ -173,3 +173,22 @@ def test_nav_lens_links_carry_icons_and_a_monogram():
     assert html.count("<svg viewBox") >= 6            # one glyph per lens
     assert ".nlink svg{" in html and 'class="nlbl"' in html
     assert "class='mark'" in html                     # the e2d monogram
+
+
+def test_dark_theme_tokens_toggle_and_no_hardcoded_surfaces():
+    """ADR-035: the shell ships a full dark theme — the validated dark palette under
+    [data-theme="dark"], the new tint sub-tokens (surface2/int-bg/int-line/purple-bg), a pre-paint
+    no-flash script that follows the saved choice or the OS, and a nav toggle. Component CSS must no
+    longer hardcode a light surface, or dark mode would show white patches."""
+    html = _make()
+    assert ':root[data-theme="dark"]' in html
+    for tok in ("--bg:#10151B", "--card:#171E26", "--tx:#E6EBF0", "--ac:#7FB0D0",
+                "--cli:#219980", "--forn:#6E85DE", "--lead:#BA8628"):
+        assert tok in html, tok
+    for tok in ("--surface2:#F7F9FB", "--int-bg:", "--int-line:", "--purple-bg:"):
+        assert tok in html, tok
+    assert "e2d-theme" in html and "prefers-color-scheme:dark" in html      # no-flash + OS fallback
+    assert "id='_themebtn'" in html and "setAttribute('data-theme'" in html  # the toggle
+    css = html.split("<style>")[1].split("</style>")[0]
+    for hard in ("background:#fff", "background:#f8f9fb", "background:#f0fdfa", "background:#efeafb"):
+        assert hard not in css, hard                                         # tokenized, not raw

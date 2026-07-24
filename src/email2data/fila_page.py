@@ -1383,7 +1383,7 @@ _EXTRA_CSS = """
   .fc{display:flex;flex-direction:column;gap:3px;align-items:flex-start;border:1px solid var(--bd);
     background:var(--card);border-radius:11px;padding:8px 13px;min-width:158px;cursor:pointer;text-align:left;
     font-family:inherit}
-  .fc:hover{border-color:var(--ac-line);background:var(--surface2,#f7f9fb)}
+  .fc:hover{border-color:var(--ac-line);background:var(--surface2)}
   .fc.on{border-color:var(--ac);background:var(--ac-soft);box-shadow:inset 0 -2.5px 0 var(--ac)}
   .fc .fn{display:flex;align-items:center;gap:7px;font-weight:750;font-size:14px;color:var(--tx)}
   .fc .fn .tot{font-size:10.5px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut2)}
@@ -1516,7 +1516,7 @@ _EXTRA_CSS = """
   .verb kbd{background:var(--bg);border:1px solid var(--bd);border-radius:4px;padding:0 5px;
     font-family:ui-monospace,monospace;font-size:10.5px;color:var(--mut)}
   .dai{border:1px dashed var(--mut2);border-radius:11px;padding:11px 14px;margin-bottom:11px;background:var(--card)}
-  .dai.committed{border-style:solid;border-color:#bfe6e0}
+  .dai.committed{border-style:solid;border-color:var(--int-line)}
   .dai-h{display:flex;align-items:center;gap:9px;margin-bottom:4px}
   .dai-k{font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--mut)}
   .dai p{margin:0;font-size:12.5px;line-height:1.55;color:var(--tx)}
@@ -1580,24 +1580,24 @@ _EXTRA_CSS = """
   #_order:hover,#_ownerf:hover{border-color:var(--ac);color:var(--ac)}
   .fbar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
   .fchip{display:inline-flex;align-items:center;gap:5px;background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac);border-radius:20px;padding:3px 10px;font-weight:600;cursor:pointer;font-size:12px}
-  .fchip:hover{background:#D5E4EF}
+  .fchip:hover{filter:brightness(1.05)}
   .cp{border:none;font-family:inherit}
-  .pur{font-size:10px;font-weight:650;border-radius:20px;padding:2px 9px;background:#f3f4f6;
+  .pur{font-size:10px;font-weight:650;border-radius:20px;padding:2px 9px;background:var(--surface2);
     color:var(--mut);border:1px solid var(--bd);cursor:pointer;line-height:1.5}
   .pur:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
-  .pur.committed{border-color:var(--int);color:var(--int);background:#f0fdfa}
+  .pur.committed{border-color:var(--int);color:var(--int);background:var(--int-bg)}
   .mtxt{color:var(--mut)}
   .rmeta .mtxt{font-size:11px}
   .pchip{font-size:11.5px;font-weight:650;border-radius:8px;padding:3px 10px;cursor:pointer;border:1px solid}
   .pchip.in{background:var(--ac-soft);border-color:var(--ac-line);color:var(--ac)}
-  .pchip.in:hover{background:#D5E4EF}
-  .pchip.new{background:#fff;border-color:var(--bd);color:var(--mut)}
-  .pchip.new:hover{border-color:var(--int);color:var(--int);background:#effbf7}
-  .pchip.draft{background:#fff;border-color:var(--bd);color:var(--mut)}
-  .pchip.draft:hover{border-color:var(--purple);color:var(--purple);background:#f7f4fd}
+  .pchip.in:hover{filter:brightness(1.05)}
+  .pchip.new{background:var(--card);border-color:var(--bd);color:var(--mut)}
+  .pchip.new:hover{border-color:var(--int);color:var(--int);background:var(--int-bg)}
+  .pchip.draft{background:var(--card);border-color:var(--bd);color:var(--mut)}
+  .pchip.draft:hover{border-color:var(--purple);color:var(--purple);background:var(--purple-bg)}
   .draftbox{margin-top:8px;flex-basis:100%}
   .draftbox textarea{width:100%;border:1px solid var(--bd);border-radius:9px;padding:9px 11px;
-    font:12.5px/1.5 inherit;color:var(--tx);background:#fffdf8;resize:vertical}
+    font:12.5px/1.5 inherit;color:var(--tx);background:var(--surface2);resize:vertical}
   .draftbox .dfoot{display:flex;align-items:center;gap:9px;margin-top:5px}
   .rmain[data-act]{cursor:pointer}
   .menu .mhdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:5px 11px 3px}

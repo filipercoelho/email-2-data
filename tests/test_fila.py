@@ -1338,3 +1338,12 @@ def test_fila_nav_badge_is_demand_not_total(tmp_path):
     states = sorted((r["clock"]["state"] for r in d["rows"]))
     assert states == ["AWAITING", "WE_OWE"]                  # two active threads (inventory)…
     assert d["nav_counts"]["fila"] == 1                      # …but the badge is the 1 that demands
+
+
+def test_fila_css_is_fully_tokenized_for_dark_mode(tmp_path):
+    """ADR-035: the Fila's lens CSS carries no raw light-surface hexes (they'd stay white in dark
+    mode) — every surface/tint goes through a token that the dark theme overrides."""
+    css = fila_page.build_fila_html([], []).split("<style>")[1].split("</style>")[0]
+    for hard in ("background:#fff", "background:#f3f4f6", "background:#fffdf8",
+                 "background:#f0fdfa", "#D5E4EF", "background:#f7f4fd"):
+        assert hard not in css, hard

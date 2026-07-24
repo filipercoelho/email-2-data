@@ -117,6 +117,7 @@ def _nav_html(active: str, counts: dict[str, int]) -> str:
         + "<span class='grow'></span>"
         + "<button class='hbtn' id='_syncbtn'>Sincronizar</button>"
         + "<button class='hbtn' id='_denbtn'>densidade</button>"
+        + "<button class='hbtn ic' id='_themebtn' title='Tema claro / escuro' aria-label='Alternar tema'></button>"
         + "</div>\n</header>\n"
     )
 
@@ -129,6 +130,7 @@ _HEAD = """<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>__TITLE__ · email-2-data</title>
+<script>/* stamp the theme before first paint — no flash (ADR-035) */(function(){try{var t=localStorage.getItem('e2d-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 <style>
   /* ── tokens (kept in sync with report.py) ───────────────────────────────
      The ADR-033 «Mesa com Foco» palette, ported from the design-proposal artifact: cool graphite
@@ -136,15 +138,32 @@ _HEAD = """<!doctype html>
      fornecedor blue · lead amber — worst adjacent pair ΔE 19.4 deutan / 21.0 normal, all ≥3:1 on
      white; lead-purple was REJECTED: ΔE 2.9 protan against supplier blue). Semantic sub-tokens
      (-bg/-line) exist so component CSS never scatters raw hexes again. */
-  :root{--bg:#F1F3F6;--card:#fff;--bd:#DCE2E9;--bd2:#EAEEF2;--tx:#182027;--mut:#46525E;--mut2:#7C8894;
-    --ac:#2C5E80;--ac-soft:#E3EDF4;--ac-line:#BDD3E2;--int:#0d9488;--ext:#64748b;
+  :root{--bg:#F1F3F6;--card:#fff;--surface2:#F7F9FB;--bd:#DCE2E9;--bd2:#EAEEF2;--tx:#182027;--mut:#46525E;--mut2:#7C8894;
+    --ac:#2C5E80;--ac-soft:#E3EDF4;--ac-line:#BDD3E2;--int:#0d9488;--int-bg:#EAF7F5;--int-line:#BFE6E0;--ext:#64748b;
     --red:#B3392E;--red-bg:#F9E9E7;--red-line:#EDCBC7;
     --amber:#96660F;--amber-bg:#F7EFDC;--amber-line:#E9DBB4;
     --green:#2E7D4F;--green-bg:#E4F1E9;--green-line:#C6E0D0;
-    --purple:#6b4fd1;
+    --purple:#6b4fd1;--purple-bg:#EFEAFB;
     --cli:#0A8F72;--cli-bg:#DFF1EC;--forn:#3B5FC0;--forn-bg:#E5EAF9;--lead:#A16207;--lead-bg:#F6ECD7;
     --shadow:0 1px 2px rgba(20,28,36,.05),0 1px 3px rgba(20,28,36,.04);
     --rpad:12px;--rfont:13.5px;}
+  /* ── dark theme (ADR-035) ───────────────────────────────────────────────
+     The validated dark palette from the design-proposal artifact: dark graphite surfaces, a lighter
+     steel accent, and the CVD-checked dark counterparty trio (cliente #219980 · fornecedor #6E85DE
+     · lead #BA8628 — the trio passes the validator on the dark surface). Token-level, so every
+     component that already speaks in var(--…) recolours for free. An early inline script (below)
+     stamps data-theme from the saved choice or the OS preference before first paint (no flash), so
+     the light `:root` default and this override are all that's needed — no duplicated @media block. */
+  :root[data-theme="light"]{color-scheme:light}
+  :root[data-theme="dark"]{color-scheme:dark;
+    --bg:#10151B;--card:#171E26;--surface2:#1C242D;--bd:#2A343F;--bd2:#232D37;--tx:#E6EBF0;--mut:#A9B4BF;--mut2:#71808C;
+    --ac:#7FB0D0;--ac-soft:#1E3140;--ac-line:#2E495C;--int:#4CC2B4;--int-bg:#12332C;--int-line:#2E4A44;--ext:#8B98A8;
+    --red:#E2685C;--red-bg:#3A2320;--red-line:#5A342E;
+    --amber:#D9A441;--amber-bg:#33290F;--amber-line:#4A3C1C;
+    --green:#58B282;--green-bg:#1C3226;--green-line:#2E4A3A;
+    --purple:#9C86E8;--purple-bg:#241E3A;
+    --cli:#219980;--cli-bg:#12332C;--forn:#6E85DE;--forn-bg:#1F2942;--lead:#BA8628;--lead-bg:#332810;
+    --shadow:0 1px 2px rgba(0,0,0,.34),0 1px 3px rgba(0,0,0,.28);}
   body.compact{--rpad:7px;--rfont:13px}
   *{box-sizing:border-box} html,body{margin:0}
   body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--tx);background:var(--bg)}
@@ -166,10 +185,12 @@ _HEAD = """<!doctype html>
   .nlink:hover{background:var(--bg);color:var(--tx)}
   .nlink.on{background:var(--ac);color:#fff}
   .nlink.on svg{opacity:1}
-  .nlink.on:hover{background:#254F6C}
+  .nlink.on:hover{filter:brightness(1.08)}
   .nbadge{background:rgba(255,255,255,.25);border-radius:20px;padding:0 6px;font-size:10px;font-weight:700;font-variant-numeric:tabular-nums}
   .nlink:not(.on) .nbadge{background:var(--red-bg);color:var(--red)}
   .grow{margin-left:auto}
+  .hbtn.ic{padding:5px 8px;display:inline-flex;align-items:center}
+  .hbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   .hbtn{color:var(--mut);background:none;border:1px solid var(--bd);cursor:pointer;
     padding:5px 10px;border-radius:8px;font-size:12.5px;font-weight:600}
   .hbtn:hover{border-color:var(--ac);color:var(--ac)}
@@ -183,7 +204,7 @@ _HEAD = """<!doctype html>
   .row{display:flex;align-items:center;gap:12px;padding:var(--rpad) 15px;border-bottom:1px solid var(--bd2);
     border-left:3px solid transparent;cursor:pointer;transition:opacity .16s ease,transform .16s ease,background .12s}
   .row:last-child{border-bottom:none}
-  .row:hover{background:#F7F9FB}
+  .row:hover{background:var(--surface2)}
   .row.on{background:var(--ac-soft);border-left-color:var(--ac)}
   .row.leaving{opacity:0;transform:translateX(10px)}
   /* Counterparty identity: the CVD-validated trio — cliente teal · fornecedor blue · lead amber. */
@@ -196,7 +217,7 @@ _HEAD = """<!doctype html>
   .rmain{flex:1;min-width:0}
   .subj{font-weight:620;font-size:var(--rfont);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .rmeta{color:var(--mut);font-size:11.5px;margin-top:2px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-  .why{margin-top:6px;font-size:12px;color:#4a4326;background:#fffdf3;border:1px solid #f0e6c0;
+  .why{margin-top:6px;font-size:12px;color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);
     border-radius:8px;padding:6px 10px;line-height:1.5;white-space:normal}
   /* ── component kit: clock ────────────────────────────────────────────── */
   .clock{flex:0 0 auto;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -208,12 +229,12 @@ _HEAD = """<!doctype html>
      normal here), animating every red dot destroys the signal — reserve motion for the oldest. */
   .clock.red.crit .d{animation:beat 2s ease-in-out infinite}
   /* ── component kit: owner chip ───────────────────────────────────────── */
-  .owner{flex:0 0 auto;font-size:12px;color:var(--int);background:#f0fdfa;
-    border:1px solid #bfe6e0;border-radius:20px;padding:2px 10px;cursor:pointer;white-space:nowrap}
-  .owner.empty{background:#f6f7f9;border-color:var(--bd);color:var(--mut2)}
+  .owner{flex:0 0 auto;font-size:12px;color:var(--int);background:var(--int-bg);
+    border:1px solid var(--int-line);border-radius:20px;padding:2px 10px;cursor:pointer;white-space:nowrap}
+  .owner.empty{background:var(--surface2);border-color:var(--bd);color:var(--mut2)}
   /* ── component kit: action buttons ──────────────────────────────────── */
   .acts{flex:0 0 auto;display:flex;gap:5px}
-  .acts button,.act-btn{border:1px solid var(--bd);background:#fff;border-radius:8px;
+  .acts button,.act-btn{border:1px solid var(--bd);background:var(--card);border-radius:8px;
     cursor:pointer;font-size:13px;color:var(--mut);line-height:1;padding:0 10px;height:30px}
   .acts button{width:30px;padding:0}
   .acts button:hover,.act-btn:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
@@ -221,9 +242,9 @@ _HEAD = """<!doctype html>
   .act-btn.accept:hover{background:var(--green-bg)}
   /* ── B5 trust grammar ─────────────────────────────────────────────────── */
   .trust{font-size:10.5px;font-weight:650;border-radius:20px;padding:1px 8px;cursor:pointer;
-    font-variant-numeric:tabular-nums;background:#fff}
+    font-variant-numeric:tabular-nums;background:var(--card)}
   .trust.proposed{border:1px dashed var(--mut2);color:var(--mut)}
-  .trust.committed{border:1px solid var(--int);color:var(--int);background:#f0fdfa}
+  .trust.committed{border:1px solid var(--int);color:var(--int);background:var(--int-bg)}
   .trust.committed::before{content:"✓ ";font-weight:700}
   /* ── readiness ring (C4 Projetos) ────────────────────────────────────── */
   .ring-wrap{flex:0 0 auto;position:relative;width:42px;height:42px}
@@ -237,7 +258,7 @@ _HEAD = """<!doctype html>
   .texp{display:flex;flex-direction:column;gap:9px;white-space:normal;cursor:default}
   .thead{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-bottom:2px}
   .tsum{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
-  .tmsg{background:#f8f9fb;border:1px solid var(--bd2);border-radius:9px;padding:8px 11px}
+  .tmsg{background:var(--surface2);border:1px solid var(--bd2);border-radius:9px;padding:8px 11px}
   .tmeta{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;font-size:11px}
   .taddr{font-weight:650;font-size:12px;color:var(--tx)}
   .tarrow{color:var(--mut2)}
@@ -265,11 +286,11 @@ _HEAD = """<!doctype html>
     color:var(--ac);border-radius:6px;padding:1px 6px;text-decoration:none}
   .tatt:hover{filter:brightness(.97)}
   /* embedded messages (extracted from forwarded chains, not direct IMAP) */
-  .tmsg.embedded{background:#fafbfc;border-style:dashed}
+  .tmsg.embedded{background:var(--bd2);border-style:dashed}
   .tembedded{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:1px 6px;border:1px solid var(--bd);border-radius:5px}
   /* provenance badges: which spec fields this message supplied */
   .tprov{margin-top:4px;display:flex;flex-wrap:wrap;gap:4px}
-  .tprovbadge{font-size:10px;font-weight:700;background:#e7f6ee;border:1px solid #bfe6cf;color:var(--green);border-radius:5px;padding:1px 6px}
+  .tprovbadge{font-size:10px;font-weight:700;background:var(--green-bg);border:1px solid var(--green-line);color:var(--green);border-radius:5px;padding:1px 6px}
   /* ── timeline (C2 Contrapartes) ──────────────────────────────────────── */
   .timeline{list-style:none;margin:0;padding:0}
   .titem{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bd2)}
@@ -279,14 +300,14 @@ _HEAD = """<!doctype html>
   .titem .ttype{display:inline-block;font-size:9.5px;font-weight:700;text-transform:uppercase;
     letter-spacing:.05em;padding:1px 7px;border-radius:20px;margin-right:6px}
   .ttype.email{background:var(--ac-soft);color:var(--ac)}
-  .ttype.projeto{background:#efeafb;color:var(--purple)}
+  .ttype.projeto{background:var(--purple-bg);color:var(--purple)}
   /* ── gate items (C3 Para ti) ─────────────────────────────────────────── */
   .gate{background:var(--card);border:1px solid var(--bd);border-radius:14px;
     padding:16px 18px;margin-bottom:10px;box-shadow:var(--shadow)}
   .gate .gkind{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;
     letter-spacing:.05em;padding:2px 9px;border-radius:20px;margin-bottom:8px}
   .gkind.rever{background:var(--red-bg);color:var(--red)}
-  .gkind.projeto{background:#efeafb;color:var(--purple)}
+  .gkind.projeto{background:var(--purple-bg);color:var(--purple)}
   .gkind.identidade{background:var(--ac-soft);color:var(--ac)}
   .gate .gtitle{font-weight:640;font-size:14px;margin-bottom:4px}
   .gate .gwhy{font-size:12.5px;color:var(--mut);margin-bottom:10px;line-height:1.5}
@@ -294,7 +315,7 @@ _HEAD = """<!doctype html>
   /* ── cluster card (C2 list) ──────────────────────────────────────────── */
   .ccard{background:var(--card);border:1px solid var(--bd);border-left:3px solid transparent;
     border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;box-shadow:var(--shadow)}
-  .ccard:hover{background:#F7F9FB} .ccard.on{border-left-color:var(--ac);background:var(--ac-soft)}
+  .ccard:hover{background:var(--surface2)} .ccard.on{border-left-color:var(--ac);background:var(--ac-soft)}
   .ccard .ch{display:flex;align-items:center;gap:8px;margin-bottom:4px}
   .ccard .cname{font-weight:650;font-size:14px}
   .ccard .cstat{margin-left:auto;font-size:11.5px;color:var(--mut)}
@@ -307,21 +328,21 @@ _HEAD = """<!doctype html>
   /* ── toast / menu / palette / help ──────────────────────────────────── */
   .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--tx);color:#fff;
     padding:9px 16px;border-radius:9px;font-size:13px;box-shadow:var(--shadow);z-index:80}
-  .menu{position:absolute;background:#fff;border:1px solid var(--bd);border-radius:10px;
+  .menu{position:absolute;background:var(--card);border:1px solid var(--bd);border-radius:10px;
     box-shadow:0 4px 16px rgba(20,24,28,.14);z-index:60;min-width:170px;padding:4px}
   .menu .mi{padding:7px 11px;border-radius:7px;cursor:pointer;font-size:13px}
   .menu .mi:hover,.menu .mi.on{background:var(--ac-soft);color:var(--ac)}
   .overlay{position:fixed;inset:0;background:rgba(20,24,28,.32);display:flex;align-items:flex-start;
     justify-content:center;z-index:70}
   .overlay.help{align-items:center}
-  .card{background:#fff;border-radius:14px;padding:22px 26px;box-shadow:var(--shadow);max-width:340px}
+  .card{background:var(--card);border-radius:14px;padding:22px 26px;box-shadow:var(--shadow);max-width:340px}
   .card h3{margin:0 0 12px;font-size:14px}
   .card kbd{background:var(--bg);border:1px solid var(--bd);border-radius:5px;padding:1px 6px;
     font-family:ui-monospace,monospace;font-size:12px}
   .card .kr{display:flex;justify-content:space-between;gap:24px;padding:5px 0;font-size:13px;
     border-top:1px solid var(--bd2)}
   .card .kr:first-of-type{border-top:none}
-  .pcard{background:#fff;border-radius:14px;box-shadow:0 10px 40px rgba(20,24,28,.22);
+  .pcard{background:var(--card);border-radius:14px;box-shadow:0 10px 40px rgba(20,24,28,.22);
     width:min(560px,92vw);margin-top:12vh;overflow:hidden}
   #_pq{width:100%;border:0;border-bottom:1px solid var(--bd);padding:15px 18px;font-size:15px;outline:none}
   #_presults{max-height:50vh;overflow:auto;padding:6px}
@@ -603,4 +624,11 @@ document.addEventListener('keydown',e=>{
   onKey(e);
 });
 try{if(localStorage.getItem('fila-density')==='compact')document.body.classList.add('compact');}catch(e){}
+/* theme toggle (ADR-035): flip data-theme, persist, swap the icon. The pre-paint <head> script set
+   the initial theme from the saved choice / OS preference. Moon when light (→ go dark), sun when dark. */
+const _MOON='<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>';
+const _SUN='<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>';
+function _paintTheme(){const dk=document.documentElement.getAttribute('data-theme')==='dark';const b=$('#_themebtn');if(b){b.innerHTML=dk?_SUN:_MOON;b.title=dk?'Tema claro':'Tema escuro';}}
+_paintTheme();
+const _thb=$('#_themebtn');if(_thb)_thb.addEventListener('click',()=>{const dk=document.documentElement.getAttribute('data-theme')==='dark';const nx=dk?'light':'dark';document.documentElement.setAttribute('data-theme',nx);try{localStorage.setItem('e2d-theme',nx);}catch(e){}_paintTheme();});
 """
