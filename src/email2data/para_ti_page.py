@@ -607,6 +607,7 @@ async function refresh(opts){
     _syncedAt = d.synced_at || _syncedAt;
     setNavCounts(d.nav_counts);
     paintFreshness(d.syncing);
+    if(typeof setSynced==='function') setSynced(d.synced_at, d.syncing);   // feed the shell sync pill (P5d)
     const sig = _sig(next);
     if(sig === _lastSig && !opts.force) return;   // nothing moved — don't clobber the DOM
     // Preserve the caret: remember what was focused, restore it by key after the swap.

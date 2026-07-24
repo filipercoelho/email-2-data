@@ -48,16 +48,17 @@ def test_all_nav_items_present():
         assert f'href="{href}"' in html
 
 
-def test_nav_has_the_admin_item_and_marks_exactly_one_link_active():
-    """The Administração lens gets the same shell as the decision lenses, and ``active="admin"``
-    actually matches a nav key — before it existed the page rendered with NOTHING highlighted, which
-    reads as "you are nowhere"."""
+def test_admin_lives_in_the_gear_not_the_lens_strip():
+    """ADR-034 P5d: Admin is configuration, not a decision lens — it moved OUT of the main nav strip
+    into the gear menu (with densidade + tema). It is still reachable (`href="/admin"`), and on the
+    /admin page the gear is marked active so you are never «nowhere». No lens link is active there."""
     html = _make(active="admin")
-    assert 'data-nav="admin" href="/admin">' in html and 'class="nlbl">Admin<' in html
-    assert html.count('class="nlink on"') == 1
-    assert 'class="nlink on" data-nav="admin"' in html
-    # …and it is last in the strip: config comes after the queues, never between them
-    assert html.index('href="/admin"') > html.index('href="/capturas"')
+    assert 'data-nav="admin" href="/admin">' in html            # present — in the gear menu
+    assert 'class="gm" data-nav="admin"' in html                # …as a gear menu item, not a lens link
+    assert 'class="nlink on"' not in html                       # no LENS link is active on /admin
+    assert "id='_gearbtn'" in html and "class='hbtn ic on'" in html   # the gear is the active affordance
+    # Admin is no longer between the queues — it's after everything, in the gear
+    assert html.index('data-nav="admin"') > html.index('data-nav="capturas"')
 
 
 def test_nav_count_badge_shown_when_nonzero():
@@ -168,9 +169,9 @@ def test_nav_lens_links_carry_icons_and_a_monogram():
     """ADR-034 P5b: every lens link gets a stroke glyph (scan by shape), the label wraps in .nlbl,
     and the wordmark gains a monogram — the nav becomes iconic, not plain text."""
     html = _make()
-    for key in ("fila", "contrapartes", "projetos", "para-ti", "capturas", "admin"):
+    for key in ("fila", "contrapartes", "projetos", "para-ti", "capturas"):   # admin is in the gear
         assert f'data-nav="{key}"' in html
-    assert html.count("<svg viewBox") >= 6            # one glyph per lens
+    assert html.count("<svg viewBox") >= 6            # one glyph per lens (+ gear/sync)
     assert ".nlink svg{" in html and 'class="nlbl"' in html
     assert "class='mark'" in html                     # the e2d monogram
 
@@ -192,3 +193,20 @@ def test_dark_theme_tokens_toggle_and_no_hardcoded_surfaces():
     css = html.split("<style>")[1].split("</style>")[0]
     for hard in ("background:#fff", "background:#f8f9fb", "background:#f0fdfa", "background:#efeafb"):
         assert hard not in css, hard                                         # tokenized, not raw
+
+
+def test_p5d_gear_menu_and_freshness_sync_pill():
+    """ADR-034 P5d: the nav ends in one gear (Admin + densidade + tema fold into it) and one
+    freshness-as-sync PILL — «Sincronizar» merged with «correio há N min» (a dot: green fresh /
+    amber stale / spinning while syncing) that you click to sync. Fewer top-level buttons, more
+    signal."""
+    html = _make()
+    # the gear + its three items
+    assert "id='_gearbtn'" in html and "id='_gearmenu'" in html
+    assert "id='_denbtn'" in html and "id='_themebtn'" in html          # densidade + tema now inside
+    assert "Administração" in html                                       # admin link inside the gear
+    # the sync pill
+    assert "syncpill" in html and "id='_synclbl'" in html and "id='_sdot'" in html
+    assert "function setSynced(" in html and ".syncpill.syncing .sdot{" in html
+    # no more standalone densidade button text in the top strip (it's a gear menu item now)
+    assert "<button class='hbtn' id='_denbtn'>densidade</button>" not in html

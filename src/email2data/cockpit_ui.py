@@ -33,10 +33,9 @@ _NAV = [
     ("projetos",     "Projetos",      "/projetos"),
     ("para-ti",      "Para ti",       "/para-ti"),
     ("capturas",     "Capturas",      "/capturas"),
-    # Administração (/admin) — IMAP account inventory + force-sync. Last in the strip: it is a
-    # configuration surface, not a decision lens, so it must never sit between the queues.
-    ("admin",        "Admin",         "/admin"),
 ]
+# Administração (/admin) is NOT a decision lens — it is a configuration surface. Since ADR-034 P5d it
+# lives in the gear menu (with densidade + tema), never between the queues in the main strip.
 
 
 def _embed(obj: Any) -> str:
@@ -94,6 +93,10 @@ _NAV_ICON = {
     "capturas": '<svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7l1.5-3h5L16 7"/><circle cx="12" cy="13" r="3.3"/></svg>',
     "admin": '<svg viewBox="0 0 24 24"><path d="M4 7h11M19 7h1M4 12h6M14 12h6M4 17h9M17 17h3"/><circle cx="17" cy="7" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="15" cy="17" r="2"/></svg>',
 }
+_GEAR_ICON = ('<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.6 7.6 0 0 0'
+              ' 0-2l1.9-1.4-1.9-3.3-2.2.9a7.5 7.5 0 0 0-1.7-1l-.3-2.4H9.9l-.3 2.4a7.5 7.5 0 0 0-1.7 1'
+              'l-2.2-.9L3.8 9.6 5.7 11a7.6 7.6 0 0 0 0 2l-1.9 1.4 1.9 3.3 2.2-.9a7.5 7.5 0 0 0 1.7 1l'
+              '.3 2.4h4.2l.3-2.4a7.5 7.5 0 0 0 1.7-1l2.2.9 1.9-3.3z"/></svg>')
 
 
 def _nav_html(active: str, counts: dict[str, int]) -> str:
@@ -110,14 +113,30 @@ def _nav_html(active: str, counts: dict[str, int]) -> str:
         # data-nav lets a lens refresh its badges in place from a poll, without a page reload.
         links.append(
             f'<a class="{cls}" data-nav="{key}" href="{href}">{icon}<span class="nlbl">{label}</span>{badge}</a>')
+    # Freshness-as-sync pill (ADR-034 P5d): «Sincronizar» and «correio há N min» were an action and
+    # its own status shown as two strangers. Merged into one pill — a dot (green fresh / amber stale
+    # / spinning while syncing) + the age — that you click to sync now. The lens (Fila/Para-ti) feeds
+    # it via setSynced(); other lenses show just «Sincronizar».
+    sync_pill = ("<button class='hbtn syncpill' id='_syncbtn' title='Sincronizar agora'>"
+                 "<span class='sdot' id='_sdot'></span><span id='_synclbl'>Sincronizar</span></button>")
+    # Gear: Admin + densidade + tema fold into one menu (config, not a lens). Active on the /admin page.
+    gear_on = " on" if active == "admin" else ""
+    gear = (
+        "<div class='gearwrap'>"
+        f"<button class='hbtn ic{gear_on}' id='_gearbtn' aria-haspopup='true' aria-label='Definições'>{_GEAR_ICON}</button>"
+        "<div class='gearmenu hidden' id='_gearmenu' role='menu'>"
+        f'<a class="gm" data-nav="admin" href="/admin">{_NAV_ICON["admin"]}<span>Administração</span></a>'
+        "<button class='gm' id='_denbtn' role='menuitem'>Densidade</button>"
+        "<button class='gm' id='_themebtn' role='menuitem'>Tema claro / escuro</button>"
+        "</div></div>"
+    )
     return (
         "<header>\n<div class='htop'>"
         + "<span class='logo'><span class='mark'>e2d</span>email-2-data</span>"
         + "".join(links)
         + "<span class='grow'></span>"
-        + "<button class='hbtn' id='_syncbtn'>Sincronizar</button>"
-        + "<button class='hbtn' id='_denbtn'>densidade</button>"
-        + "<button class='hbtn ic' id='_themebtn' title='Tema claro / escuro' aria-label='Alternar tema'></button>"
+        + sync_pill
+        + gear
         + "</div>\n</header>\n"
     )
 
@@ -190,7 +209,22 @@ _HEAD = """<!doctype html>
   .nlink:not(.on) .nbadge{background:var(--red-bg);color:var(--red)}
   .grow{margin-left:auto}
   .hbtn.ic{padding:5px 8px;display:inline-flex;align-items:center}
+  .hbtn.ic.on{border-color:var(--ac);color:var(--ac)}
   .hbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  /* freshness-as-sync pill (ADR-034 P5d) */
+  .syncpill{display:inline-flex;align-items:center;gap:7px;border-radius:20px}
+  .syncpill .sdot{width:8px;height:8px;border-radius:50%;background:var(--green);flex:0 0 auto}
+  .syncpill.stale .sdot{background:var(--amber)}
+  .syncpill.syncing .sdot{background:var(--ac);animation:beat 1s ease-in-out infinite}
+  .syncpill.stale{color:var(--amber);border-color:var(--amber-line)}
+  /* gear menu (Admin + densidade + tema) */
+  .gearwrap{position:relative;display:inline-flex}
+  .gearmenu{position:absolute;top:38px;right:0;z-index:60;min-width:180px;padding:5px;
+    background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:0 6px 22px rgba(0,0,0,.16)}
+  .gearmenu .gm{display:flex;align-items:center;gap:9px;width:100%;text-align:left;text-decoration:none;
+    border:none;background:none;cursor:pointer;font:600 13px inherit;color:var(--tx);border-radius:8px;padding:8px 10px}
+  .gearmenu .gm:hover{background:var(--bd2)}
+  .gearmenu .gm svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;color:var(--mut2)}
   .hbtn{color:var(--mut);background:none;border:1px solid var(--bd);cursor:pointer;
     padding:5px 10px;border-radius:8px;font-size:12.5px;font-weight:600}
   .hbtn:hover{border-color:var(--ac);color:var(--ac)}
@@ -580,9 +614,15 @@ function _rp(){_pf=Math.max(0,Math.min(_pf,_pi.length-1));$('#_presults').innerH
 function _runP(i){const it=_pi[i];if(!it)return;closePalette();it.run();}
 function toggleDensity(){document.body.classList.toggle('compact');try{localStorage.setItem('fila-density',document.body.classList.contains('compact')?'compact':'');}catch(e){}}
 function onEsc(){}  /* lens may override */
+/* ── freshness-as-sync pill (ADR-034 P5d) ────────────────────────────────
+   One control shows the sync status (dot: green fresh / amber stale / spinning) + the age, and
+   clicking it syncs. Lenses feed the time via setSynced(iso); the shared shell owns the label. */
+function _agoLabel(iso){if(!iso)return'';var s=Math.max(0,(Date.now()-Date.parse(iso))/1000);if(s<90)return'agora mesmo';var m=Math.round(s/60);if(m<60)return'há '+m+' min';var h=Math.round(m/60);return'há '+h+(h===1?' hora':' horas');}
+let _syncedIso=null;
+function setSynced(iso,syncing){var p=$('#_syncbtn'),l=$('#_synclbl');if(!p)return;if(iso)_syncedIso=iso;if(syncing){p.classList.add('syncing');p.classList.remove('stale');if(l)l.textContent='a sincronizar…';return;}p.classList.remove('syncing');if(!_syncedIso){if(l)l.textContent='Sincronizar';return;}var age=(Date.now()-Date.parse(_syncedIso))/1000;p.classList.toggle('stale',age>45*60);if(l)l.textContent='correio '+_agoLabel(_syncedIso);}
 /* Post-sync: a lens that defines onSynced() refreshes ITSELF in place (ADR-023/§7 — a reload throws
    away the user's position mid-decision); lenses without the hook keep the legacy reload. */
-async function syncNow(){toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);return;}if(!r.ok){toast(S.syncFalhou);return;}await r.json();if(typeof onSynced==='function'){onSynced();}else{toast(S.sincronizado);setTimeout(()=>location.reload(),700);}}catch(e){toast(S.syncFalhou);}}
+async function syncNow(){setSynced(null,true);toast(S.sincronizando);try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===409){toast(S.syncEmCurso);setSynced();return;}if(!r.ok){toast(S.syncFalhou);setSynced();return;}await r.json();if(typeof onSynced==='function'){onSynced();}else{toast(S.sincronizado);setTimeout(()=>location.reload(),700);}}catch(e){toast(S.syncFalhou);setSynced();}}
 /* Nav badge refresh from any lens poll (shared; a lens-local copy may shadow this harmlessly). */
 function setNavCounts(counts){document.querySelectorAll('.nlink[data-nav]').forEach(a=>{const n=(counts||{})[a.dataset.nav]||0;let b=a.querySelector('.nbadge');if(n){if(!b){b=document.createElement('span');b.className='nbadge';a.appendChild(b);}b.textContent=n;}else if(b){b.remove();}});}
 """
@@ -602,6 +642,12 @@ $('#_palette').addEventListener('click',e=>{if(e.target.id==='_palette')closePal
 $('#_help').addEventListener('click',e=>{if(e.target.id==='_help')$('#_help').classList.add('hidden');});
 const _sb=$('#_syncbtn');if(_sb)_sb.addEventListener('click',syncNow);
 const _db=$('#_denbtn');if(_db)_db.addEventListener('click',toggleDensity);
+/* gear menu (Admin + densidade + tema) — toggle + close on outside click */
+const _gb=$('#_gearbtn');if(_gb)_gb.addEventListener('click',e=>{e.stopPropagation();const m=$('#_gearmenu');if(m)m.classList.toggle('hidden');});
+document.addEventListener('click',e=>{const m=$('#_gearmenu');if(m&&!m.classList.contains('hidden')&&!e.target.closest('.gearwrap'))m.classList.add('hidden');});
+/* sync pill: seed from the lens's SYNCED_AT embed (if any) and keep the «há N min» fresh */
+try{if(typeof SYNCED_AT!=='undefined'&&SYNCED_AT)setSynced(SYNCED_AT);}catch(e){}
+setInterval(()=>{const p=$('#_syncbtn');if(p&&!p.classList.contains('syncing'))setSynced();},60000);
 document.addEventListener('click',e=>{const m=$('#_menu');if(m&&!e.target.closest('#_menu')&&!e.target.closest('[data-act="owner"]'))m.classList.add('hidden');});
 document.addEventListener('keydown',e=>{
   if((e.metaKey||e.ctrlKey)&&(e.key==='k'||e.key==='K')){e.preventDefault();$('#_palette').classList.contains('hidden')?openPalette():closePalette();return;}
@@ -628,7 +674,7 @@ try{if(localStorage.getItem('fila-density')==='compact')document.body.classList.
    the initial theme from the saved choice / OS preference. Moon when light (→ go dark), sun when dark. */
 const _MOON='<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>';
 const _SUN='<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>';
-function _paintTheme(){const dk=document.documentElement.getAttribute('data-theme')==='dark';const b=$('#_themebtn');if(b){b.innerHTML=dk?_SUN:_MOON;b.title=dk?'Tema claro':'Tema escuro';}}
+function _paintTheme(){const dk=document.documentElement.getAttribute('data-theme')==='dark';const b=$('#_themebtn');if(b){b.innerHTML=(dk?_SUN:_MOON)+'<span>'+(dk?'Tema claro':'Tema escuro')+'</span>';}}
 _paintTheme();
 const _thb=$('#_themebtn');if(_thb)_thb.addEventListener('click',()=>{const dk=document.documentElement.getAttribute('data-theme')==='dark';const nx=dk?'light':'dark';document.documentElement.setAttribute('data-theme',nx);try{localStorage.setItem('e2d-theme',nx);}catch(e){}_paintTheme();});
 """

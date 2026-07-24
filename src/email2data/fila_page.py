@@ -1018,26 +1018,11 @@ async function bulkOwner(name){
    lenses that define no onSlash. ⌘K keeps the palette here too. */
 function onSlash(){ const si=$('#_search'); if(si){ si.focus(); si.select(); } }
 
-/* ── freshness stamp (ADR-033 P0) ───────────────────────────────────────
-   The clocks' honesty depends on sync recency: say how old the synced mail is, and turn amber when
-   ingestion has stalled (the poll works but nothing new is being read — ADR-023's failure case). */
+/* ── freshness (ADR-033 P0) — now shown by the shell's sync pill (ADR-034 P5d) ─────
+   The clocks' honesty depends on sync recency; the shell's setSynced() owns the «correio há N min»
+   label (amber when stale) on the merged Sincronizar pill. The poll feeds it fresh values. */
 let _syncedAt=(typeof SYNCED_AT!=='undefined'&&SYNCED_AT)?SYNCED_AT:null;
-function _agoLabel(iso){
-  if(!iso) return '';
-  const secs=Math.max(0,(Date.now()-Date.parse(iso))/1000);
-  if(secs<90) return 'agora mesmo';
-  const mins=Math.round(secs/60);
-  if(mins<60) return 'há '+mins+' min';
-  const hrs=Math.round(mins/60);
-  return 'há '+hrs+(hrs===1?' hora':' horas');
-}
-function paintFreshness(){
-  const el=$('#_fresh'); if(!el) return;
-  if(!_syncedAt){ el.textContent=''; return; }
-  el.textContent='correio '+_agoLabel(_syncedAt);
-  el.classList.toggle('stale',(Date.now()-Date.parse(_syncedAt))/1000>45*60);
-}
-paintFreshness(); setInterval(paintFreshness,60000);
+function paintFreshness(){ if(typeof setSynced==='function') setSynced(_syncedAt); }
 
 /* ── NEEDS_REVIEW chip: tier-1 failures finally get a surface (quiet, links to Para ti) ── */
 let _needsReview=(typeof NEEDS_REVIEW!=='undefined')?(NEEDS_REVIEW|0):0;
@@ -1329,7 +1314,6 @@ _BODY_HTML = """
          and status in one glance, and a count that can never be misread as a global headline. -->
     <div id="_fronts" class="fronts" role="tablist" aria-label="Contraparte"></div>
     <span class="bgrow"></span>
-    <span id="_fresh" class="fresh" title="idade do correio sincronizado"></span>
     <input id="_search" type="text" placeholder="/ procurar…" autocomplete="off" aria-label="Filtrar threads"/>
     <select id="_order" class="tsel" aria-label="Ordenar a fila" title="Ordenar a fila">
       <option value="risk">Risco de resposta</option>
@@ -1460,9 +1444,6 @@ _EXTRA_CSS = """
   .tdot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;vertical-align:middle}
   .tdot.proposed{border:1.5px dashed var(--mut2);background:transparent}
   .tdot.committed{border:1.5px solid var(--int);background:var(--int)}
-  /* ── freshness stamp ──────────────────────────────────────────────── */
-  .fresh{color:var(--mut2);font-size:11.5px;font-variant-numeric:tabular-nums}
-  .fresh.stale{color:var(--amber);font-weight:700}
   /* ── entity chips (P2): dashed € = proposed, ⚑ deadline, ↻ related, novo ── */
   .rchip.money{color:var(--mut);border:1px dashed var(--mut2);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}
   .rchip.ddl{color:var(--amber);background:var(--amber-bg);border-radius:5px;padding:0 5px;font-size:10px;font-weight:700}

@@ -46,9 +46,11 @@ group.**
    the strip entirely (it is Para ti's business) and lands as a quiet Estado facet, hidden at zero.
 5. **Nav.** *(P5b shipped:)* a stroke icon per lens (scan by shape) + an `e2d` monogram; the Fila
    badge shows **demand** (WE_OWE red+amber — computed in `webapp._nav_counts`, the same number the
-   «Hoje» front shows as «N a responder»), never the total active count. *(P5d deferred:)* Admin +
-   densidade into a gear, and «Sincronizar» + «correio há N min» merged into one status pill — lower
-   value / higher shared-shell coupling; freshness already shows in the strip.
+   «Hoje» front shows as «N a responder»), never the total active count. *(P5d shipped:)* **Admin +
+   densidade + the theme toggle fold into one gear menu** (config, not lenses — Admin leaves the
+   main strip; the gear is active on /admin), and **«Sincronizar» + «correio há N min» merge into one
+   status pill** (a dot: green fresh / amber stale / spinning while syncing) fed by the lens poll —
+   one control for the action and its own status.
 
 6. **The thread viewer is a vertical in/out timeline** *(P5c shipped, owner-directed).* The dossier's
    «Conversa» is rendered newest→oldest down a left **spine** with a direction-coloured dot per

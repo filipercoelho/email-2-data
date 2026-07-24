@@ -828,13 +828,16 @@ def test_fila_trust_and_owner_chips_collapse_off_focus(tmp_path):
     assert html.count("i===focus") >= 2
 
 
-def test_fila_freshness_stamp_present(tmp_path):
-    """The clocks demand trust they could not prove: the page now says how old the synced mail is
-    («correio há N min»), turning amber when ingestion stalls (ADR-023's failure case)."""
+def test_fila_freshness_feeds_the_shell_sync_pill(tmp_path):
+    """The clocks demand trust they could not prove: the page still says how old the synced mail is —
+    but since ADR-034 P5d the «correio há N min» + amber-when-stale lives on the shell's merged
+    Sincronizar pill (setSynced), fed by the embedded SYNCED_AT and the poll, not a separate stamp."""
     html = _p0_page(tmp_path)
-    assert "const SYNCED_AT" in html and 'id="_fresh"' in html
-    assert "function _agoLabel(" in html and "paintFreshness" in html
-    assert "45*60" in html                       # the stale threshold
+    assert "const SYNCED_AT" in html                              # the embed still ships
+    assert "setSynced(_syncedAt)" in html                         # the Fila feeds the shell pill
+    assert 'id="_syncbtn"' not in html or "syncpill" in html      # (pill lives in the shell nav)
+    # the shell owns the label + stale logic
+    assert "id='_synclbl'" in html and "45*60" in html and "function setSynced(" in html
 
 
 def test_build_fila_html_accepts_synced_at():
