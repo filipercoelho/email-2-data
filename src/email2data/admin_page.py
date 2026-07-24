@@ -184,44 +184,44 @@ _EXTRA_CSS = """
   .ahead .sh{text-transform:none;letter-spacing:0;color:var(--mut2);font-weight:500}
   .acard{background:var(--card);border:1px solid var(--bd);border-radius:14px;
     padding:14px 16px;margin-bottom:10px;box-shadow:var(--shadow)}
-  .acard.bad{border-color:#f3c9c9}
+  .acard.bad{border-color:var(--red-line)}
   .ahdr{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px}
   .aid{font-weight:680;font-size:15px;letter-spacing:-.01em}
   .auser{font-size:12.5px;color:var(--mut)}
   .ahdr .grow{margin-left:auto}
   .ab{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
     border-radius:20px;padding:2px 9px;white-space:nowrap}
-  .ab.ok{background:#e7f6ee;color:var(--green);border:1px solid #bfe6cf}
-  .ab.bad{background:#fbeaea;color:var(--red);border:1px solid #f3c9c9}
+  .ab.ok{background:var(--green-bg);color:var(--green);border:1px solid var(--green-line)}
+  .ab.bad{background:var(--red-bg);color:var(--red);border:1px solid var(--red-line)}
   .ameta{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 2px}
   .chip{font-size:11.5px;color:var(--tx);background:var(--bg);border:1px solid var(--bd);
     border-radius:20px;padding:2px 10px;white-space:nowrap}
   .chip b{font-variant-numeric:tabular-nums}
   .chip code{font-family:ui-monospace,monospace;font-size:11px;color:var(--mut)}
-  .apanel{margin-top:9px;border:1px solid var(--bd);border-radius:10px;background:#fbfcfe;overflow:hidden}
+  .apanel{margin-top:9px;border:1px solid var(--bd);border-radius:10px;background:var(--surface2);overflow:hidden}
   .atog{width:100%;text-align:left;background:none;border:0;cursor:pointer;padding:8px 11px;
     font-size:12px;font-weight:650;color:var(--mut);font-family:inherit}
   .atog:hover{color:var(--ac)}
   .abody{padding:0 11px 10px;max-height:290px;overflow:auto}
   .atbl{width:100%;border-collapse:collapse;font-size:11.5px;font-variant-numeric:tabular-nums}
   .atbl th{text-align:left;color:var(--mut2);font-weight:650;padding:3px 8px 5px;
-    border-bottom:1px solid var(--bd);position:sticky;top:0;background:#fbfcfe}
+    border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--surface2)}
   .atbl td{padding:3px 8px;border-bottom:1px solid var(--bd2);word-break:break-all}
   .atbl td.mb{font-family:ui-monospace,monospace;font-size:11px}
   .alist{margin:0;padding:0;list-style:none;font-size:11.5px}
   .alist li{padding:4px 0;border-bottom:1px solid var(--bd2);word-break:break-word}
   .alist li:last-child{border-bottom:none}
   .alist code{font-family:ui-monospace,monospace;font-size:11px;color:var(--tx);word-break:break-all}
-  .aerr{margin-top:9px;border:1px solid #f3c9c9;background:#fbeaea;border-radius:10px;padding:8px 11px}
+  .aerr{margin-top:9px;border:1px solid var(--red-line);background:var(--red-bg);border-radius:10px;padding:8px 11px}
   .aerr .et{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--red);margin-bottom:4px}
-  .aerr li{font-size:11.5px;color:#7a2a2a;border-bottom-color:#f3c9c9}
+  .aerr li{font-size:11.5px;color:var(--red);border-bottom-color:var(--red-line)}
   /* sync card */
   .sctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .sctl select{border:1px solid var(--bd);border-radius:8px;padding:5px 9px;font-size:12.5px;
     color:var(--tx);background:var(--card);font-family:inherit;max-width:280px}
   .sctl select:focus{border-color:var(--ac);outline:none}
   .sctl button[disabled]{opacity:.5;cursor:default}
-  .sctl button[disabled]:hover{border-color:var(--bd);color:var(--mut);background:#fff}
+  .sctl button[disabled]:hover{border-color:var(--bd);color:var(--mut);background:var(--card)}
   .sres{margin-top:10px}
   .smut{font-size:11.5px;color:var(--mut)}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
@@ -238,8 +238,8 @@ _EXTRA_CSS = """
   .fhint{font-size:11.5px;color:var(--mut2);margin:2px 0 8px 219px;line-height:1.45}
   .fhint code{font-family:ui-monospace,monospace;background:var(--bg);border:1px solid var(--bd);
     border-radius:5px;padding:0 4px}
-  .act-btn.danger{border-color:#f3c9c9;color:var(--red)}
-  .act-btn.danger:hover{background:#fbeaea;border-color:var(--red);color:var(--red)}
+  .act-btn.danger{border-color:var(--red-line);color:var(--red)}
+  .act-btn.danger:hover{background:var(--red-bg);border-color:var(--red);color:var(--red)}
   .savebar{position:sticky;bottom:0;background:var(--card);border:1px solid var(--bd);
     border-radius:12px;padding:11px 14px;margin-top:12px;display:flex;align-items:center;gap:9px;
     flex-wrap:wrap;box-shadow:0 -2px 10px rgba(20,24,28,.07)}

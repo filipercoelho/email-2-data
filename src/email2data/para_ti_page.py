@@ -35,7 +35,7 @@ _EXTRA_CSS = """
   .gate.on{border-color:var(--ac);box-shadow:0 0 0 2px rgba(51,88,212,.15),var(--shadow)}
   .gate.open{border-color:var(--ac)}
   .gate{cursor:pointer;transition:border-color .14s ease,box-shadow .14s ease}
-  .gate:hover{border-color:#c9d3ea}
+  .gate:hover{border-color:var(--ac-line)}
   .fresh{font-size:11px;color:var(--mut2);font-variant-numeric:tabular-nums}
   .fresh.stale{color:var(--amber);font-weight:600}
   /* filter chips */
@@ -43,7 +43,7 @@ _EXTRA_CSS = """
   .chip{border:1px solid var(--bd);background:var(--card);border-radius:20px;padding:3px 11px;
     font-size:12px;font-weight:600;color:var(--mut);cursor:pointer;display:inline-flex;gap:6px;align-items:center}
   .chip:hover{border-color:var(--ac);color:var(--ac)}
-  .chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+  .chip.on{background:var(--ac);border-color:var(--ac);color:var(--card)}
   .chip .n{font-variant-numeric:tabular-nums;opacity:.75;font-weight:700}
   /* group heading */
   .ghdr{display:flex;align-items:center;gap:9px;margin:16px 2px 8px;font-size:11px;font-weight:700;
@@ -61,9 +61,9 @@ _EXTRA_CSS = """
   .gdetail{margin:10px 0 4px;padding-top:10px;border-top:1px solid var(--bd2);cursor:default}
   .gload{font-size:12.5px;color:var(--mut)}
   /* what we already know (spec) */
-  .spec{background:#f8fafc;border:1px solid var(--bd2);border-radius:10px;padding:10px 12px;margin-top:10px}
+  .spec{background:var(--surface2);border:1px solid var(--bd2);border-radius:10px;padding:10px 12px;margin-top:10px}
   .spec h4{margin:0 0 8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
-  .specrow{display:flex;align-items:baseline;gap:9px;padding:3px 0;font-size:12.5px;border-bottom:1px solid #eef1f5}
+  .specrow{display:flex;align-items:baseline;gap:9px;padding:3px 0;font-size:12.5px;border-bottom:1px solid var(--surface2)}
   .specrow:last-child{border-bottom:none}
   .specrow .sk{color:var(--mut);flex:0 0 150px}
   .specrow .sv{flex:1;color:var(--tx);word-break:break-word}
@@ -72,25 +72,25 @@ _EXTRA_CSS = """
   .missline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:9px;padding-top:9px;
     border-top:1px dashed var(--bd)}
   .mtag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--red)}
-  .mchip{font-size:11.5px;background:#fff;border:1px solid var(--bd);border-radius:6px;
+  .mchip{font-size:11.5px;background:var(--card);border:1px solid var(--bd);border-radius:6px;
     padding:1px 7px;color:var(--mut)}
   .mnote{font-size:11px;color:var(--mut2)}
   .prov{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;
     border-radius:5px;padding:1px 6px;flex:0 0 auto}
-  .prov.user{background:#e7f6ee;border:1px solid #bfe6cf;color:var(--green)}
-  .prov.ia{background:#fffdf3;border:1px dashed #e0cf94;color:var(--amber)}
-  .prov.det{background:#eef2ff;border:1px solid #cdd7ff;color:var(--ac)}
-  .prov.miss{background:#f4f5f7;border:1px solid var(--bd);color:var(--mut2)}
+  .prov.user{background:var(--green-bg);border:1px solid var(--green-line);color:var(--green)}
+  .prov.ia{background:var(--amber-bg);border:1px dashed var(--amber-line);color:var(--amber)}
+  .prov.det{background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac)}
+  .prov.miss{background:var(--surface2);border:1px solid var(--bd);color:var(--mut2)}
   .speclead{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px}
   .estim{font-weight:700;border-radius:6px;padding:1px 7px;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em}
-  .estim.yes{background:#e7f6ee;color:var(--green)}
-  .estim.no{background:#fff3f3;color:var(--red)}
-  .cov{flex:1;height:5px;background:#e8ebef;border-radius:4px;overflow:hidden;max-width:160px}
+  .estim.yes{background:var(--green-bg);color:var(--green)}
+  .estim.no{background:var(--red-bg);color:var(--red)}
+  .cov{flex:1;height:5px;background:var(--surface2);border-radius:4px;overflow:hidden;max-width:160px}
   .cov i{display:block;height:100%;background:var(--ac);border-radius:4px}
   /* project chip inside a gate */
   .pchip{font-size:11.5px;font-weight:600;border-radius:7px;padding:3px 9px;cursor:pointer;
-    border:1px solid var(--bd);background:#fff;color:var(--mut)}
-  .pchip.in{border-color:#bfe6cf;background:#e7f6ee;color:var(--green)}
+    border:1px solid var(--bd);background:var(--card);color:var(--mut)}
+  .pchip.in{border-color:var(--green-line);background:var(--green-bg);color:var(--green)}
   .pchip:hover{border-color:var(--ac);color:var(--ac)}
   .gacts{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
   .gacts .sep{flex:1}
@@ -461,8 +461,8 @@ function renderCard(item, i){
 
   // AI reason — what the model understood. Dashed ink: a proposal, not a fact.
   const reasonBlock = ctx.reason
-    ? '<div style="background:#fffdf3;border:1px solid #f0e6c0;border-radius:8px;padding:8px 12px;'
-      + 'font-size:12.5px;color:#4a4326;line-height:1.55;margin-bottom:10px">'
+    ? '<div style="background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:8px;padding:8px 12px;'
+      + 'font-size:12.5px;color:var(--amber);line-height:1.55;margin-bottom:10px">'
       + '<span style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;'
       + 'color:var(--mut);margin-right:6px">O que a IA leu</span>'
       + esc(ctx.reason) + '</div>'

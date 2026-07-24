@@ -1,7 +1,7 @@
 # ADR-035 — Dark mode: token-level theming, OS-aware, with a toggle
 
-- **Status:** Accepted (owner-requested 2026-07-24). Shipped for the shared shell + Fila; the
-  remaining lens-specific CSS (Projetos, /inbox report) is a follow-up sweep (§4).
+- **Status:** Accepted (owner-requested 2026-07-24). Shipped for the shared shell + Fila + Para ti +
+  Contrapartes + Capturas + Admin; only Projetos' spec editor and the legacy /inbox report remain (§4).
 - **Extends:** the ADR-033/-034 token system.
 
 ## 1 · Context
@@ -39,10 +39,13 @@ Theme entirely at the **token level** — no per-component dark rules:
 - Every lens gets the toggle and dark tokens (they all render through the shell); their **shared**
   components are dark everywhere.
 
-## 4 · Deferred (honest scope)
+## 4 · Coverage & deferred (honest scope)
 
-The **lens-specific `extra_css`** in Projetos (≈85 raw hexes, the spec editor), Para ti, Contrapartes,
-Capturas, and Admin, plus the legacy **/inbox report** (its own older palette), still carry raw light
-hexes — those custom widgets will show light-palette remnants in dark mode until a follow-up
-tokenization sweep. Several of those hexes are also off the ADR-033 palette in *light* mode, so that
-sweep doubles as a palette-consistency pass. Tracked, not silently dropped.
+Fully tokenized and dark-verified: the shared shell, **Fila**, **Para ti**, **Contrapartes**,
+**Capturas**, **Admin** (each lens's `extra_css` swept to tokens — 0 raw hexes remain).
+
+Still deferred: **Projetos'** `extra_css` (≈85 raw hexes — the spec editor is the largest, most
+custom surface) and the legacy **/inbox report** (its own older palette). Those will show
+light-palette remnants in dark mode until a follow-up sweep, which also doubles as a light-mode
+palette-consistency pass (several of those hexes are off the ADR-033 palette even in light). Tracked,
+not silently dropped.

@@ -119,7 +119,7 @@ _DETAIL_BODY = """
     padding:11px 13px;box-shadow:var(--shadow)}
   .stat .sv{font-size:19px;font-weight:720;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
   .stat .sl{font-size:11px;color:var(--mut);margin-top:1px}
-  .stat.risk{background:#fbeaea;border-color:#f3c9c9}
+  .stat.risk{background:var(--red-bg);border-color:var(--red-line)}
   .stat.risk .sv,.stat.risk .sl{color:var(--red)}
   /* section labels + list rows */
   .dsec{margin-top:22px}
@@ -131,7 +131,7 @@ _DETAIL_BODY = """
   .lrow{display:flex;align-items:center;gap:11px;background:var(--card);border:1px solid var(--bd);
     border-left:3px solid transparent;border-radius:11px;padding:10px 13px;margin-bottom:7px;
     text-decoration:none;color:var(--tx);box-shadow:var(--shadow);transition:background .12s,border-color .12s}
-  .lrow:hover{background:#f8f9fb;border-left-color:var(--ac)}
+  .lrow:hover{background:var(--surface2);border-left-color:var(--ac)}
   .lrow .lmain{flex:1;min-width:0}
   .lrow .ltitle{font-weight:620;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .lrow .lsub{font-size:11.5px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -139,7 +139,7 @@ _DETAIL_BODY = """
   .lrow .ststage{font-size:10px;font-weight:700;color:var(--mut);background:var(--bg);border:1px solid var(--bd);border-radius:20px;padding:2px 9px}
   /* clickable timeline */
   .timeline .tc.tclick{text-decoration:none;color:var(--tx);display:block;border-radius:7px;padding:2px 6px;margin:-2px -6px}
-  .timeline .tc.tclick:hover{background:#eef2ff}
+  .timeline .tc.tclick:hover{background:var(--ac-soft)}
   .timeline .tp{font-size:11px;color:var(--mut);font-style:italic}
   .timeline .tdir{margin-right:5px}
 </style>

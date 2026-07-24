@@ -38,22 +38,22 @@ _BODY = """
     padding:14px 16px;margin-bottom:10px;box-shadow:var(--shadow);display:flex;gap:13px;align-items:flex-start}
   .capcard.on{border-color:var(--ac);box-shadow:0 0 0 2px rgba(51,88,212,.15),var(--shadow)}
   .capthumb{width:52px;height:52px;object-fit:cover;border-radius:9px;border:1px solid var(--bd);
-    flex:0 0 auto;background:#f6f7f9;cursor:zoom-in}
+    flex:0 0 auto;background:var(--surface2);cursor:zoom-in}
   .capbody{flex:1;min-width:0}
   .captxt{font-weight:620;font-size:14px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .captxt.empty{color:var(--mut2);font-weight:550;font-style:italic}
   .captag{display:inline-block;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
-    color:var(--int);background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:1px 7px;margin-right:7px;vertical-align:middle}
+    color:var(--int);background:var(--int-bg);border:1px solid var(--int-line);border-radius:20px;padding:1px 7px;margin-right:7px;vertical-align:middle}
   .capaudio{display:block;margin-top:9px;height:34px;max-width:340px;width:100%}
   .capmeta{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:5px;font-size:11.5px;color:var(--mut)}
   .capclass{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
-    padding:1px 7px;border-radius:20px;background:#eef0f3;color:var(--mut)}
-  .capclass.artifact{background:#efeafb;color:var(--purple)}
+    padding:1px 7px;border-radius:20px;background:var(--surface2);color:var(--mut)}
+  .capclass.artifact{background:var(--purple-bg);color:var(--purple)}
   /* extracted-field validation (Increment 2) — editable, individually-confirmable rows */
-  .capfields{margin-top:11px;border:1px solid var(--bd);border-radius:10px;padding:9px 11px;background:#fbfcfe}
+  .capfields{margin-top:11px;border:1px solid var(--bd);border-radius:10px;padding:9px 11px;background:var(--surface2)}
   .capfhdr{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);
     margin-bottom:7px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-  .capconf{font-weight:700;color:var(--int);background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:0 7px;font-size:10px}
+  .capconf{font-weight:700;color:var(--int);background:var(--int-bg);border:1px solid var(--int-line);border-radius:20px;padding:0 7px;font-size:10px}
   .capfnote{font-weight:500;text-transform:none;letter-spacing:0;color:var(--mut2);font-size:11px}
   .capfield{display:flex;align-items:center;gap:8px;margin:5px 0}
   .capflabel{flex:0 0 130px;font-size:12px;color:var(--mut);font-weight:600}
@@ -62,7 +62,7 @@ _BODY = """
   .capfval:focus{border-color:var(--ac)}
   .capfok{flex:0 0 auto;font-size:12px}
   .capfield.saved{opacity:.7}
-  .capfield.saved .capfval{border-color:var(--green);background:#f3fbf6}
+  .capfield.saved .capfval{border-color:var(--green);background:var(--green-bg)}
   .capfield.saved .capfok{border-color:var(--green);color:var(--green)}
   .capctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:11px}
   .capctl select{border:1px solid var(--bd);border-radius:8px;padding:5px 9px;font-size:12.5px;
