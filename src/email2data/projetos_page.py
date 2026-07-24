@@ -41,8 +41,8 @@ _BODY = """
   .prename:hover{border-color:var(--ac);color:var(--ac)}
   .pstage{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap}
   .pstage .st{padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid var(--bd);color:var(--mut);cursor:pointer}
-  .pstage .st.on{background:var(--int);color:#fff;border-color:var(--int)}
-  .pstage .st.terminal{background:var(--green);color:#fff;border-color:var(--green)}
+  .pstage .st.on{background:var(--int);color:var(--card);border-color:var(--int)}
+  .pstage .st.terminal{background:var(--green);color:var(--card);border-color:var(--green)}
   /* ── workbench sections ─────────────────────────────────────────────── */
   .psec{margin:20px 0 6px}
   .psec h3{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:700;margin:0 0 8px;display:flex;align-items:center;gap:8px}
@@ -57,10 +57,10 @@ _BODY = """
   .frow.miss-opt label{color:var(--mut2)}
   .frow.filled label{color:var(--mut)}
   .fctl{flex:1;display:flex;align-items:center;gap:8px;min-width:0}
-  .finput{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx)}
-  .finput:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
-  .frow.miss-must .finput{border-color:#f3c9c9;background:#fffafa}
-  .frow.miss-opt .finput{border-color:var(--bd);background:#fbfbfc;border-style:dashed}
+  .finput{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:var(--card);color:var(--tx)}
+  .finput:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
+  .frow.miss-must .finput{border-color:var(--red-line);background:var(--surface2)}
+  .frow.miss-opt .finput{border-color:var(--bd);background:var(--surface2);border-style:dashed}
   .finput::placeholder{color:var(--mut2);font-style:italic}
   /* Native date picker: WebKit gives date inputs their own intrinsic width/height and inner padding,
      which breaks the row rhythm next to the text inputs — pin them back to the .finput box. */
@@ -79,7 +79,7 @@ _BODY = """
   .frow.miss-opt  .finput[type=datetime-local]:not(:focus)::-webkit-datetime-edit{color:var(--mut2)}
   /* brief confirmation that an inline edit committed (data-entry feedback) */
   .frow.saved .finput{animation:savedflash .9s ease}
-  @keyframes savedflash{0%{box-shadow:0 0 0 3px #d1fae5}100%{box-shadow:none}}
+  @keyframes savedflash{0%{box-shadow:0 0 0 3px var(--green-bg)}100%{box-shadow:none}}
   /* required-vs-optional divider inside a field group */
   .fopt-sep{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut2);font-weight:700;
     margin:9px 0 3px;padding-top:7px;border-top:1px dashed var(--bd2)}
@@ -88,22 +88,22 @@ _BODY = """
     text-transform:none;letter-spacing:0;padding:0;text-decoration:underline dotted}
   .gapjump.done{color:var(--green);cursor:default;text-decoration:none}
   .fsrc{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 6px;border-radius:6px;flex:0 0 auto}
-  .fsrc.s-offline{background:#eef2f7;color:var(--ext)} .fsrc.s-llm{background:#efeafb;color:var(--purple)} .fsrc.s-user{background:#e7f6ee;color:var(--green)}
+  .fsrc.s-offline{background:var(--ac-soft);color:var(--ext)} .fsrc.s-llm{background:var(--purple-bg);color:var(--purple)} .fsrc.s-user{background:var(--green-bg);color:var(--green)}
   /* line-item cards */
-  .item-card{border:1px solid var(--bd);border-radius:12px;padding:12px 14px;margin:10px 0;background:#fcfcfd}
+  .item-card{border:1px solid var(--bd);border-radius:12px;padding:12px 14px;margin:10px 0;background:var(--surface2)}
   .item-card .ih{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
   .item-card .ih b{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
-  .item-rm{border:1px solid var(--bd);background:#fff;border-radius:7px;font-size:11px;padding:2px 9px;cursor:pointer;color:var(--mut)}
+  .item-rm{border:1px solid var(--bd);background:var(--card);border-radius:7px;font-size:11px;padding:2px 9px;cursor:pointer;color:var(--mut)}
   .item-rm:hover{border-color:var(--red);color:var(--red)}
-  .addbtn{border:1px dashed var(--bd);background:#fff;border-radius:9px;padding:7px 13px;cursor:pointer;font-size:12.5px;color:var(--mut);font-weight:600;margin-top:4px}
-  .addbtn:hover{border-color:var(--ac);color:var(--ac);background:#f6f8ff}
+  .addbtn{border:1px dashed var(--bd);background:var(--card);border-radius:9px;padding:7px 13px;cursor:pointer;font-size:12.5px;color:var(--mut);font-weight:600;margin-top:4px}
+  .addbtn:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
   /* origem (source emails) — thread CSS comes from cockpit_ui shared styles */
-  .origem{max-height:420px;overflow:auto;border:1px solid var(--bd2);border-radius:10px;padding:8px 12px;background:#fcfcfd}
+  .origem{max-height:420px;overflow:auto;border:1px solid var(--bd2);border-radius:10px;padding:8px 12px;background:var(--surface2)}
   .origem .texp{margin:0}
   .origem .tmsg{border-bottom:1px solid var(--bd2);border-radius:0;border-left:none;border-right:none;border-top:none;background:transparent;padding:10px 0}
   .origem .tmsg:last-child{border-bottom:none}
   .hint2{color:var(--mut2);font-size:12.5px;padding:9px 2px}
-  .dwarn{background:#fff7ed;border:1px solid #fed7aa;color:#b45309;border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
+  .dwarn{background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--amber);border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
   /* re-extração (ADR-025 §4) */
   .rexbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
   .rexbar select{border:1px solid var(--bd);border-radius:8px;padding:4px 8px;font-size:12.5px;
@@ -111,15 +111,15 @@ _BODY = """
   .rexbar select:focus{border-color:var(--ac);outline:none}
   .rexbar button[disabled]{opacity:.55;cursor:default}
   .rexnote{padding-top:2px}
-  .rexres{border:1px solid var(--bd);background:#fbfcfe;border-radius:10px;padding:9px 12px;margin:6px 0 10px}
-  .rexres.bad{border-color:#f3c9c9;background:#fbeaea}
+  .rexres{border:1px solid var(--bd);background:var(--surface2);border-radius:10px;padding:9px 12px;margin:6px 0 10px}
+  .rexres.bad{border-color:var(--red-line);background:var(--red-bg)}
   .rexres .rexh{font-size:12.5px;font-weight:680}
   .rexres.bad .rexh{color:var(--red)}
   .rexres .rexsub{font-size:11.5px;color:var(--mut);margin-top:3px}
-  .rexerrs{margin:6px 0 0;padding-left:18px;font-size:11.5px;color:#7a2a2a}
+  .rexerrs{margin:6px 0 0;padding-left:18px;font-size:11.5px;color:var(--red)}
   .rexerrs code{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all}
   /* perguntas / ask */
-  .qs li{margin-bottom:6px;font-size:13px;color:#3a4150}
+  .qs li{margin-bottom:6px;font-size:13px;color:var(--mut)}
   .qmail{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
   .ready{color:var(--green);font-size:12.5px;font-weight:600}
   /* ── client-email composer ──────────────────────────────────────────── */
@@ -128,59 +128,59 @@ _BODY = """
   .cmp .to b{color:var(--tx);font-weight:600}
   .cmp .subj{display:flex;align-items:center;gap:8px}
   .cmp .subj label{flex:0 0 auto;font-size:12px;color:var(--mut)}
-  .cmp .subj input{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx)}
-  .cmp .subj input:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .cmp .subj input{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:var(--card);color:var(--tx)}
+  .cmp .subj input:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
   .askgrp{margin:10px 0}
   .askgrp .gl{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--mut2);margin-bottom:5px}
   .askgrp.must .gl{color:var(--red)}
-  .ask-opt{display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-size:13px;color:#3a4150;cursor:pointer}
+  .ask-opt{display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-size:13px;color:var(--mut);cursor:pointer}
   .ask-opt input{margin-top:2px;accent-color:var(--ac);cursor:pointer}
   .ask-opt.intern{color:var(--mut2);cursor:default}
-  .custq{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;color:#3a4150}
+  .custq{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;color:var(--mut)}
   .custq .rm{cursor:pointer;color:var(--mut2);border:none;background:none;font-size:15px;line-height:1;padding:0}
   .custq .rm:hover{color:var(--red)}
-  .addq{border:1px dashed var(--bd);background:#fff;border-radius:8px;padding:5px 11px;cursor:pointer;font-size:12px;color:var(--mut);font-weight:600;margin-top:4px}
-  .addq:hover{border-color:var(--ac);color:var(--ac);background:#f6f8ff}
+  .addq{border:1px dashed var(--bd);background:var(--card);border-radius:8px;padding:5px 11px;cursor:pointer;font-size:12px;color:var(--mut);font-weight:600;margin-top:4px}
+  .addq:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
   /* ── purpose selector + per-purpose inputs (ADR-031) ── */
   .psel{display:flex;align-items:center;gap:8px;margin:10px 0}
   .psel label{flex:0 0 auto;font-size:12px;color:var(--mut)}
-  .psel select{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx);cursor:pointer}
-  .psel select:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
-  .reasonsel{width:100%;box-sizing:border-box;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--tx);cursor:pointer;margin-bottom:8px}
-  .reasonsel:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
-  .notebox{width:100%;box-sizing:border-box;min-height:90px;border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
-  .notebox:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .psel select{flex:1;min-width:0;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:var(--card);color:var(--tx);cursor:pointer}
+  .psel select:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
+  .reasonsel{width:100%;box-sizing:border-box;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:var(--card);color:var(--tx);cursor:pointer;margin-bottom:8px}
+  .reasonsel:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
+  .notebox{width:100%;box-sizing:border-box;min-height:90px;border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.5;font-family:inherit;background:var(--card);color:var(--tx);resize:vertical}
+  .notebox:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
   .factschip{font-size:11.5px;color:var(--mut);margin:8px 0;min-height:1px}
-  .factschip .fv{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:6px;padding:1px 7px;margin:2px 3px 0 0;font-weight:600}
+  .factschip .fv{display:inline-block;background:var(--ac-soft);color:var(--ac);border:1px solid var(--ac-line);border-radius:6px;padding:1px 7px;margin:2px 3px 0 0;font-weight:600}
   .draftbox{margin-top:14px}
   .draftbox .dl{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;min-height:22px}
   .draftbox .dl h4{margin:0;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);font-weight:700}
-  .draftbox .dirty{font-size:11px;color:#b45309;display:flex;align-items:center;gap:8px}
-  .draftbox .dirty .regen{border:1px solid #fed7aa;background:#fff7ed;color:#b45309;border-radius:7px;padding:2px 9px;cursor:pointer;font-size:11px;font-weight:600}
-  .draftbox .dirty .regen:hover{background:#ffedd5}
-  .draftbox textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
-  .draftbox textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .draftbox .dirty{font-size:11px;color:var(--amber);display:flex;align-items:center;gap:8px}
+  .draftbox .dirty .regen{border:1px solid var(--amber-line);background:var(--amber-bg);color:var(--amber);border-radius:7px;padding:2px 9px;cursor:pointer;font-size:11px;font-weight:600}
+  .draftbox .dirty .regen:hover{background:var(--amber-bg)}
+  .draftbox textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:var(--card);color:var(--tx);resize:vertical}
+  .draftbox textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
   /* ── AI polish (ADR-027) — visually SUBORDINATE to the draft above it: the deterministic text is
      the product, this is an offer sitting beside it until the user adopts it. ── */
   .aibar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
   .aibar select{border:1px solid var(--bd);border-radius:8px;padding:4px 8px;font-size:12.5px;
-    background:#fff;color:var(--tx);cursor:pointer}
+    background:var(--card);color:var(--tx);cursor:pointer}
   .aibar select:focus{border-color:var(--ac);outline:none}
   .aibar .hint2{margin:0}
-  .act-btn.ai{border-color:#c7d2fe;color:#4338ca;background:#eef2ff}
-  .act-btn.ai:hover{background:#e0e7ff}
+  .act-btn.ai{border-color:var(--ac-line);color:var(--ac);background:var(--ac-soft)}
+  .act-btn.ai:hover{background:var(--ac-soft)}
   .act-btn.ai[disabled]{opacity:.55;cursor:default}
-  .airesult{margin-top:12px;border:1px solid #c7d2fe;border-radius:10px;padding:11px 13px;background:#f8f9ff}
-  .airesult.bad{border-color:#f3c9c9;background:#fbeaea}
-  .airesult .aih{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#4338ca;font-weight:700;margin-bottom:7px}
+  .airesult{margin-top:12px;border:1px solid var(--ac-line);border-radius:10px;padding:11px 13px;background:var(--ac-soft)}
+  .airesult.bad{border-color:var(--red-line);background:var(--red-bg)}
+  .airesult .aih{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ac);font-weight:700;margin-bottom:7px}
   .airesult.bad .aih{color:var(--red)}
   .airesult .aih .c{text-transform:none;letter-spacing:0;color:var(--mut2);font-weight:500}
   .airesult textarea{width:100%;box-sizing:border-box;min-height:200px;border:1px solid var(--bd);border-radius:10px;
-    padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;color:var(--tx);resize:vertical}
-  .airesult textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+    padding:11px 13px;font-size:13px;line-height:1.5;font-family:inherit;background:var(--card);color:var(--tx);resize:vertical}
+  .airesult textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
   .airesult .qmail{margin-top:9px}
-  .aiok{font-size:11.5px;color:var(--gr,#15803d);margin-bottom:7px}
-  .aiwarn{font-size:11.5px;color:#b45309;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;
+  .aiok{font-size:11.5px;color:var(--gr,var(--green));margin-bottom:7px}
+  .aiwarn{font-size:11.5px;color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:8px;
     padding:7px 10px;margin-bottom:7px}
   .aiwarn ul{margin:5px 0 0;padding-left:18px}
   /* ── tab strip (ADR-015 — only the active panel shows; keeps the page from being one long wall) ── */
@@ -191,18 +191,18 @@ _BODY = """
   .ptab-btn.on{color:var(--ac);border-bottom-color:var(--ac)}
   .ptab-btn .bdg{display:inline-block;min-width:16px;padding:0 5px;margin-left:5px;border-radius:9px;
     background:var(--bd);color:var(--mut);font-size:10px;font-weight:700;text-align:center}
-  .ptab-btn .bdg.warn{background:#fff7ed;color:#b45309}
+  .ptab-btn .bdg.warn{background:var(--amber-bg);color:var(--amber)}
   .ppanel{padding-top:6px}
   .ppanel.hidden{display:none}
   /* provenance + conflict chips on a field row */
-  .pchan{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:6px;background:#eef4ff;color:var(--ac);
+  .pchan{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:6px;background:var(--ac-soft);color:var(--ac);
     flex:0 0 auto;cursor:default}
-  .frow.conflict .finput{border-color:#fed7aa;background:#fff7ed}
+  .frow.conflict .finput{border-color:var(--amber-line);background:var(--amber-bg)}
   .cwarn{font-size:11px;flex:0 0 auto;cursor:help}
   /* contested-on-top banner */
-  .contested{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:9px 12px;margin:10px 0;font-size:12.5px;color:#92400e}
-  .contested b{color:#7c2d12}
-  .contested .cv{display:inline-block;margin:2px 6px 0 0;padding:1px 7px;border-radius:6px;background:#fff;border:1px solid #fed7aa;font-size:11px}
+  .contested{background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:10px;padding:9px 12px;margin:10px 0;font-size:12.5px;color:var(--amber)}
+  .contested b{color:var(--amber)}
+  .contested .cv{display:inline-block;margin:2px 6px 0 0;padding:1px 7px;border-radius:6px;background:var(--card);border:1px solid var(--amber-line);font-size:11px}
   /* custom fields */
   .custf{display:flex;align-items:center;gap:8px;padding:4px 0}
   .custf label{flex:0 0 158px;font-size:12.5px;color:var(--mut);text-align:right;font-style:italic}
@@ -212,14 +212,14 @@ _BODY = """
   /* ── Registar (capture) surface ─────────────────────────────────────── */
   .cap{max-width:620px}
   .cap .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
-  .chip{border:1px solid var(--bd);background:#fff;border-radius:20px;padding:4px 12px;font-size:12px;
+  .chip{border:1px solid var(--bd);background:var(--card);border-radius:20px;padding:4px 12px;font-size:12px;
     cursor:pointer;color:var(--mut);font-weight:600}
-  .chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+  .chip.on{background:var(--ac);border-color:var(--ac);color:var(--card)}
   .cap .meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
   .cap .meta input{border:1px solid var(--bd);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit}
   .cap textarea{width:100%;box-sizing:border-box;min-height:90px;border:1px solid var(--bd);border-radius:10px;
     padding:10px 12px;font-size:13px;line-height:1.5;font-family:inherit;resize:vertical}
-  .cap textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px #eef2ff}
+  .cap textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ac-soft)}
   .cap .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--mut2);margin:8px 0 4px}
   /* ── timeline (Linha do tempo) ──────────────────────────────────────── */
   .tl{border-left:2px solid var(--bd);margin-left:6px;padding-left:14px}
@@ -238,28 +238,28 @@ _BODY = """
   .owners{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
   .owners .olbl{font-size:11.5px;color:var(--mut);font-weight:600}
   .ochip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--int);
-    background:#f0fdfa;border:1px solid #bfe6e0;border-radius:20px;padding:2px 4px 2px 9px}
+    background:var(--int-bg);border:1px solid var(--int-line);border-radius:20px;padding:2px 4px 2px 9px}
   .ochip .ox{border:none;background:none;color:var(--mut2);cursor:pointer;font-size:11px;padding:0 2px;line-height:1}
   .ochip .ox:hover{color:var(--red)}
-  .oadd{font-size:11.5px;font-weight:600;color:var(--mut);background:#fff;border:1px solid var(--bd);
+  .oadd{font-size:11.5px;font-weight:600;color:var(--mut);background:var(--card);border:1px solid var(--bd);
     border-radius:20px;padding:2px 10px;cursor:pointer}
   .oadd:hover{border-color:var(--ac);color:var(--ac)}
   .menu .mhdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:5px 11px 3px}
   .menu .mi.reset{color:var(--int);border-top:1px solid var(--bd2);margin-top:3px}
   /* ── close-out (cancel / lost) ──────────────────────────────────────── */
-  .closed{background:#fbeaea;border:1px solid #f3c9c9;color:var(--red);border-radius:9px;
+  .closed{background:var(--red-bg);border:1px solid var(--red-line);color:var(--red);border-radius:9px;
     padding:7px 12px;font-size:12.5px;font-weight:600;margin:4px 0 8px}
-  .cof{background:var(--card);border:1px solid #f3c9c9;border-radius:11px;padding:13px 15px;margin:6px 0 10px}
+  .cof{background:var(--card);border:1px solid var(--red-line);border-radius:11px;padding:13px 15px;margin:6px 0 10px}
   .cof .lbl{font-size:12.5px;font-weight:650;color:var(--tx);margin-bottom:8px}
   .cof textarea{width:100%;min-height:54px;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;
     font:13px/1.5 inherit;color:var(--tx);resize:vertical;outline:none;margin-top:8px}
   .cof textarea:focus{border-color:var(--ac)}
   .cofacts{display:flex;justify-content:flex-end;gap:8px;margin-top:9px}
-  .act-btn.danger{border-color:var(--red);color:var(--red)} .act-btn.danger:hover{background:#fbeaea}
+  .act-btn.danger{border-color:var(--red);color:var(--red)} .act-btn.danger:hover{background:var(--red-bg)}
   /* ── participants (who contributed) ─────────────────────────────────── */
   .parts{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:2px 0 8px;font-size:11.5px}
   .parts .plbl{color:var(--mut);font-weight:600}
-  .pcontrib{color:var(--purple);background:#efeafb;border:1px solid #ddd2f5;border-radius:20px;padding:1px 9px;cursor:default}
+  .pcontrib{color:var(--purple);background:var(--purple-bg);border:1px solid var(--ac-line);border-radius:20px;padding:1px 9px;cursor:default}
   .pcontrib b{font-variant-numeric:tabular-nums}
 </style>
 """

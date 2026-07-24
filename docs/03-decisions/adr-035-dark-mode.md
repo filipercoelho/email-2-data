@@ -1,7 +1,7 @@
 # ADR-035 — Dark mode: token-level theming, OS-aware, with a toggle
 
-- **Status:** Accepted (owner-requested 2026-07-24). Shipped for the shared shell + Fila + Para ti +
-  Contrapartes + Capturas + Admin; only Projetos' spec editor and the legacy /inbox report remain (§4).
+- **Status:** Accepted (owner-requested 2026-07-24). Shipped app-wide: the shared shell, all six lenses (Fila, Contrapartes,
+  Projetos, Para ti, Capturas, Admin), and the legacy /inbox report.
 - **Extends:** the ADR-033/-034 token system.
 
 ## 1 · Context
@@ -44,8 +44,9 @@ Theme entirely at the **token level** — no per-component dark rules:
 Fully tokenized and dark-verified: the shared shell, **Fila**, **Para ti**, **Contrapartes**,
 **Capturas**, **Admin** (each lens's `extra_css` swept to tokens — 0 raw hexes remain).
 
-Still deferred: **Projetos'** `extra_css` (≈85 raw hexes — the spec editor is the largest, most
-custom surface) and the legacy **/inbox report** (its own older palette). Those will show
-light-palette remnants in dark mode until a follow-up sweep, which also doubles as a light-mode
-palette-consistency pass (several of those hexes are off the ADR-033 palette even in light). Tracked,
-not silently dropped.
+Now also tokenized and dark-capable: **Projetos** (68 hexes swept — indigo accents → accent tokens,
+amber/brown text → amber, slate text → mut) and the legacy **/inbox report** (122 hexes swept; it is
+standalone, so it got its own copy of the full light+dark token block and the pre-paint script). The
+report keeps two **intentionally-dark chips** (`#525659`, `#15181c` — dark badge backgrounds with
+light text) as fixed values, theme-independent by design. The report sweep also fixed its light-mode
+palette (it had been on the pre-ADR-033 blue/red/green). **Nothing remains deferred.**
