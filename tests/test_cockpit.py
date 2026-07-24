@@ -21,11 +21,11 @@ def ago(hours: float) -> str:
 
 
 def _row(root, mid, date, *, direction="inbound", counterparty="CLIENT",
-         purpose="ESTIMATE_REQUEST_FROM_CLIENT", subject="Orçamento", has_attach=0,
+         purpose="ESTIMATE_REQUEST_FROM_CLIENT", subject="Orçamento", has_attach=0, attach_kinds="",
          from_email="maria@acme.pt", confidence=0.91, decided_by="tier1:gemini", reason="pede orçamento"):
     return {"thread_root": root, "message_id": mid, "date": date, "direction": direction,
             "counterparty": counterparty, "purpose": purpose, "subject": subject,
-            "has_attach": has_attach, "from_email": from_email,
+            "has_attach": has_attach, "attach_kinds": attach_kinds, "from_email": from_email,
             "confidence": confidence, "decided_by": decided_by, "reason": reason}
 
 
@@ -151,6 +151,23 @@ def test_fold_groups_messages_into_one_thread():
     [s] = fold_threads(rows)
     assert s.n_messages == 3 and s.has_attachment is True
     assert s.last_date == _parse_dt(ago(2))                      # latest message wins
+
+
+def test_fold_unions_typed_attach_kinds_across_the_thread():
+    """Typed 📎 (v4, ADR-034): the folded thread carries the UNION of its messages' attach_kinds, so
+    a thread where one message brought a DWG and another a PDF shows both on the Fila row — sorted,
+    deduped, and empty for a thread with no typed attachments."""
+    rows = [_row("t1", "m1", ago(10), attach_kinds="cad,pdf"),
+            _row("t1", "m2", ago(5), attach_kinds="pdf,img"),
+            _row("t1", "m3", ago(2))]           # no attachments — contributes nothing
+    [s] = fold_threads(rows)
+    assert s.attach_kinds == ["cad", "img", "pdf"]              # union, sorted, deduped
+    # and build_fila projects it onto the row for the JS layer
+    [r] = build_fila(rows, now=NOW)
+    assert r["attach_kinds"] == ["cad", "img", "pdf"]
+    # a thread with no typed attachments carries an empty list, never a phantom
+    plain = [_row("t2", "n1", ago(3))]
+    assert fold_threads(plain)[0].attach_kinds == []
 
 
 def test_dominant_counterparty_prefers_external_over_internal():

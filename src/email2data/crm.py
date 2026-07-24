@@ -26,7 +26,42 @@ from typing import Any, Optional
 from .signals import OUR_DOMAIN
 
 # Bump this if the schema changes in a way that requires a full rebuild reminder.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4   # v4: attach_kinds column (typed 📎 on the Fila row). crm.db is regenerable, so
+#                      this appears on the next `sync`/`crm` rebuild; SELECT * degrades on the old DB.
+
+# Attachment filename extension → a compact category, so the Fila row can say what KIND of file is
+# attached ("can I quote without opening it?") — for a fabrication shop the CAD/vector/PDF distinction
+# is what matters. Deterministic, computed at record time (it is data, not a view).
+_ATTACH_EXT = {
+    "pdf": "pdf",
+    "png": "img", "jpg": "img", "jpeg": "img", "gif": "img", "webp": "img", "heic": "img",
+    "bmp": "img", "tif": "img", "tiff": "img",
+    "dwg": "cad", "dxf": "cad", "step": "cad", "stp": "cad", "stl": "cad", "iges": "cad",
+    "igs": "cad", "3mf": "cad", "sldprt": "cad", "obj": "cad", "ipt": "cad", "f3d": "cad",
+    "ai": "vetor", "eps": "vetor", "svg": "vetor", "cdr": "vetor",
+    "xls": "folha", "xlsx": "folha", "csv": "folha", "ods": "folha",
+    "doc": "doc", "docx": "doc", "odt": "doc", "rtf": "doc", "txt": "doc",
+    "zip": "zip", "rar": "zip", "7z": "zip",
+}
+
+
+def attach_kinds(attachments: list) -> str:
+    """Comma-joined DISTINCT categories for a message's attachments, ranked by what a quote needs
+    (cad > vetor > pdf > folha > img > doc > zip). Empty string when none/unknown."""
+    order = ["cad", "vetor", "pdf", "folha", "img", "doc", "zip"]
+    kinds = set()
+    for a in attachments or []:
+        # envelope._attachments emits {"filename", "content_type", "size_bytes"}; accept "name" and a
+        # bare string too so the derivation is robust to caller shape.
+        if isinstance(a, dict):
+            name = a.get("filename") or a.get("name") or ""
+        else:
+            name = str(a or "")
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        k = _ATTACH_EXT.get(ext)
+        if k:
+            kinds.add(k)
+    return ",".join(k for k in order if k in kinds)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS interactions (
@@ -43,6 +78,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     is_reply     INTEGER,
     is_forward   INTEGER,
     has_attach   INTEGER,
+    attach_kinds TEXT,    -- comma-joined distinct attachment categories (pdf,img,cad,vetor,folha,doc,zip); v4
     n_recipients INTEGER,
     entities     TEXT,    -- JSON blob of schema.Entities fields; NULL for offline-triaged mail
     confidence   REAL,    -- verdict trust 0-1 (Tier-2 metadata; surfaced as the Fila "trust" tag)
@@ -187,9 +223,9 @@ class CrmStore:
         self._conn.execute(
             "INSERT OR REPLACE INTO interactions"
             "(message_id, date, from_email, direction, counterparty, purpose, priority, urgency,"
-            " subject, thread_root, is_reply, is_forward, has_attach, n_recipients, entities,"
-            " confidence, decided_by, reason)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " subject, thread_root, is_reply, is_forward, has_attach, attach_kinds, n_recipients,"
+            " entities, confidence, decided_by, reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 mid, date,
                 (env.get("from") or {}).get("email", ""),
@@ -203,6 +239,7 @@ class CrmStore:
                 int(bool(env.get("in_reply_to") or env.get("references"))),
                 0,
                 int(bool(env.get("attachments"))),
+                attach_kinds(env.get("attachments") or []) or None,
                 len(env.get("to") or []) + len(env.get("cc") or []),
                 ents_json,
                 verdict.get("confidence"),

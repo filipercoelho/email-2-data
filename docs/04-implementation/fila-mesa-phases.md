@@ -84,10 +84,22 @@ coherent change (the old flat rendering is deleted, not kept as a mode).
   `related_count` (`crm.related`), `novo` (contacts.first_seen ≤ 14 d), `chase`, `momentum`
   (deterministic, computed in `cockpit.py` beside the clock — unit-tested there), project
   `coverage`/`estimable` on the project chip. *Shipped scope notes (2026-07-23):* the typed
-  attachment glyph (📎PDF/IMG) is **deferred** — `crm.interactions` stores only `has_attach`, and
-  inventing a type would be a fake value; it needs attachment metadata joined into the CRM first.
-  The related-threads affordance shipped as a **count chip** (`↻N`, full list on the dossier's
-  cluster context); jump-link popovers need the related list in the payload and follow with P3+.
+  attachment glyph (📎PDF/IMG) and the related-threads jump-links were deferred here for lack of the
+  underlying data, then **both closed 2026-07-24 (P5e, gap-closing):**
+  - **Typed 📎 (`crm.db` v4).** `crm.interactions` gained an `attach_kinds TEXT` column
+    (`SCHEMA_VERSION` 3→4), derived deterministically at `record()` time from each attachment's
+    filename extension → a compact category (`cad>vetor>pdf>folha>img>doc>zip`, ranked by what a
+    quote needs). `crm.db` is regenerable, so it populates on the next `build_crm` (the boot sync did
+    it — 281/542 interactions typed). `cockpit.fold_threads` unions the categories across a thread
+    onto the row; `fila_page._attChip` renders «📎CAD +N» (falls back to a bare 📎 on a pre-v4 db, so
+    it degrades, never fakes). Still no invented type — an unknown extension contributes nothing.
+  - **Related-threads jump-links.** `_fila_rows` now carries a labelled `related` list (up to 8
+    `{thread_root, subject}`, deduped by root) instead of only a count; the dossier renders a `.drel`
+    block of `[data-relroot]` links that focus that thread in place when it is in the current queue,
+    else navigate to `?thread=<root>` — assembling context before replying, never double-answering.
+  - **Timeline/​header time agreement.** The open-debt chip now uses `_humanizeAge` (a JS mirror of
+    `cockpit._humanize_age`, which **floors** days) instead of `_fmtGap` (which rounds), so the
+    dossier clock and the «agora» debt read the same day-count («11 dias», never 11-beside-12).
 - **2.3 Vistas**: € em jogo (money desc, dashed, "valores estimados (IA)" banner) · Prazos
   (days-left asc, red past-due) · Cobranças (chase desc) wired on keys 2/3/4; facet counts under the
   rail (tipo top-4, sem dono, ✍, 📎). NEEDS_REVIEW «rever N» chip in the strip (count from

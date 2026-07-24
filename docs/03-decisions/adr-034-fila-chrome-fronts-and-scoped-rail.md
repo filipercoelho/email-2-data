@@ -1,6 +1,7 @@
 # ADR-034 — Fila chrome: counterparty fronts as hero, one scope for every number, an iconic rail
 
-- **Status:** Accepted (owner-directed 2026-07-23; P5a shipped, P5b nav in progress)
+- **Status:** Accepted (owner-directed 2026-07-23; P5a–P5d shipped; P5e gap-closing — typed 📎 +
+  related jump-links + timeline/header time-agreement — shipped 2026-07-24)
 - **Date:** 2026-07-23
 - **Extends:** ADR-033 (Mesa) — this redesigns the Mesa's *framing* (nav · command strip · left rail),
   not its work surface (list + dossier).
@@ -72,6 +73,13 @@ group.**
   `cockpit_ui.py` + `webapp._nav_counts`).
 - No change to the list rows, the dossier, the data model, or any invariant (read-only, never-sends,
   precious stores). This is a projection/legibility change on the framing only.
+- **P5e (gap-closing, 2026-07-24)** touches only the *regenerable* `crm.db`: an `attach_kinds TEXT`
+  column (`SCHEMA_VERSION` 3→4) derived deterministically from attachment filename extensions, unioned
+  per-thread in `cockpit.fold_threads` and rendered as a typed 📎 chip (`fila_page._attChip`, bare-📎
+  fallback on a pre-v4 db). Related-threads gained a labelled `related` list in the payload → a `.drel`
+  jump-link block in the dossier. The timeline's open-debt chip now floors days via `_humanizeAge`
+  (mirrors `cockpit._humanize_age`) so it never disagrees with the dossier clock. `workspace.db`
+  (precious) is untouched; typed 📎 populates on the next `build_crm` (no ALTER, no migration).
 
 ## 4 · Rejected / deferred
 

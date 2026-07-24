@@ -2,7 +2,7 @@
 
 import json
 
-from email2data.crm import CrmStore, participants
+from email2data.crm import CrmStore, attach_kinds, participants
 
 
 def _env(mid, frm, to=None, cc=None, date="2026-05-20", subject="s", reply_to=None):
@@ -63,4 +63,40 @@ def test_counts_and_interaction_idempotent(tmp_path):
     s.record(env, v)  # same message_id -> interaction replaced, contacts NOT re-bumped
     assert s.counts()["interactions"] == 1
     assert {r["email"]: r["msg_count"] for r in s.top_contacts(external_only=False)} == {"a@x.pt": 1, "b@y.pt": 1}
+    s.close()
+
+
+def test_attach_kinds_derivation_ranked_and_deduped():
+    """Typed 📎 (v4, ADR-034): distinct categories, ranked cad>vetor>pdf>folha>img>doc>zip, from the
+    envelope's real attachment shape ({"filename",...}). For a fabrication shop the CAD/vector/PDF
+    distinction is «can I quote without opening the file?»."""
+    # ranked, not filename order: a PDF then a DWG then a JPG comes back cad,pdf,img
+    assert attach_kinds([{"filename": "quote.pdf"}, {"filename": "part.DWG"}, {"filename": "photo.jpg"}]) \
+        == "cad,pdf,img"
+    # deduped: two images collapse to one «img»
+    assert attach_kinds([{"filename": "a.png"}, {"filename": "b.jpeg"}]) == "img"
+    # the envelope key is «filename», not «name» — this is the bug the wrong key would have hidden
+    assert attach_kinds([{"filename": "d.step"}]) == "cad"
+    # unknown / extensionless / empty → no phantom category
+    assert attach_kinds([{"filename": "noext"}, {"filename": "weird.qqq"}]) == ""
+    assert attach_kinds([]) == ""
+    # bare strings and the legacy «name» key still work (robust to caller shape)
+    assert attach_kinds(["drawing.dxf", {"name": "sheet.xlsx"}]) == "cad,folha"
+
+
+def test_record_stores_attach_kinds_and_all_interactions_surfaces_it(tmp_path):
+    """record() computes attach_kinds at write time (it is data, not a view) and all_interactions()
+    (SELECT *) carries it, so cockpit.fold_threads can union it onto the Fila row."""
+    s = CrmStore(tmp_path / "crm.db").connect()
+    env = _env("m1", {"email": "joao@cliente.pt"}, to=[{"email": "diogo@lindoservico.pt"}])
+    env["attachments"] = [{"filename": "peca.dwg", "content_type": "image/vnd.dwg", "size_bytes": 100},
+                          {"filename": "orcamento.pdf", "content_type": "application/pdf", "size_bytes": 50}]
+    s.record(env, _v())
+    # a message with no attachments stores NULL, never an empty phantom string
+    s.record(_env("m2", {"email": "ana@cliente.pt"}, to=[{"email": "diogo@lindoservico.pt"}]), _v())
+    by_mid = {it["message_id"]: it for it in s.all_interactions()}
+    assert by_mid["m1"]["attach_kinds"] == "cad,pdf"
+    assert by_mid["m1"]["has_attach"] == 1
+    assert by_mid["m2"]["attach_kinds"] is None
+    assert by_mid["m2"]["has_attach"] == 0
     s.close()

@@ -90,12 +90,12 @@ finally visible). **No view builder** — five presets, period.
 | 3 px color rail | counterparty | CLIENT/SUPPLIER/LEAD hue; redundant with tab (kept for Hoje). |
 | Clock chip | `clock` | Filled dot = devemos; hollow = à espera (ADR-029). Color = band. Text counts **up past breach** for chases («+6 d»). The sort key and the visual state are one mechanism. |
 | Name | `display_name` (cluster override → contact name → raw address) | Bold, never the raw address when a human name exists (ADR-028 v8 names). |
-| ↻N | `crm.related()` count | Only when >0; popover with jump links (prevents double-answering one client from two threads). |
+| ↻N | `crm.related()` count | Only when >0. The dossier expands it into a `.drel` block of jump-links (`related` list in the payload, up to 8 `{thread_root, subject}`); clicking focuses that thread in place or navigates to `?thread=<root>` — prevents double-answering one client from two threads. |
 | Scan line | `entities.product_or_service` → `trust.reason` → `subject` | The readable "what this is"; kills «RE: FW:» archaeology. The fallback chain is deterministic and stated in the dossier. |
 | «€ 4 900?» | `entities.money` | **Dashed** chip; tiebreak within band only; absent when unextracted. |
 | «⚑ 3 d» | `entities.deadline` | Amber; red when past due. |
 | ✍ | `can_draft` | The row says a reply is one keystroke away — before expansion. |
-| 📎PDF/IMG | attachment content-type | Type tells whether quoting means opening a file (95/112 rows have attachments). |
+| 📎CAD +N | `attach_kinds` (crm.db v4) | Category from each attachment's **filename extension** (`cad>vetor>pdf>folha>img>doc>zip`, ranked by what a quote needs), unioned across the thread. «📎CAD +N» shows the top kind + a count of the rest; bare 📎 when `has_attachment` but no typed kinds (pre-v4 db). Tells whether quoting means opening a file. |
 | «novo» | `contacts.first_seen` recent | Flags the rarest, highest-value event (a new lead/contact). |
 | Trust dot | `trust.committed` | 2 px dot: dashed ring = proposed, solid = committed. The full chip appears only on the **focused** row (repeated-label rule). Per-row «sem dono» is deleted; the rail facet counts it once. |
 

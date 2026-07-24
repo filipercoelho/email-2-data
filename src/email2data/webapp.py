@@ -1778,16 +1778,26 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                              and not NO_REPLY_RE.search(r.get("contact") or ""))
             # cross-thread relations (same contact or shared entity), deduped by thread_root — the
             # double-answer guard. Bounded: one related() call per active thread on a local SQLite.
-            n_rel = 0
+            # Carry a small labelled list (ADR-034), not just a count, so the dossier can offer
+            # jump-links (?thread=<root>) — assembling context before replying, never double-answering.
+            related: list[dict[str, str]] = []
             if r.get("message_id"):
                 rel = _crmdb.related(r["message_id"])
-                roots = {x.get("thread_root") for grp in ("by_contact", "by_entity")
-                         for x in rel.get(grp, [])}
-                roots.discard(r.get("thread_root"))
-                roots.discard("")
-                roots.discard(None)
-                n_rel = len(roots)
-            r["related_count"] = n_rel
+                seen_roots = {r.get("thread_root"), "", None}
+                for grp in ("by_contact", "by_entity"):
+                    for x in rel.get(grp, []):
+                        root = x.get("thread_root")
+                        if root in seen_roots:
+                            continue
+                        seen_roots.add(root)
+                        related.append({"thread_root": root,
+                                        "subject": (x.get("subject") or "").strip() or "(sem assunto)"})
+                        if len(related) >= 8:
+                            break
+                    if len(related) >= 8:
+                        break
+            r["related"] = related
+            r["related_count"] = len(related)
         return rows
 
     def _needs_review_count() -> int:

@@ -446,7 +446,7 @@ function render(){
       en.deadline?_ddlChip(en.deadline):'',
       (r.related_count||0)>0?'<span class="rchip rel" title="'+(r.related_count)+' conversas relacionadas (mesmo contacto ou entidade partilhada)">↻'+r.related_count+'</span>':'',
       r.can_draft?'<span class="rchip draft" title="rascunho de resposta pronto">✍</span>':'',
-      r.has_attachment?'<span class="rchip att" aria-hidden="true">📎</span>':'',
+      _attChip(r),
     ].join('');
     /* The compact clock (P4a): «devemos resposta há 13 dias» ×58 ate ~30% of every row saying what
        the group header already says — the NUMBER is the signal. Full sentence in the tooltip. */
@@ -469,6 +469,19 @@ function render(){
       +'</div>';
   }).join('');
   renderDossier();
+}
+
+/* Typed attachment chip (ADR-034): «📎PDF» / «📎CAD +2» — for a fabrication shop the CAD/vetor/PDF
+   distinction tells you whether quoting means opening a file. Falls back to a plain 📎 when the crm
+   has no typed kinds yet (pre-v4 db, before the next rebuild). */
+const _K_LABEL={cad:'CAD',vetor:'VETOR',pdf:'PDF',folha:'FOLHA',img:'IMG',doc:'DOC',zip:'ZIP'};
+const _K_ORDER=['cad','vetor','pdf','folha','img','doc','zip'];
+function _attChip(r){
+  const ks=r.attach_kinds||[];
+  if(!ks.length) return r.has_attachment?'<span class="rchip att" title="com anexo">📎</span>':'';
+  const ranked=_K_ORDER.filter(k=>ks.indexOf(k)>=0), more=ranked.length-1;
+  return '<span class="rchip att typed" title="anexos: '+esc(ranked.map(k=>_K_LABEL[k]||k).join(', '))+'">📎'
+    +esc(_K_LABEL[ranked[0]]||ranked[0])+(more>0?' +'+more:'')+'</span>';
 }
 
 /* Deadline chip: days-left from the client-stated date; red once it passed. */
@@ -593,6 +606,14 @@ function dossierHTML(r){
       ?'<span class="dcp-s"><b'+(r.project.estimable?' class="dgreen"':'')+'>'+Math.round((r.project.coverage||0)*100)+'%</b><small>'
         +(r.project.estimable?'pronto a orçamentar':'campos do spec')+'</small></span>':'')
     +'</div>';
+  /* Related threads (ADR-034): jump-links to other conversations with the same contact or a shared
+     entity (NIF/name/product) — assemble context before replying, never double-answer. */
+  const rel=r.related||[];
+  if(rel.length){
+    h+='<div class="drel"><div class="drel-h">↻ '+rel.length+' conversa'+(rel.length===1?'':'s')+' relacionada'+(rel.length===1?'':'s')+'</div>'
+      +rel.map(x=>'<a class="drel-i" data-relroot="'+esc(x.thread_root)+'" href="?thread='+encodeURIComponent(x.thread_root)+'" title="abrir esta conversa">'+esc(x.subject)+'</a>').join('')
+      +'</div>';
+  }
   /* Conversa: the vertical in/out timeline (the spine is integrated into _threadHTML now). */
   h+='<div class="dmsgs">'+_threadHTML(r)+'</div>';
   return h;
@@ -622,6 +643,15 @@ function _fmtGap(ms){
   if(h<24) return Math.round(h)+' h';
   const d=Math.round(h/24);
   return d+(d===1?' dia':' dias');
+}
+/* Mirrors cockpit._humanize_age EXACTLY (min <1h · «N h» <48h · else FLOOR days) so the timeline's
+   open-debt chip reads the SAME number as the dossier/row clock label. _fmtGap ROUNDS days (fine for
+   a gap BETWEEN two messages) but the debt must match the header, or you get «devemos resposta há 11
+   dias» beside «sem resposta há 12 dias» — the round-vs-floor drift the owner flagged. */
+function _humanizeAge(h){
+  if(h<1) return Math.floor(h*60)+' min';
+  if(h<48) return Math.round(h)+' h';
+  return Math.floor(h/24)+' dias';
 }
 function _gapBand(ms){ const h=ms/3600000; return h>=168?'g7':(h>=24?'g3':'g1'); }
 const CLOCK_ICON='<svg class="dicon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M12 7.7V12l3 2.3"/></svg>';
@@ -799,7 +829,7 @@ function _threadHTML(r){
   let flow='<div class="dthread">'
     +'<div class="dt-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'"><span class="dt-dot"></span>agora</div>';
   if(debtMs>=1800000)
-    flow+='<div class="dt-gap debt '+esc(c.band||'none')+'"><span class="dt-glab">'+esc(debtVerb+_fmtGap(debtMs))+'</span></div>';
+    flow+='<div class="dt-gap debt '+esc(c.band||'none')+'"><span class="dt-glab">'+esc(debtVerb+_humanizeAge(c.age_hours||0))+'</span></div>';
   ordered.forEach((m,i)=>{
     /* Inter-message gaps only (the debt chip above already spans now → newest). */
     if(i>0){
@@ -1164,6 +1194,14 @@ $('#_list').addEventListener('click',e=>{
 
 /* dossier events: verbs + timeline jumps act on the FOCUSED row */
 $('#_doss').addEventListener('click',e=>{
+  /* related-thread jump-link: focus it in place if it's in the current queue, else navigate. */
+  const rl=e.target.closest('[data-relroot]');
+  if(rl){
+    e.preventDefault();
+    const root=rl.dataset.relroot, v=view(), i=v.findIndex(x=>x.thread_root===root);
+    if(i>=0) focusTo(i); else location.href='/?thread='+encodeURIComponent(root);
+    return;
+  }
   const tl=e.target.closest('[data-tl]');
   if(tl){
     const ms=$('#_doss').querySelectorAll('.tmsg');
@@ -1450,6 +1488,9 @@ _EXTRA_CSS = """
   .rchip.ddl.late{color:var(--red);background:var(--red-bg)}
   .rchip.novo{color:var(--lead);background:var(--lead-bg);border-radius:5px;padding:0 5px;font-size:10px;font-weight:800}
   .rchip.rel{color:var(--mut2);font-size:10px;font-weight:700}
+  /* typed 📎: a small labeled pill (📎CAD) — the plain .att stays a bare glyph for the pre-v4 db */
+  .rchip.att.typed{color:var(--mut);background:var(--surface2);border:1px solid var(--bd);
+    border-radius:5px;padding:0 5px;font-size:9.5px;font-weight:800;letter-spacing:.02em}
   /* vistas rail extras */
   .vd.ac{background:var(--ac)} .vd.purple{background:var(--purple)}
   .vbanner{margin:0 0 8px;padding:7px 12px;border:1px dashed var(--mut2);border-radius:9px;
@@ -1482,6 +1523,13 @@ _EXTRA_CSS = """
   .dritmo{font-size:11px;font-weight:700}
   .dpedem{margin:0 0 4px}
   .dgreen{color:var(--green)}
+  /* related-thread jump-links (ADR-034) */
+  .drel{border:1px solid var(--bd);border-radius:11px;background:var(--card);padding:9px 12px;margin-bottom:12px}
+  .drel-h{font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--purple);margin-bottom:5px}
+  .drel-i{display:block;font-size:12px;color:var(--ac);text-decoration:none;padding:3px 0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid var(--bd2)}
+  .drel-i:first-of-type{border-top:none}
+  .drel-i:hover{text-decoration:underline}
   /* ── dossier ──────────────────────────────────────────────────────── */
   .dtop{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
   .dgrow{flex:1}

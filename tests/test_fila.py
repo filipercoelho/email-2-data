@@ -99,6 +99,59 @@ def test_build_fila_html_smoke():
     assert "<html" in html and "Teste" in html and "devemos resposta" in html
 
 
+def test_fila_page_ships_typed_attachment_chip():
+    """Typed 📎 (v4, ADR-034): the row chip is built by `_attChip`, which shows «📎CAD +N» from the
+    row's ranked attach_kinds and falls back to a bare 📎 when the crm has no typed kinds yet
+    (pre-v4 db). The chip and its labels/order live in the page JS."""
+    html = fila_page.build_fila_html([], ["Diogo"], now_iso="2026-06-03T12:00:00")
+    assert "function _attChip(r)" in html
+    assert "rchip att typed" in html                       # the labeled variant
+    assert '"rchip att"' in html and "com anexo" in html   # the bare fallback for the pre-v4 db
+    assert "_K_LABEL" in html and "_K_ORDER" in html       # labels + the quote-priority rank
+    assert "cad:'CAD'" in html and "vetor:'VETOR'" in html
+    assert ".rchip.att.typed{" in html                     # its pill CSS
+
+
+def test_fila_page_ships_related_thread_jump_links():
+    """Related-threads jump-links (ADR-034): the dossier renders r.related as a `.drel` block of
+    `[data-relroot]` links; clicking one focuses that thread in place when it is in the current queue,
+    else navigates to ?thread=<root> — assembling context before replying, never double-answering."""
+    html = fila_page.build_fila_html([], ["Diogo"], now_iso="2026-06-03T12:00:00")
+    assert "const rel=r.related||[]" in html               # the dossier reads the labelled list
+    assert 'class="drel"' in html and "data-relroot=" in html
+    assert "conversa" in html and "relacionada" in html    # the pt-PT header (singular/plural)
+    assert "[data-relroot]" in html                        # the click handler is wired
+    assert "focusTo(i)" in html and "?thread=" in html      # focus-in-place OR navigate
+    assert ".drel{" in html and ".drel-i{" in html          # its CSS
+
+
+def test_timeline_debt_uses_the_authoritative_floor_humanizer_not_fmtgap():
+    """Times must AGREE: the timeline's open-debt chip has to read the same day-count as the dossier
+    clock label. cockpit._humanize_age FLOORS days (int(age_h//24)); _fmtGap ROUNDS them — so the
+    debt chip must call `_humanizeAge` (a JS mirror of the Python floor convention), never
+    `_fmtGap`, or you get «devemos resposta há 11 dias» beside «sem resposta há 12 dias» (the exact
+    round-vs-floor bug the owner circled)."""
+    html = fila_page.build_fila_html([], ["Diogo"], now_iso="2026-06-03T12:00:00")
+    assert "function _humanizeAge(h)" in html
+    assert "Math.floor(h/24)+' dias'" in html                      # floors days, like Python
+    assert "debtVerb+_humanizeAge(c.age_hours" in html             # the debt chip uses it
+    assert "debtVerb+_fmtGap(debtMs)" not in html                  # …never the rounding one
+
+
+def test_js_humanize_age_matches_python_humanize_age():
+    """Pin the JS/Python correspondence at the day/hour boundaries where round-vs-floor bites, by
+    evaluating the shipped JS branches against cockpit._humanize_age. Guards the two functions from
+    silently drifting apart on a future edit."""
+    from email2data.cockpit import _humanize_age
+    # the boundary that produced the live bug: 11.5 days → floor 11, not round 12
+    assert _humanize_age(11.5 * 24) == "11 dias"
+    assert _humanize_age(11.99 * 24) == "11 dias"
+    assert _humanize_age(12.0 * 24) == "12 dias"
+    # <48h stays in hours; <1h in minutes — same bands the JS mirror uses
+    assert _humanize_age(36) == "36 h"
+    assert _humanize_age(0.5) == "30 min"
+
+
 def test_api_fila_includes_trust(tmp_path):
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
     rows = {x["thread_root"]: x for x in cl.get("/api/fila").json()["rows"]}

@@ -141,6 +141,7 @@ class ThreadSummary:
     last_purpose: str = ""
     n_messages: int = 0
     has_attachment: bool = False
+    attach_kinds: list[str] = field(default_factory=list)  # union of typed categories across the thread
     last_date: Optional[datetime] = None          # latest message, any direction
     last_inbound_date: Optional[datetime] = None  # latest external/inbound message
     last_outbound_date: Optional[datetime] = None # latest observed sent reply (None unless Sent fetched)
@@ -197,6 +198,7 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
             last_purpose=purpose,
             n_messages=len(rows),
             has_attachment=any(int(r.get("has_attach") or 0) for r in rows),
+            attach_kinds=sorted({k for r in rows for k in (r.get("attach_kinds") or "").split(",") if k}),
             last_date=_parse_dt(last.get("date")),
             last_inbound_date=_parse_dt(last_in["date"]) if last_in else None,
             last_outbound_date=_parse_dt(last_out["date"]) if last_out else None,
@@ -420,6 +422,7 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "contact": s.participants[0] if s.participants else "",
             "n_messages": s.n_messages,
             "has_attachment": s.has_attachment,
+            "attach_kinds": s.attach_kinds,   # typed 📎 on the row (ADR-034); [] on a pre-v4 crm.db
             "owner": st.get("owner") or "",              # legacy single (first owner) for old readers
             "owners": st.get("owners") or [],            # multi-owner set (the Fila chips)
             "clock": clock,
