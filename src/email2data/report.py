@@ -445,7 +445,7 @@ const PRIcol={HIGH:'var(--red)',NEEDS_REVIEW:'var(--purple)',MEDIUM:'var(--amber
 const CPcol={CLIENT:'var(--green)',LEAD:'var(--int)',SUPPLIER:'var(--ac)',INTERNAL:'var(--mut2)',BULK:'var(--mut2)',OTHER:'var(--mut2)'};
 const PRIS=['HIGH','NEEDS_REVIEW','MEDIUM','LOW','IGNORE'], ROLE={from:'From',reply_to:'Reply-To',to:'To',cc:'Cc'};
 const CPpt={CLIENT:'Cliente',LEAD:'Lead',SUPPLIER:'Fornecedor',INTERNAL:'Interno',BULK:'Newsletter',OTHER:'Outro'};
-const PURpt={PO_FROM_CLIENT:'Encomenda de cliente',ESTIMATE_REQUEST_FROM_CLIENT:'Pedido de orçamento',OUTBOUND_INVOICE:'Fatura nossa',OUR_ORDER_TO_SUPPLIER:'Encomenda a fornecedor',SUPPLIER_REPLY_OR_CONFIRMATION:'Resposta de fornecedor',INVOICE_OR_ACCOUNTING:'Fatura / contabilidade',FOLLOW_UP:'Seguimento',OWN_REJECTION:'Recusámos',CLIENT_REJECTION:'Cliente recusou',PUBLICITY:'Publicidade',INTERNAL_OPS:'Operações internas',OTHER:'Outro'};
+const PURpt={PO_FROM_CLIENT:'Encomenda de cliente',ESTIMATE_REQUEST_FROM_CLIENT:'Pedido de orçamento',OUTBOUND_INVOICE:'Fatura nossa',OUTBOUND_QUOTE:'Orçamento enviado',OUR_ORDER_TO_SUPPLIER:'Encomenda a fornecedor',SUPPLIER_REPLY_OR_CONFIRMATION:'Resposta de fornecedor',SUPPLIER_INVOICE:'Fatura a pagar',INVOICE_OR_ACCOUNTING:'Fatura / contabilidade',FOLLOW_UP:'Seguimento',OWN_REJECTION:'Recusámos',CLIENT_REJECTION:'Cliente recusou',PUBLICITY:'Publicidade',INTERNAL_OPS:'Operações internas',OTHER:'Outro'};
 const PRIpt={HIGH:'Alta',MEDIUM:'Média',LOW:'Baixa',IGNORE:'Ignorar',NEEDS_REVIEW:'Rever'};
 const DIRpt={inbound:'entrada',outbound:'saída',internal:'interno'};
 // Stage + lead-status labels/colors — defined here so the project/lead facet registries can use them.
@@ -1221,7 +1221,7 @@ async function toggleRel(mid,sid){
     if(hint)hint.textContent=n?`${n} relacionado${n!==1?'s':''} ▴`:' — ▴';
   }catch(_){if(hint)hint.textContent='erro ▾';}
 }
-const _KEY_PT={client_name:'nome',client_email:'e-mail',nif:'NIF',iban:'IBAN',product_or_service:'produto',deadline:'prazo'};
+const _KEY_PT={client_name:'nome',client_email:'e-mail',nif:'NIF',iban:'IBAN',product_or_service:'produto'};
 function renderRelBody(sid,data){
   const body=document.getElementById('rel-body-'+sid);if(!body)return;
   const items=data.by_entity||[];

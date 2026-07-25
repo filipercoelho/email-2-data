@@ -44,6 +44,22 @@ def test_coerce_validates_enums_and_clamps():
     assert r.urgency == 100 and r.confidence == 1.0
 
 
+def test_coerce_maps_speech_act_and_defaults_unknown():
+    # ADR-036: a valid act passes through; an unknown/absent act coerces to UNKNOWN (never a guess).
+    assert _coerce(_raw(speech_act="OBLIGATION"), ENV, SIG, 0.85).speech_act == "OBLIGATION"
+    assert _coerce(_raw(speech_act="BOGUS"), ENV, SIG, 0.85).speech_act == "UNKNOWN"
+    assert _coerce(_raw(), ENV, SIG, 0.85).speech_act == "UNKNOWN"        # absent → UNKNOWN
+
+
+def test_triage_schema_contracts_carry_speech_act():
+    from email2data.schema import GEMINI_TRIAGE_SCHEMA, SPEECH_ACT, TRIAGE_TOOL
+    props = TRIAGE_TOOL["input_schema"]["properties"]
+    assert props["speech_act"]["enum"] == SPEECH_ACT
+    assert "speech_act" in TRIAGE_TOOL["input_schema"]["required"]
+    assert GEMINI_TRIAGE_SCHEMA["properties"]["speech_act"]["enum"] == SPEECH_ACT
+    assert "speech_act" in GEMINI_TRIAGE_SCHEMA["required"]
+
+
 def test_coerce_fills_deterministic_nif_iban_from_body():
     env = {**ENV, "body_text": "Contribuinte 501442600, IBAN PT50 0002 0123 1234 5678 9015 4"}
     r = _coerce(_raw(), env, SIG, 0.85)

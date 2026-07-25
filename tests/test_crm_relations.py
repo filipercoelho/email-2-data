@@ -251,6 +251,17 @@ def test_by_entity_empty_value_returns_empty(store: CrmStore) -> None:
     assert store.by_entity("nif", "   ") == []
 
 
+def test_by_entity_deadline_is_not_indexable(store: CrmStore) -> None:
+    """ADR-037 regression: `deadline` was dropped from _INDEXABLE_ENTITY_KEYS — measured on the real
+    corpus, 40% of its cross-thread matches were two unrelated clients whose deadline happened to
+    fall on the same calendar day, not a real relation. Two messages sharing a deadline (and nothing
+    else) must NOT be linked, even though the value is indexed identically to before the fix."""
+    assert "deadline" not in _INDEXABLE_ENTITY_KEYS
+    store.record(make_env("<m1>"), make_verdict(entities={"deadline": "2026-08-01"}))
+    store.record(make_env("<m2>"), make_verdict(entities={"deadline": "2026-08-01"}))
+    assert store.by_entity("deadline", "2026-08-01") == []
+
+
 # ---------------------------------------------------------------------------
 # related()
 # ---------------------------------------------------------------------------
@@ -297,6 +308,34 @@ def test_related_by_contact_cross_thread(store: CrmStore) -> None:
     assert "<m1>" not in ids
 
 
+def test_related_contact_email_override_replaces_seed_from_email(store: CrmStore) -> None:
+    """ADR-037: callers that know the thread's real EXTERNAL contact (Fila's resolved `contact`
+    field) can override the by_contact lookup key. Without this, an outbound seed message's
+    from_email is an internal @lindoservico.pt mailbox, and 'same contact' would mean 'touched the
+    same internal address' — flooding in every unrelated thread that mailbox ever appeared on."""
+    store.record(make_env("<seed>", from_email="orcamentos@lindoservico.pt"), make_verdict())
+    # unrelated: shares the seed's internal sender, nothing else
+    store.record(make_env("<noise>", from_email="orcamentos@lindoservico.pt"), make_verdict())
+    # related: the real external contact for this thread
+    store.record(make_env("<real>", from_email="cliente@acme.pt"), make_verdict())
+
+    default = store.related("<seed>")   # no override — old (buggy) behaviour
+    assert {r["message_id"] for r in default["by_contact"]} == {"<noise>"}
+
+    overridden = store.related("<seed>", contact_email="cliente@acme.pt")
+    assert {r["message_id"] for r in overridden["by_contact"]} == {"<real>"}
+
+
+def test_related_contact_email_empty_string_skips_by_contact(store: CrmStore) -> None:
+    """An explicit empty override means "no external contact known" — by_contact must be skipped
+    entirely, never silently fall back to the seed's own (possibly internal) from_email."""
+    store.record(make_env("<seed>", from_email="orcamentos@lindoservico.pt"), make_verdict())
+    store.record(make_env("<noise>", from_email="orcamentos@lindoservico.pt"), make_verdict())
+
+    result = store.related("<seed>", contact_email="")
+    assert result["by_contact"] == []
+
+
 def test_related_by_entity_cross_thread(store: CrmStore) -> None:
     """Two emails from different contacts sharing a NIF must be linked via entity."""
     ents = {"nif": "555444333"}
@@ -309,6 +348,20 @@ def test_related_by_entity_cross_thread(store: CrmStore) -> None:
     ids = {r["message_id"] for r in result["by_entity"]}
     assert "<m2>" in ids
     assert result["by_entity"][0]["_matched_entity"] == "nif"
+
+
+def test_related_two_strangers_sharing_only_a_deadline_are_not_linked(store: CrmStore) -> None:
+    """ADR-037 regression: this is the exact false positive found on the real corpus — two messages
+    from different senders, different clients, that happen to name the same calendar date must not
+    show up as "related". A genuine relation still surfaces via client_name/client_email/nif/iban."""
+    store.record(make_env("<m1>", from_email="a@a.com"),
+                 make_verdict(entities={"deadline": "2026-08-01", "client_name": "Acme"}))
+    store.record(make_env("<m2>", from_email="b@b.com"),
+                 make_verdict(entities={"deadline": "2026-08-01", "client_name": "Other Co"}))
+
+    result = store.related("<m1>")
+    assert result["by_entity"] == []
+    assert result["by_contact"] == []
 
 
 def test_related_by_entity_deduplicates_across_fields(store: CrmStore) -> None:

@@ -19,14 +19,14 @@ commits it (the cockpit trust grammar).
 │ email-2-data  Fila·112  Para ti·15  Projetos  Contrapartes  Capturas     │
 │                        correio há 4 min   ⌘K   Sincronizar   densidade   │
 ├ command strip ───────────────────────────────────────────────────────────┤
-│ 41 a responder · 13 a cobrar   [rever 1]     Hoje│Clientes│Fornec.│Leads │
+│ 41 a responder · 13 a aguardar [rever 1]     Hoje│Clientes│Fornec.│Leads │
 │                                              [1‑5 vistas]   /procurar    │
 ├──────────────┬───────────────────────────────────────────────────────────┤
 │ vistas rail  │  list pane (~40%)        │  dossier pane (~60%)           │
 │ Em risco 54  │  ▾ PRECISAM DE RESPOSTA 8│  [Cliente] devemos há 13 d     │
 │ € em jogo 9  │    row · row · row …     │  Subject · verb bar (E R H A P)│
 │ Prazos 7     │  ▸ À ESPERA DELES 58     │  tiles · IA · história · draft │
-│ Cobranças 13 │  ▸ INTERNOS —            │  timeline ⇵ + mensagens        │
+│ A aguardar 13│  ▸ INTERNOS —            │  timeline ⇵ + mensagens        │
 │ Tratados     │                          │                                │
 ├ footer ──────┴───────────────────────────────────────────────────────────┤
 │ J/K mover · Enter abrir · E tratado · R responder · H adiar · A dono ·   │
@@ -43,7 +43,7 @@ commits it (the cockpit trust grammar).
 
 | Element | Signal | Behaviour |
 | --- | --- | --- |
-| **Honest headline** «41 a responder · 13 a cobrar» | `clock.state==WE_OWE ∧ band∈{red,amber}` ; chase = `AWAITING ∧ age≥72 h` | Counts only what demands the user. Replaces the inflated «88 em risco» (which counted every red+amber row including the passive AWAITING pile). Each half is a click-filter. |
+| **Honest headline** «41 a responder · 13 a aguardar» | `clock.state==WE_OWE ∧ band∈{red,amber}` ; chase = `AWAITING ∧ age≥72 h` | Counts only what demands the user. Replaces the inflated «88 em risco» (which counted every red+amber row including the passive AWAITING pile). Each half is a click-filter. |
 | **«rever N» chip** | interactions with `priority==NEEDS_REVIEW` | Quiet amber chip; NEEDS_REVIEW finally gets a surface. Click → Para ti. Hidden at 0. |
 | **Freshness stamp** «correio há N min» | `_sync.last_ts` (same source as `/api/para-ti.synced_at`) | In the header; amber + louder once age > 45 min (ingestion stalled while the poll works — ADR-023's failure case). «Sincronizar» refreshes **in place**, never `location.reload()`. |
 | **Counterparty tabs** | `counterparty` per row (post-reclassification overlay) | See §3. |
@@ -56,9 +56,20 @@ Tabs are **client-side subsets of the one queue in the one order** — no second
 
 | Tab | Predicate | Grouping inside | Framing / verb emphasis |
 | --- | --- | --- | --- |
-| **Hoje** | all active rows | Precisam de resposta (open) · A cobrar (open) · À espera deles (collapsed) · Internos (collapsed) | The cross-front risk view; default. |
+| **Hoje** | all active rows | Precisam de resposta · A pagar · A cobrar (billing) · A aguardar (open) · À espera deles · Informações (collapsed) · Internos (collapsed) | The cross-front risk view; default. |
 | **Clientes** | `counterparty==CLIENT` | obligation (ADR-029) | Job context: project chip + readiness, gaps; R → quote/ask composers. |
-| **Fornecedores** | `counterparty==SUPPLIER` | **A cobrar first** (chase ≥72 h), then Precisam de resposta, then À espera (collapsed) | Chase-first; R → follow-up template; the passive pile becomes an actionable chase list. |
+| **Fornecedores** | `counterparty==SUPPLIER` | **A aguardar first** (chase ≥72 h), then **A pagar** (inbound bills), then Precisam de resposta, then À espera (collapsed) | Chase-first; R → follow-up template; the passive pile becomes an actionable follow-up list. |
+
+> **ADR-036 Stage 0 relabel.** The chase pile (`AWAITING ∧ age ≥ 72 h`) was mislabeled **«A cobrar»**
+> (to collect payment) when it is really *our proposal awaiting the client's decision* — renamed **«A aguardar»**
+> (`G_CHASE`). A **genuine «A cobrar»** group (`G_BILL`) is split off for our unpaid `OUTBOUND_INVOICE` only, so
+> "cobrar" now always means real money owed to us. The group id is derived in `cockpit.fila_group()` (one source
+> of truth in Python); the JS `semGroup` just renders `row.group`. Stage 1 adds **«A pagar»** (inbound bills,
+> `G_PAY`). **Stage 2** makes the group the folded **obligation** (`cockpit.derive_obligation` from the new
+> `speech_act` axis, ADR-036): `OWE_REPLY`→«Precisam de resposta», `OWE_PAYMENT`→«A pagar», `COLLECT`→«A cobrar»,
+> `AWAIT_THEM`→«A aguardar»/«À espera deles», `FYI`→**«Informações»** (`G_INFO`, quiet, collapsed); `ACK`/`CLOSE`
+> self-close. The clock only colours+sorts. Before a user-run `triage --full`, `_legacy_obligation` reproduces the
+> deterministic Stage 0/1 routing.
 | **Leads** | `counterparty==LEAD` | flat (rare) | Respond-same-day framing; «novo contacto» badge; dashed propor-projeto action; tab badge pulses on a new lead. Empty state says an empty tab is a good day. |
 
 Honesty rules: counterparty comes from the body (ADR-003) after the human reclassification overlay;
@@ -72,7 +83,7 @@ count is the count of the *same rows the list shows* (no separate arithmetic).
 | 1 | **Em risco** (default) | the grouped queue as in §3 | risk tuple |
 | 2 | **€ em jogo** | `WE_OWE ∧ entities.money present` | money desc (dashed values; vista is explicitly “AI-estimated”) |
 | 3 | **Prazos** | `entities.deadline present` | days-left asc; overdue first |
-| 4 | **Cobranças** | `AWAITING ∧ age ≥ 72 h` (`cockpit._AWAITING_CHASE_H`) | age desc |
+| 4 | **A aguardar** | `AWAITING ∧ age ≥ 72 h` (`cockpit._AWAITING_CHASE_H`) — spans `G_CHASE` + genuine billing `G_BILL` | age desc |
 | 5 | **Tratados** | the ADR-028 ledger (`?include=resolved`) | recency |
 
 Below the vistas, **read-only facet counts** orient before any click (tipo top-4, sem dono, com
@@ -90,7 +101,7 @@ finally visible). **No view builder** — five presets, period.
 | 3 px color rail | counterparty | CLIENT/SUPPLIER/LEAD hue; redundant with tab (kept for Hoje). |
 | Clock chip | `clock` | Filled dot = devemos; hollow = à espera (ADR-029). Color = band. Text counts **up past breach** for chases («+6 d»). The sort key and the visual state are one mechanism. |
 | Name | `display_name` (cluster override → contact name → raw address) | Bold, never the raw address when a human name exists (ADR-028 v8 names). |
-| ↻N | `crm.related()` count | Only when >0. The dossier expands it into a `.drel` block of jump-links (`related` list in the payload, up to 8 `{thread_root, subject}`); clicking focuses that thread in place or navigates to `?thread=<root>` — prevents double-answering one client from two threads. |
+| ↻N | `crm.related()` count | Only when >0. The dossier expands it into a `.drel` block of jump-links (`related` list in the payload, up to 8 `{thread_root, subject, reason, momentum}`); clicking focuses that thread in place or navigates to `?thread=<root>` — prevents double-answering one client from two threads. Up to 3 slots are reserved for a shared-entity match before same-contact volume backfills the rest (ADR-037: a prolific contact's routine traffic was crowding out the rarer, more specific match). Each item shows why it's linked (`reason`: «mesmo contacto» or the shared field — nome/e-mail/NIF/IBAN/produto) and a momentum dot for the OTHER thread, so a long-stalled same-contact hit reads differently from an active one. `deadline` is not a link key (date-only coincidence isn't a relation). «mesmo contacto» is always the row's own resolved EXTERNAL contact (never an internal @lindoservico.pt mailbox, even when the thread's dominant message was outbound — ADR-037). |
 | Scan line | `entities.product_or_service` → `trust.reason` → `subject` | The readable "what this is"; kills «RE: FW:» archaeology. The fallback chain is deterministic and stated in the dossier. |
 | «€ 4 900?» | `entities.money` | **Dashed** chip; tiebreak within band only; absent when unextracted. |
 | «⚑ 3 d» | `entities.deadline` | Amber; red when past due. |
@@ -190,7 +201,7 @@ tile and as the grouping for «À espera deles» inside the Fornecedores tab.
 | `can_draft` (JobSpec exists) | existing `/api/reply` honest-conditional ask draft | askables pre-ticked |
 | `purpose==ESTIMATE_REQUEST_FROM_CLIENT`, project attached, gaps | `ask` | readiness questions |
 | project `estimable` | `quote` | confirmed facts |
-| `AWAITING ∧ chase` (Cobranças) | `follow-up` | thread context |
+| `AWAITING ∧ chase` (A aguardar) | `follow-up` | thread context |
 | `purpose==OUTBOUND_INVOICE` | `payment` | |
 | otherwise | `follow-up` generic | |
 
@@ -206,6 +217,7 @@ Joined server-side in `_fila_rows` (P1–P2), each absent when unknown:
 | `display_name` | clusters (`counterparty_names` override → derived) via contact→cluster map | P1 |
 | `entities` `{money, deadline, product_or_service, action_requested}` | `crm.interactions.entities` (dominant verdict) | P2 |
 | `related_count` | `crm.related(dominant_mid)` sizes | P2 |
+| `related[].reason` / `related[].momentum` | match field name or «contacto»; other thread's own `cockpit.momentum()` | ADR-037 |
 | `novo` | `contacts.first_seen` within 14 d | P2 |
 | `chase` | `AWAITING ∧ age ≥ 72 h` | P2 |
 | `momentum` | §8 | P2 |
@@ -215,9 +227,9 @@ Joined server-side in `_fila_rows` (P1–P2), each absent when unknown:
 
 ## 12 · PT-PT strings (new)
 
-«a responder» · «a cobrar» · «rever N» · «correio há N min» · «Hoje» · «Clientes» · «Fornecedores» ·
-«Leads» · «Em risco» · «€ em jogo» · «Prazos» · «Cobranças» · «Tratados» · «A cobrar — sem resposta
-há 72 h+» · «faltam N campos» · «pronto a orçamentar» · «valor estimado (IA)» · «novo contacto» ·
+«a responder» · «a aguardar» · «rever N» · «correio há N min» · «Hoje» · «Clientes» · «Fornecedores» ·
+«Leads» · «Em risco» · «€ em jogo» · «Prazos» · «A aguardar» · «Tratados» · «A aguardar — sem resposta
+há 72 h+» · «A cobrar» (billing: unpaid OUTBOUND_INVOICE) · «faltam N campos» · «pronto a orçamentar» · «valor estimado (IA)» · «novo contacto» ·
 «N relacionadas» · «sem resposta há N dias» (timeline gap) · «agora» · «Adiar» · «acorda antes se
 responderem» · «Tratar agora» · «N de M» · «selecionadas: N» · «rascunho — revê antes de enviar · a
 app nunca envia» · zero states: «Tudo tratado · nada em risco» / «Sem leads novos — bom sinal».

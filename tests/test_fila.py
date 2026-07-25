@@ -819,7 +819,7 @@ def test_fila_page_groups_queue_by_obligation(tmp_path):
     assert "Precisam de resposta" in html and "À espera deles" in html
     # group is the primary key; the chosen sort survives *within* a group (stable sort, no 2nd key).
     # Since ADR-033 groupOf() returns the TAB-AWARE RANK (semGroup() carries the semantic id), so
-    # the same one-line stable partition also lets Fornecedores lead with «A cobrar».
+    # the same one-line stable partition also lets Fornecedores lead with «A aguardar».
     assert "out.sort((a,b)=>groupOf(a)-groupOf(b))" in html
     assert "function semGroup(" in html
     # the ledger stays one flat pile — grouping applies to the active queue only
@@ -827,8 +827,10 @@ def test_fila_page_groups_queue_by_obligation(tmp_path):
     # headers render with a count, and are sticky so they survive scrolling a long queue
     assert 'class="ghead ' in html and 'class="gh-n"' in html
     assert ".ghead{position:sticky" in html
-    # obligation also encoded per-row: hollow dot whenever the ball is NOT ours (wait + chase)
-    assert "semGroup(r)!==G_OWE?' wait':''" in html
+    # obligation also encoded per-row: hollow dot whenever the ball is NOT ours (their move); the
+    # ball is ours for BOTH a reply owed (G_OWE) and a payment owed (G_PAY) — isOurMove() (ADR-036).
+    assert "function isOurMove(" in html
+    assert "!isOurMove(r)?' wait':''" in html
     assert ".clock.wait .d{background:transparent" in html
 
 
@@ -841,13 +843,13 @@ def _p0_page(tmp_path):
 
 def test_fila_fronts_carry_their_own_demand(tmp_path):
     """ADR-034: the abstract «N a responder» headline is gone — each counterparty front is a hero
-    card whose OWN demand («N a responder · N a cobrar») lives inside it, computed per-front so a
-    count can never be misread as global. «a responder»/«a cobrar» survive as card text; the
+    card whose OWN demand («N a responder · N a aguardar») lives inside it, computed per-front so a
+    count can never be misread as global. «a responder»/«a aguardar» survive as card text; the
     predicates (WE_OWE red+amber / AWAITING chase) are unchanged; no abstract strip chip remains."""
     html = _p0_page(tmp_path)
     assert "function frontDemand(" in html and "function renderFronts(" in html
     assert 'id="_fronts"' in html and 'class="fc' in html
-    assert "a responder" in html and "a cobrar" in html      # now inside the cards
+    assert "a responder" in html and "a aguardar" in html    # now inside the cards
     assert "c.state==='WE_OWE'" in html          # respondCount predicate
     assert "c.state==='AWAITING'" in html        # chaseCount predicate
     assert 'id="_cobrar"' not in html and 'id="_risk"' not in html   # the abstract headline is gone
@@ -954,17 +956,50 @@ def test_fila_mesa_layout_split_pane(tmp_path):
     assert 'class="mesa"' in html and 'id="_doss"' in html
     assert "mesa-body" in html and "@media (max-width:1100px)" in html
     assert 'id="_vrail"' in html            # the vistas rail
-    for vista in ("Em risco", "Cobranças", "Tratados"):
+    for vista in ("Em risco", "A aguardar", "Tratados"):
         assert vista in html
 
 
+def test_fila_ships_obligation_groups_and_info_pile(tmp_path):
+    """ADR-036 Stage 2: the Fila groups by the folded OBLIGATION (row.group emitted by Python), and
+    the «Informações» (FYI) pile ships and starts collapsed."""
+    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/fila").text
+    assert "Informações" in html and "G_INFO" in html
+    assert "if(r.group!=null) return r.group" in html      # semGroup renders the Python-emitted group
+    assert "[G_INFO]:true" in html                          # the quiet pile starts collapsed
+
+
+def test_fila_fyi_verdict_folds_to_info_label(tmp_path):
+    """A notification (speech_act=FYI) folds to the INFO state — its clock reads «informação», not a
+    false «devemos resposta» just because it arrived inbound-last. The row carries obligation=FYI."""
+    env = _env("t1", 3, frm="noticias@fornecedor.pt", subject="Encomenda expedida")
+    v = {**_verdict(cp="SUPPLIER", purpose="SUPPLIER_REPLY_OR_CONFIRMATION"), "speech_act": "FYI"}
+    html = _client(tmp_path, _crm_with([(env, v)]))[0].get("/fila").text
+    # the row's embedded clock data proves the fold — «informação» only comes from an INFO-folded row
+    assert '"label": "informação"' in html
+    assert '"obligation": "FYI"' in html
+
+
+def test_supplier_invoice_routes_to_a_pagar_group(tmp_path):
+    """ADR-036 Stage 1: an inbound supplier bill (SUPPLIER_INVOICE) renders in the «A pagar» group
+    (TO_PAY state, «por pagar» clock), not «Precisam de resposta» — we owe a PAYMENT, not a reply."""
+    env = _env("t1", 60, frm="contabilidade@laminex.pt", subject="Fatura FT 2026/1420")
+    verdict = _verdict(cp="SUPPLIER", purpose="SUPPLIER_INVOICE")
+    html = _client(tmp_path, _crm_with([(env, verdict)]))[0].get("/fila").text
+    assert "A pagar" in html                 # the G_PAY group label ships
+    assert "por pagar" in html               # a real TO_PAY row's clock label (proves the routing)
+    assert "G_PAY" in html and "function isOurMove(" in html
+
+
 def test_fila_group_order_is_tab_aware_chase_first_for_suppliers(tmp_path):
-    """Inside the Fornecedores tab the queue leads with «A cobrar» (the actionable chase list),
-    while Hoje/Clientes lead with «Precisam de resposta». One partition mechanism, per-tab rank."""
+    """Inside the Fornecedores tab the queue leads with «A aguardar» (the actionable follow-up list),
+    while Hoje/Clientes lead with «Precisam de resposta». One partition mechanism, per-tab rank.
+    ADR-036 Stage 0: «A cobrar» is now reserved for genuine unpaid invoices (G_BILL), split off."""
     html = _p0_page(tmp_path)
-    assert "A cobrar" in html                              # the chase group label exists
-    assert "G_CHASE" in html and "TAB_SEQ" in html
-    assert "SUPPLIER:[G_CHASE" in html                     # suppliers: chase first
+    assert "A aguardar" in html                            # the follow-up (chase) group label
+    assert "A cobrar" in html                              # the genuine billing group (G_BILL) label
+    assert "G_CHASE" in html and "G_BILL" in html and "TAB_SEQ" in html
+    assert "SUPPLIER:[G_CHASE" in html                     # suppliers: follow-up first
 
 
 def test_fila_focus_is_keyed_by_thread_root(tmp_path):
@@ -1097,6 +1132,78 @@ def test_api_fila_rows_carry_chase_novo_momentum_and_related(tmp_path):
     assert rows["mid:t1"]["momentum"] in ("active", "slowing", "stalled")
     assert rows["mid:t1"]["related_count"] >= 1               # t2 shares the contact
     assert rows["mid:t3"]["related_count"] == 0
+
+
+def test_related_list_reserves_slots_for_entity_matches(tmp_path):
+    """ADR-037: a prolific counterparty's routine by_contact traffic must not crowd out a rarer,
+    more specific by_entity match. Before the fix, by_contact (fill-first, no reservation) filled
+    all 8 slots before by_entity was even considered — measured on the real corpus, this hid a
+    genuine entity match on 15% of active threads."""
+    records = [(_env("seed", 3, frm="prolific@client.pt"), _verdict_ent(nif="500123456"))]
+    # a message from a DIFFERENT sender sharing the seed's NIF — the entity match that must survive
+    records.append((_env("entlink", 10, frm="outro@empresa.pt", subject="Nota de encomenda"),
+                    _verdict_ent(nif="500123456")))
+    # 9 unrelated threads from the SAME sender as the seed — routine by_contact noise, enough on its
+    # own to fill the old 8-slot cap and hide the entity match above
+    for i in range(9):
+        records.append((_env(f"noise{i}", 20 + i, frm="prolific@client.pt", subject=f"Pedido {i}"),
+                        _verdict()))
+    rows = {x["thread_root"]: x for x in _client(tmp_path, _crm_with(records))[0].get("/api/fila").json()["rows"]}
+    related = rows["mid:seed"]["related"]
+    assert len(related) == 8                                    # still capped
+    roots = {x["thread_root"] for x in related}
+    assert "mid:entlink" in roots                               # rescued, not crowded out
+    ent_item = next(x for x in related if x["thread_root"] == "mid:entlink")
+    assert ent_item["reason"] == "nif"
+    contact_items = [x for x in related if x["thread_root"] != "mid:entlink"]
+    assert all(x["reason"] == "contacto" for x in contact_items)
+    assert len(contact_items) == 7                             # 8 total - 1 reserved entity slot
+
+
+def test_related_by_contact_ignores_our_own_domain(tmp_path):
+    """ADR-037: 'mesmo contacto' must mean the same EXTERNAL party, never an internal Lindo address.
+    Before this fix, related() seeded by_contact from the dominant message's raw from_email — when
+    that message was OUTBOUND (sent by us), every other thread the same internal mailbox ever
+    touched (e.g. orcamentos@lindoservico.pt CC'd across unrelated client proposals) flooded in as
+    "related". Measured on the real corpus: 113/366 threads had an outbound-dominant message; the
+    worst internal address flooded 257 unrelated threads in as "related"."""
+    def _out(mid, hours_ago, to, subject):
+        return {"message_id": mid, "date": (NOW - timedelta(hours=hours_ago)).isoformat(),
+                "from": {"email": "orcamentos@lindoservico.pt", "name": "Nós"},
+                "reply_to": {"email": "", "name": ""},
+                "to": [{"email": to, "name": ""}], "cc": [],
+                "references": [], "in_reply_to": None, "attachments": [], "subject": subject}
+
+    records = [(_out("seedout", 3, "cliente.a@algures.pt", "Envio de proposta A"),
+               {**_verdict(), "direction": "outbound"})]
+    # unrelated outbound threads that merely share the SAME internal sender — must NOT show up
+    for i, client in enumerate(["cliente.b@outra.pt", "cliente.c@mais.pt", "cliente.d@ainda.pt"]):
+        records.append((_out(f"noise{i}", 10 + i, client, f"Proposta para {client}"),
+                        {**_verdict(), "direction": "outbound"}))
+    # genuinely related: the SAME external client, a separate conversation
+    records.append((_env("real", 20, frm="cliente.a@algures.pt", subject="Re: Envio de proposta A"),
+                    _verdict()))
+
+    rows = {x["thread_root"]: x for x in
+            _client(tmp_path, _crm_with(records))[0].get("/api/fila").json()["rows"]}
+    related = rows["mid:seedout"]["related"]
+    roots = {x["thread_root"] for x in related}
+    assert "mid:real" in roots                                    # same external client — kept
+    assert not {"mid:noise0", "mid:noise1", "mid:noise2"} & roots  # internal-address flood — gone
+
+
+def test_related_items_carry_momentum(tmp_path):
+    """Each related item exposes the OTHER thread's own momentum (ADR-037) — a same-contact hit
+    that's long gone stale reads differently in the dossier from one still active."""
+    crm = _crm_with([
+        (_env("t1", 3), _verdict()),
+        (_env("t2", 5, subject="Segundo pedido"), _verdict()),   # same contact, separate thread
+    ])
+    rows = {x["thread_root"]: x for x in _client(tmp_path, crm)[0].get("/api/fila").json()["rows"]}
+    related = rows["mid:t1"]["related"]
+    assert related and related[0]["thread_root"] == "mid:t2"
+    assert related[0]["reason"] == "contacto"
+    assert related[0]["momentum"] in ("active", "slowing", "stalled")
 
 
 def test_api_fila_carries_freshness_badges_and_needs_review(tmp_path):
@@ -1345,7 +1452,7 @@ def test_novo_never_badges_automated_senders(tmp_path):
 
 def test_fila_fronts_demand_is_scoped_per_counterparty(tmp_path):
     """Each front card computes its OWN demand, scoped to its counterparty regardless of the active
-    front — so «Clientes · 2 a responder» and «Fornecedores · 1 a cobrar» are independent truths,
+    front — so «Clientes · 2 a responder» and «Fornecedores · 1 a aguardar» are independent truths,
     never a global number reprinted. Hoje = the whole active queue."""
     html = _p0_page(tmp_path)
     assert "k==='all' ? rows : rows.filter(r=>(r.counterparty||'')===k)" in html   # per-front scope

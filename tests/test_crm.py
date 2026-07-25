@@ -98,5 +98,17 @@ def test_record_stores_attach_kinds_and_all_interactions_surfaces_it(tmp_path):
     assert by_mid["m1"]["attach_kinds"] == "cad,pdf"
     assert by_mid["m1"]["has_attach"] == 1
     assert by_mid["m2"]["attach_kinds"] is None
+
+
+def test_record_persists_speech_act_for_the_obligation_fold(tmp_path):
+    """ADR-036: record() writes the speech_act column and all_interactions() (SELECT *) surfaces it,
+    so cockpit.derive_obligation can fold it. A verdict without the key stores "" → legacy fold."""
+    s = CrmStore(tmp_path / "crm.db").connect()
+    s.record(_env("m1", {"email": "laminex@x.pt"}, to=[{"email": "geral@lindoservico.pt"}]),
+             {**_v(cp="SUPPLIER", purpose="SUPPLIER_INVOICE"), "speech_act": "OBLIGATION"})
+    s.record(_env("m2", {"email": "ana@cliente.pt"}, to=[{"email": "diogo@lindoservico.pt"}]), _v())
+    by_mid = {it["message_id"]: it for it in s.all_interactions()}
+    assert by_mid["m1"]["speech_act"] == "OBLIGATION"
+    assert by_mid["m2"]["speech_act"] == ""      # absent in the verdict → empty (fold reads it as UNKNOWN)
     assert by_mid["m2"]["has_attach"] == 0
     s.close()

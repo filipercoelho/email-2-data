@@ -22,7 +22,7 @@ from . import jobspec as _js  # the job-spec field registry (capture extraction,
 
 # Bump whenever the playbook OR this schema changes verdicts, so re-runs are comparable and the
 # verdict cache (Phase 4) invalidates correctly.
-EXTRACTOR_VERSION = "counterparty.2026-06-11.v4"
+EXTRACTOR_VERSION = "counterparty.2026-07-25.v5"  # v5 (ADR-036): FOLLOW_UP split + SUPPLIER_INVOICE + speech_act axis
 
 # Counterparty is ALWAYS from Lindo's point of view.
 #   CLIENT = buys from us (revenue).  LEAD = prospective client, not yet buying.
@@ -33,10 +33,12 @@ PURPOSE = [
     "PO_FROM_CLIENT",
     "ESTIMATE_REQUEST_FROM_CLIENT",
     "OUTBOUND_INVOICE",  # invoice WE issue to a client (counterparty stays CLIENT)
+    "OUTBOUND_QUOTE",    # a quote/proposal WE sent a client/lead — awaiting their decision (NOT billing)
     "OUR_ORDER_TO_SUPPLIER",
     "SUPPLIER_REPLY_OR_CONFIRMATION",
-    "INVOICE_OR_ACCOUNTING",
-    "FOLLOW_UP",
+    "SUPPLIER_INVOICE",  # an inbound bill from a supplier WE must PAY (obligation-to-pay, ADR-036 Bug 2)
+    "INVOICE_OR_ACCOUNTING",  # other accounting mail (receipt/statement) — NOT itself a bill-to-pay
+    "FOLLOW_UP",         # an ACTIVE chase/reminder on something already sent (no new object)
     "OWN_REJECTION",     # Lindo declined: we told the client we can't/won't do this job
     "CLIENT_REJECTION",  # client closed: thank-you / acceptance-of-refusal after our reply
     "PUBLICITY",
@@ -44,6 +46,15 @@ PURPOSE = [
     "OTHER",
 ]
 DIRECTION = ["inbound", "internal", "outbound"]  # who SENT this message (header fact, set by signals.py)
+# Speech act (ADR-036) — the ORTHOGONAL axis: what the message DOES to the reader, independent of
+# counterparty/purpose/direction. UNKNOWN is allowed and PREFERRED over a confident-wrong act.
+#   ASK        — requests an action/answer ("podem enviar orçamento?", "conseguem produzir isto?")
+#   OBLIGATION — imposes a duty: pay this / do this by a date ("segue fatura, vencimento 30/07")
+#   FYI        — informational, no move expected (status note, confirmation copy)
+#   ACK        — acknowledges receipt / thanks, nothing pending ("obrigado, recebido")
+#   CLOSE      — explicitly ends the conversation ("ficou resolvido", "não vamos avançar")
+#   UNKNOWN    — genuinely unclear (do NOT force a guess — better UNKNOWN than confident-wrong)
+SPEECH_ACT = ["ASK", "OBLIGATION", "FYI", "ACK", "CLOSE", "UNKNOWN"]
 PRIORITIES = ["HIGH", "MEDIUM", "LOW", "IGNORE", "NEEDS_REVIEW"]
 
 # Only these counterparties may carry IGNORE. Anything else marked IGNORE is incoherent -> NEEDS_REVIEW.
@@ -52,9 +63,12 @@ IGNORABLE_COUNTERPARTIES = {"BULK", "OTHER"}
 HIGH_VALUE_COUNTERPARTIES = {"CLIENT", "LEAD"}
 HIGH_VALUE_PURPOSES = {"PO_FROM_CLIENT", "ESTIMATE_REQUEST_FROM_CLIENT"}
 # Awaited-outbound purposes start LOW and escalate with days-without-reply (dynamic part = Phase 4).
-AWAITED_OUTBOUND_PURPOSES = {"FOLLOW_UP", "OUR_ORDER_TO_SUPPLIER", "OWN_REJECTION"}
-# A client message with one of these purposes self-closes the thread — no human action needed.
-CLOSING_PURPOSES = {"CLIENT_REJECTION"}
+# OUTBOUND_QUOTE (a proposal awaiting the client's decision) is awaited-outbound like FOLLOW_UP.
+AWAITED_OUTBOUND_PURPOSES = {"FOLLOW_UP", "OUTBOUND_QUOTE", "OUR_ORDER_TO_SUPPLIER"}
+# A message with one of these purposes as the thread's LAST move self-closes it — no human action needed.
+# CLIENT_REJECTION = the client's thank-you/decline (inbound); OWN_REJECTION = our definitive refusal
+# (outbound). Both auto-HANDLED (ADR-036 Stage 0, Bug 1). A new inbound with a different purpose reopens it.
+CLOSING_PURPOSES = {"CLIENT_REJECTION", "OWN_REJECTION"}
 
 
 def derive_priority(counterparty: str, purpose: str, urgency: int, is_bulk: bool) -> str:
@@ -97,6 +111,7 @@ class TriageResult:
     urgency: int               # 0-100
     confidence: float          # 0.0-1.0
     reason: str
+    speech_act: str = "UNKNOWN"  # one of SPEECH_ACT — what the message DOES (ADR-036); UNKNOWN when unclear
     entities: Entities = field(default_factory=Entities)
     extractor_version: str = EXTRACTOR_VERSION
     # provenance
@@ -128,12 +143,13 @@ TRIAGE_TOOL = {
         "properties": {
             "counterparty": {"type": "string", "enum": COUNTERPARTY},
             "purpose": {"type": "string", "enum": PURPOSE},
+            "speech_act": {"type": "string", "enum": SPEECH_ACT},
             "urgency": {"type": "integer", "minimum": 0, "maximum": 100},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},
             "entities": {"type": "object", "properties": _ENTITY_PROPS_NULLABLE, "required": []},
         },
-        "required": ["counterparty", "purpose", "urgency", "confidence", "reason"],
+        "required": ["counterparty", "purpose", "speech_act", "urgency", "confidence", "reason"],
     },
 }
 
@@ -143,6 +159,7 @@ GEMINI_TRIAGE_SCHEMA = {
     "properties": {
         "counterparty": {"type": "string", "enum": COUNTERPARTY},
         "purpose": {"type": "string", "enum": PURPOSE},
+        "speech_act": {"type": "string", "enum": SPEECH_ACT},
         "urgency": {"type": "integer"},
         "confidence": {"type": "number"},
         "reason": {"type": "string"},
@@ -151,7 +168,7 @@ GEMINI_TRIAGE_SCHEMA = {
             "properties": {k: {"type": "string", "nullable": True} for k in _ENTITY_PROPS_NULLABLE},
         },
     },
-    "required": ["counterparty", "purpose", "urgency", "confidence", "reason"],
+    "required": ["counterparty", "purpose", "speech_act", "urgency", "confidence", "reason"],
 }
 
 

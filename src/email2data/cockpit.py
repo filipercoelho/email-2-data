@@ -71,14 +71,37 @@ from .schema import AWAITED_OUTBOUND_PURPOSES, CLOSING_PURPOSES, HIGH_VALUE_COUN
 # Response states (string constants, like the rest of the codebase's enums).
 WE_OWE = "WE_OWE"
 AWAITING = "AWAITING"
+TO_PAY = "TO_PAY"          # an inbound supplier bill we must PAY (ADR-036 Bug 2) — our move, not "owe a reply"
+INFO = "INFO"             # a notification (FYI) — visible-but-quiet, demands nothing (ADR-036)
 HANDLED = "HANDLED"
 INTERNAL = "INTERNAL"
+
+# Obligation (ADR-036) — the thread's NEXT MOVE, folded from the last DECISIVE message's
+# speech_act × direction × business-object. This is what NAMES the Fila group; the response clock
+# only colours urgency + sorts WITHIN a group (direction ≠ obligation — the old bug was naming a
+# group from a direction-derived clock). Each obligation maps to a response STATE (``_OBLIGATION_STATE``).
+OWE_REPLY   = "OWE_REPLY"    # our move: we must respond
+OWE_PAYMENT = "OWE_PAYMENT"  # our move: we must pay an inbound bill
+AWAIT_THEM  = "AWAIT_THEM"   # their move: our proposal/order awaiting their decision
+COLLECT     = "COLLECT"      # their move: our unpaid invoice — money to receive from them
+FYI         = "FYI"          # informational — no move (folds to the INFO state)
+RESOLVED    = "RESOLVED"     # ACK/CLOSE (either side) or a self-close — auto-handled
 
 # Counterparties that carry no relationship clock (not "someone waiting on us").
 _NON_COUNTERPARTY = {"INTERNAL", "BULK", "OTHER", ""}
 
-# Sort rank per state (higher = nearer the top of the Fila). Explicit, not magic.
-_STATE_RANK = {WE_OWE: 3, AWAITING: 2, INTERNAL: 1, HANDLED: 0}
+# Sort rank per state (higher = nearer the top of the Fila). Explicit, not magic. TO_PAY shares
+# WE_OWE's top tier — a payment obligation is our move, as salient as an owed reply. INFO is low.
+_STATE_RANK = {WE_OWE: 3, TO_PAY: 3, AWAITING: 2, INFO: 1, INTERNAL: 1, HANDLED: 0}
+
+# Obligation → response state; the speech-acts that DECISIVELY set an obligation (FYI/UNKNOWN never
+# override a live move); and the inbound OBLIGATION purposes that are money-to-pay vs an action/reply.
+_OBLIGATION_STATE = {OWE_REPLY: WE_OWE, OWE_PAYMENT: TO_PAY, AWAIT_THEM: AWAITING,
+                     COLLECT: AWAITING, FYI: INFO, RESOLVED: HANDLED}
+_DECISIVE_ACTS = {"ASK", "OBLIGATION", "ACK", "CLOSE"}
+_PAYABLE_PURPOSES = {"SUPPLIER_INVOICE"}
+_OBLIG_VERB = {OWE_REPLY: "devemos resposta", OWE_PAYMENT: "por pagar",
+               AWAIT_THEM: "à espera", COLLECT: "a cobrar"}
 
 # Fila orderings (see the module docstring). Both are ORDER BY DESC over their key.
 ORDER_RECENT = "recent"   # newest thread activity first
@@ -91,6 +114,10 @@ ORDERS = (ORDER_RECENT, ORDER_RISK)
 _AMBER_AFTER_H = 4.0
 _RED_AFTER_H = 24.0
 _AWAITING_CHASE_H = _RED_AFTER_H * 3  # we only nudge an awaited reply once a chase is overdue
+# A bill is not a 4h SLA — it ages toward its due date. MVP bands on received-age (the vencimento is
+# entities.deadline, not yet threaded into the clock — ADR-036 Stage 1 follow-up).
+_TO_PAY_AMBER_H = 48.0
+_TO_PAY_RED_H = 24.0 * 7   # unpaid a week → red
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
@@ -158,6 +185,8 @@ class ThreadSummary:
     all_message_ids: list[str] = field(default_factory=list)
     # Parsed message dates (ascending) — the momentum («Ritmo») input (ADR-033 §8).
     dates: list[datetime] = field(default_factory=list)
+    # (speech_act, direction, purpose) per message, ascending — the ADR-036 obligation-fold input.
+    acts: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
@@ -210,6 +239,8 @@ def fold_threads(interactions: Iterable[dict[str, Any]]) -> list[ThreadSummary]:
             reason=dom.get("reason") or "",
             all_message_ids=[r.get("message_id", "") for r in rows_asc if r.get("message_id")],
             dates=[d for d in (_parse_dt(r.get("date")) for r in rows_asc) if d],
+            acts=[((r.get("speech_act") or "UNKNOWN"), (r.get("direction") or ""),
+                   (r.get("purpose") or "")) for r in rows_asc],
         ))
     return summaries
 
@@ -267,41 +298,85 @@ def money_value(raw: Any) -> Optional[float]:
         return None
 
 
+def _legacy_obligation(s: ThreadSummary) -> str:
+    """Fallback fold when no message carries a ``speech_act`` yet (a pre-v5 ``crm.db``, before the
+    user runs ``triage --full``). Reproduces the Stage 0/1 direction/purpose routing exactly, so the
+    Fila stays correct before re-triage: OWN_REJECTION/CLOSING self-close (Bug 1), an inbound
+    SUPPLIER_INVOICE is money-to-pay (Bug 2), an outbound OUTBOUND_INVOICE is COLLECT. Branch order
+    mirrors the old ``thread_clock`` (CLOSING preempts the observed-outbound branch)."""
+    if s.last_purpose in CLOSING_PURPOSES:                 # OWN_REJECTION (Bug 1) or CLIENT_REJECTION
+        return RESOLVED
+    if s.last_purpose == "SUPPLIER_INVOICE":               # Bug 2: inbound bill → money-to-pay
+        return OWE_PAYMENT
+    if s.last_outbound_date and (not s.last_inbound_date or s.last_outbound_date >= s.last_inbound_date):
+        return COLLECT if s.last_purpose == "OUTBOUND_INVOICE" else AWAIT_THEM
+    if s.last_direction == "inbound":
+        return OWE_REPLY
+    if s.last_purpose in AWAITED_OUTBOUND_PURPOSES:
+        return AWAIT_THEM
+    return OWE_REPLY
+
+
+def derive_obligation(s: ThreadSummary) -> str:
+    """The thread's next-move obligation (ADR-036). The LAST DECISIVE message (``speech_act`` ∈
+    ASK/OBLIGATION/ACK/CLOSE) sets it; FYI/UNKNOWN never override a live move. No usable act anywhere
+    → legacy fallback. ASK inbound = they asked us (OWE_REPLY); ASK outbound = we asked them
+    (AWAIT_THEM). OBLIGATION inbound = pay a bill (OWE_PAYMENT) or act (OWE_REPLY); OBLIGATION outbound
+    on our invoice = COLLECT. ACK/CLOSE = RESOLVED (kills 'obrigado, recebido stays open forever')."""
+    decisive = next(((a, d, p) for a, d, p in reversed(s.acts) if a in _DECISIVE_ACTS), None)
+    if decisive is None:
+        if any(a not in ("", "UNKNOWN") for a, _, _ in s.acts):
+            return FYI                                     # acts present but all FYI → quiet pile
+        return _legacy_obligation(s)                       # no speech_act signal → legacy routing
+    act, direction, purpose = decisive
+    if act in ("ACK", "CLOSE"):
+        return RESOLVED
+    inbound = direction == "inbound"
+    if act == "ASK":
+        return OWE_REPLY if inbound else AWAIT_THEM
+    # OBLIGATION
+    if inbound:
+        return OWE_PAYMENT if purpose in _PAYABLE_PURPOSES else OWE_REPLY
+    return COLLECT if purpose == "OUTBOUND_INVOICE" else AWAIT_THEM
+
+
+def _obligation_since(s: ThreadSummary, obligation: str) -> Optional[datetime]:
+    """The instant the clock counts from, per obligation — when the ball landed on the owing side."""
+    if obligation in (OWE_REPLY, OWE_PAYMENT):
+        return s.last_inbound_date or s.last_date
+    if obligation in (AWAIT_THEM, COLLECT):
+        return s.last_outbound_date or s.last_date
+    return s.last_date
+
+
 def thread_clock(s: ThreadSummary, now: datetime,
                  *, handled: bool = False, handled_ts: Optional[str] = None) -> dict[str, Any]:
-    """Response state + age + colour band + PT label for one thread.
+    """Response obligation + state + age + colour band + PT label for one thread (ADR-036).
 
-    ``handled``/``handled_ts`` come from the precious thread_state overlay. A new inbound that arrives
-    AFTER ``handled_ts`` reopens the thread (back to ``WE_OWE``)."""
+    The group-naming ``obligation`` is folded from the messages' speech acts (``derive_obligation``);
+    the clock (band/age) only colours + sorts. ``handled``/``handled_ts`` come from the precious
+    thread_state overlay — a new inbound AFTER ``handled_ts`` reopens the thread (back to our move)."""
     handled_dt = _parse_dt(handled_ts) if handled_ts else None
     reopened = bool(handled and handled_dt and s.last_inbound_date and s.last_inbound_date > handled_dt)
 
     if s.counterparty in _NON_COUNTERPARTY:
-        state, since = INTERNAL, s.last_date
+        obligation, state, since = RESOLVED, INTERNAL, s.last_date   # colleague-only: quiet, off the Fila
     elif handled and not reopened:
-        state, since = HANDLED, (handled_dt or s.last_date)
-    elif s.last_outbound_date and (not s.last_inbound_date or s.last_outbound_date >= s.last_inbound_date):
-        # We replied last (Sent observed) → ball is in their court.
-        state, since = AWAITING, s.last_outbound_date
-    elif s.last_purpose in CLOSING_PURPOSES:
-        # Client sent a closure (thank-you after our rejection, or explicit decline) — auto-resolve.
-        # No human action needed; a new inbound with a different purpose will reopen the thread.
-        state, since = HANDLED, s.last_inbound_date or s.last_date
-    elif s.last_direction == "inbound" or reopened:
-        state, since = WE_OWE, s.last_inbound_date
-    elif s.last_purpose in AWAITED_OUTBOUND_PURPOSES:
-        # No reply observed, but the purpose says we're awaiting them (e.g. our order to a supplier).
-        state, since = AWAITING, s.last_date
+        obligation, state, since = RESOLVED, HANDLED, (handled_dt or s.last_date)
     else:
-        # Internal forward / unclear last move on an external thread — still our move.
-        state, since = WE_OWE, (s.last_inbound_date or s.last_date)
+        obligation = derive_obligation(s)
+        if reopened and obligation in (RESOLVED, FYI):
+            obligation = OWE_REPLY                          # a new inbound after handled → our move again
+        state = _OBLIGATION_STATE[obligation]
+        since = _obligation_since(s, obligation)
 
     age_h = _age_hours(since, now)
     return {
         "state": state,
+        "obligation": obligation,
         "age_hours": round(age_h, 2),
         "band": _band(state, age_h),
-        "label": _label(state, age_h),
+        "label": _obligation_label(obligation, state, age_h),
         "since": since.isoformat() if since else None,
     }
 
@@ -312,6 +387,8 @@ def _band(state: str, age_h: float) -> str:
         return "red" if age_h >= _RED_AFTER_H else "amber" if age_h >= _AMBER_AFTER_H else "green"
     if state == AWAITING:
         return "amber" if age_h >= _AWAITING_CHASE_H else "green"
+    if state == TO_PAY:
+        return "red" if age_h >= _TO_PAY_RED_H else "amber" if age_h >= _TO_PAY_AMBER_H else "green"
     return "none"
 
 
@@ -323,15 +400,47 @@ def _humanize_age(age_h: float) -> str:
     return f"{int(age_h // 24)} dias"
 
 
-def _label(state: str, age_h: float) -> str:
-    """PT-PT human label for the clock."""
-    if state == WE_OWE:
-        return f"devemos resposta há {_humanize_age(age_h)}"
-    if state == AWAITING:
-        return f"à espera há {_humanize_age(age_h)}"
+def _obligation_label(obligation: str, state: str, age_h: float) -> str:
+    """PT-PT clock label — reflects the OBLIGATION (we may owe a PAYMENT, not a reply), not just the state."""
     if state == HANDLED:
         return "tratado"
-    return "interno"
+    if state == INTERNAL:
+        return "interno"
+    if obligation == FYI:
+        return "informação"
+    return f"{_OBLIG_VERB.get(obligation, 'pendente')} há {_humanize_age(age_h)}"
+
+
+# ── Fila obligation groups (ADR-029, refined ADR-033/-034; ADR-036 Stage 0) ──────────────────────
+# The clock COLORS urgency and SORTS within a group — it must never NAME a group. The group is a
+# function of state × band × business-object (purpose). The ids are stable identities; the UI's
+# TAB_SEQ ranks them per counterparty front. Stages 1-2 extend fila_group() (a pay group; a fold on
+# the speech_act axis). Kept here beside thread_clock so the routing is one source of truth in Python.
+G_OWE, G_CHASE, G_WAIT, G_OTHER, G_BILL, G_PAY, G_INFO = 0, 1, 2, 3, 4, 5, 6
+
+
+def fila_group(clock: dict[str, Any]) -> int:
+    """Semantic obligation group for one Fila row (the number the UI groups + ranks by), derived from
+    the folded ``obligation`` (ADR-036) — NOT from the clock's direction/age. OWE_REPLY → G_OWE
+    («Precisam de resposta»); OWE_PAYMENT → G_PAY («A pagar»); COLLECT → G_BILL («A cobrar», genuine
+    billing only); FYI → G_INFO («Informações»). AWAIT_THEM is the one obligation the clock band still
+    splits: a stalled one (amber, ≥72 h) is a follow-up candidate (G_CHASE «A aguardar»), a fresh one
+    is muted (G_WAIT «À espera deles»). HANDLED/INTERNAL and anything unclear → G_OTHER («Internos»)."""
+    state = clock["state"]
+    if state in (HANDLED, INTERNAL):
+        return G_OTHER
+    obl = clock.get("obligation")
+    if obl == OWE_REPLY:
+        return G_OWE
+    if obl == OWE_PAYMENT:
+        return G_PAY
+    if obl == COLLECT:
+        return G_BILL
+    if obl == AWAIT_THEM:
+        return G_CHASE if clock.get("band") == "amber" else G_WAIT
+    if obl == FYI:
+        return G_INFO
+    return G_OTHER
 
 
 def sort_key(clock: dict[str, Any], counterparty: str) -> tuple[int, int, float]:
@@ -426,6 +535,8 @@ def build_fila(interactions: Iterable[dict[str, Any]],
             "owner": st.get("owner") or "",              # legacy single (first owner) for old readers
             "owners": st.get("owners") or [],            # multi-owner set (the Fila chips)
             "clock": clock,
+            # Obligation group (ADR-036): derived in Python (single source) so the JS only renders it.
+            "group": fila_group(clock),
             # «Ritmo» (ADR-033 §8): the thread's own cadence vs its current silence.
             "momentum": momentum(s.dates, now),
             # Present only on snoozed rows (the resolved/«Adiadas» view shows when it wakes).

@@ -152,6 +152,7 @@ const cl = CLUSTER, st = STATS, tl = TIMELINE, proj = PROJECTS, frows = FILA_ROW
 const PURpt = {ESTIMATE_REQUEST_FROM_CLIENT:'pedido orçamento',PO_FROM_CLIENT:'encomenda',
   FOLLOW_UP:'follow-up',OUR_ORDER_TO_SUPPLIER:'encomenda a fornecedor',
   SUPPLIER_REPLY_OR_CONFIRMATION:'resposta fornecedor',OUTBOUND_INVOICE:'fatura nossa',
+  OUTBOUND_QUOTE:'orçamento enviado',SUPPLIER_INVOICE:'fatura a pagar',
   INVOICE_OR_ACCOUNTING:'faturação',PUBLICITY:'publicidade',INTERNAL_OPS:'operações internas',OTHER:'outro'};
 const purposeLabel = p => PURpt[p] || (p||'').toLowerCase().replace(/_/g,' ');
 const GATEpt  = {rever_classificacao:'Rever', propor_projeto:'Propor projeto', confirmar_identidade:'Identidade'};

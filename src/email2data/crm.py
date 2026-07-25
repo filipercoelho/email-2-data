@@ -26,7 +26,7 @@ from typing import Any, Optional
 from .signals import OUR_DOMAIN
 
 # Bump this if the schema changes in a way that requires a full rebuild reminder.
-SCHEMA_VERSION = 4   # v4: attach_kinds column (typed 📎 on the Fila row). crm.db is regenerable, so
+SCHEMA_VERSION = 5   # v5: speech_act column (ADR-036 act-driven Fila obligation). crm.db is regenerable, so
 #                      this appears on the next `sync`/`crm` rebuild; SELECT * degrades on the old DB.
 
 # Attachment filename extension → a compact category, so the Fila row can say what KIND of file is
@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     direction    TEXT,
     counterparty TEXT,
     purpose      TEXT,
+    speech_act   TEXT,    -- ADR-036 orthogonal axis (ASK/OBLIGATION/FYI/ACK/CLOSE/UNKNOWN); NULL on pre-v5 rows → legacy fold
     priority     TEXT,
     urgency      INTEGER,
     subject      TEXT,
@@ -128,9 +129,23 @@ CREATE TABLE IF NOT EXISTS contacts (
 
 # Entity fields worth indexing for cross-thread matching.  Freeform prose fields
 # (action_requested, money) are skipped — they produce too many spurious matches.
+# `deadline` was dropped too (ADR-037): measured on the real corpus, 40% of its cross-thread
+# matches were two unrelated clients whose deadline happened to fall on the same calendar day —
+# a coincidence, not a relation. A genuine shared deadline between related messages still shows
+# up via client_name/client_email, which are matched below.
 _INDEXABLE_ENTITY_KEYS = frozenset({
-    "client_name", "client_email", "nif", "iban", "product_or_service", "deadline",
+    "client_name", "client_email", "nif", "iban", "product_or_service",
 })
+
+# PT label for each indexable field, for surfacing *why* two messages were linked (ADR-037) —
+# the Fila related-list badge and the legacy /inbox report's relations panel both key off this.
+ENTITY_LABEL_PT = {
+    "client_name": "nome",
+    "client_email": "e-mail",
+    "nif": "NIF",
+    "iban": "IBAN",
+    "product_or_service": "produto",
+}
 
 
 def participants(env: dict[str, Any]) -> list[tuple[str, str, str]]:
@@ -222,16 +237,17 @@ class CrmStore:
 
         self._conn.execute(
             "INSERT OR REPLACE INTO interactions"
-            "(message_id, date, from_email, direction, counterparty, purpose, priority, urgency,"
+            "(message_id, date, from_email, direction, counterparty, purpose, speech_act, priority, urgency,"
             " subject, thread_root, is_reply, is_forward, has_attach, attach_kinds, n_recipients,"
             " entities, confidence, decided_by, reason)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 mid, date,
                 (env.get("from") or {}).get("email", ""),
                 verdict.get("direction", ""),
                 verdict.get("counterparty", ""),
                 verdict.get("purpose", ""),
+                verdict.get("speech_act", "") or "",
                 verdict.get("priority", ""),
                 int(verdict.get("urgency", 0) or 0),
                 env.get("subject", ""),
@@ -378,7 +394,7 @@ class CrmStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def related(self, message_id: str) -> dict[str, list[dict[str, Any]]]:
+    def related(self, message_id: str, *, contact_email: str | None = None) -> dict[str, list[dict[str, Any]]]:
         """Aggregate all three relation types for one message.
 
         Returns::
@@ -394,6 +410,17 @@ class CrmStore:
         overlap (a message can be both a thread sibling *and* share an entity); callers that
         want a deduplicated union should merge on ``message_id`` themselves.
         Returns empty lists for all three groups when *message_id* is unknown.
+
+        ``contact_email`` (ADR-037): the ``by_contact`` lookup key. Defaults to the seed message's
+        own ``from_email``, which is WRONG whenever the seed is an outbound message — its sender is
+        then an internal @lindoservico.pt mailbox, and "same contact" would mean "touched the same
+        internal address", flooding in every unrelated thread that address ever appeared on
+        (measured on the real corpus: 113/366 threads had an outbound dominant message; the worst
+        internal address flooded 257 unrelated threads in as "related"). Callers that already know
+        the thread's actual EXTERNAL counterparty (e.g. the Fila row's resolved ``contact`` field,
+        which includes the ADR-033 P4a outbound-only fallback) should pass it explicitly — pass ``""``
+        to mean "no external contact known" (skips the by_contact lookup entirely, rather than
+        falling back to an internal address).
         """
         row = self._conn.execute(
             "SELECT * FROM interactions WHERE message_id = ?", (message_id,)
@@ -403,12 +430,13 @@ class CrmStore:
 
         interaction = dict(row)
         thread_root = interaction.get("thread_root") or ""
-        from_email = interaction.get("from_email") or ""
+        from_email = interaction.get("from_email") or "" if contact_email is None else contact_email
         ents_raw: dict[str, Any] = json.loads(interaction.get("entities") or "{}") or {}
 
         thread = [r for r in self.thread(thread_root) if r["message_id"] != message_id]
 
-        by_contact = [r for r in self.by_contact(from_email) if r["message_id"] != message_id]
+        by_contact = ([r for r in self.by_contact(from_email) if r["message_id"] != message_id]
+                     if from_email else [])
 
         # Cross-entity: collect matches across all indexable entity fields, deduplicated by
         # message_id.  Each match is annotated with which field caused it (_matched_entity).

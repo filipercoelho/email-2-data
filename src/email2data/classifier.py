@@ -18,6 +18,7 @@ from .schema import (
     IGNORABLE_COUNTERPARTIES,
     COUNTERPARTY,
     PURPOSE,
+    SPEECH_ACT,
     TRIAGE_TOOL,
     Entities,
     TriageResult,
@@ -58,6 +59,8 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: f
     ent = raw.get("entities") or {}
     counterparty = raw.get("counterparty") if raw.get("counterparty") in COUNTERPARTY else "OTHER"
     purpose = raw.get("purpose") if raw.get("purpose") in PURPOSE else "OTHER"
+    # UNKNOWN is the anti-hallucination default: an unrecognised/absent act never becomes a made-up one.
+    speech_act = raw.get("speech_act") if raw.get("speech_act") in SPEECH_ACT else "UNKNOWN"
     urgency = max(0, min(100, int(raw.get("urgency", 0))))
     confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0))))
     reason = str(raw.get("reason", "")).strip()
@@ -81,6 +84,7 @@ def _coerce(raw: dict[str, Any], env: dict[str, Any], signals: Signals, floor: f
         urgency=urgency,
         confidence=confidence,
         reason=reason,
+        speech_act=speech_act,
         entities=Entities(
             client_name=ent.get("client_name"),
             client_email=ent.get("client_email"),

@@ -47,6 +47,13 @@ _REEXTRACT_TIERS = ("light", "standard", "heavy")
 # Internal flags, not facts we would ever confirm back to a client (mirrors replydraft._HIDE).
 _POLISH_HIDE = {"client_identity", "design_ready", "process"}
 
+# Fila related-list (ADR-037): minimum by_entity slots reserved before by_contact backfills the
+# rest, up to the 8-item cap in _fila_rows — otherwise a prolific counterparty's routine traffic
+# (by_contact, any topic) always fills all 8 slots first and the rarer, more specific entity match
+# never surfaces. Measured on the real corpus: 15% of threads with a genuine entity match had it
+# fully crowded out under the old fill-by_contact-first order.
+_RELATED_ENTITY_RESERVE = 3
+
 
 def _find_secret_key(node: Any, depth: int = 0) -> str | None:
     """Walk a decoded JSON body and return the first key that looks like a secret VALUE slot.
@@ -1674,6 +1681,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                                   reclassified=ws.get_reclassifications(),
                                   snoozes=ws.thread_snoozes(),
                                   include_resolved=include_resolved)
+        # Momentum-by-root for the related-list badges below (ADR-037) — recomputed from every
+        # interaction, not just `rows`, because a related thread can be HANDLED/closed (dropped
+        # from `rows` when include_resolved is False) and that's exactly the status worth showing.
+        thread_summaries = {t.thread_root: t for t in cockpit.fold_threads(ints)}
         # Annotate each thread with the project it already belongs to (if any), so the Fila can show
         # "already in project X" and offer open-vs-create — preventing duplicate projects from one lead.
         # The denormalized Gate-1 columns (v3) ride along so the dossier's project line can say
@@ -1778,24 +1789,50 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                              and not NO_REPLY_RE.search(r.get("contact") or ""))
             # cross-thread relations (same contact or shared entity), deduped by thread_root — the
             # double-answer guard. Bounded: one related() call per active thread on a local SQLite.
-            # Carry a small labelled list (ADR-034), not just a count, so the dossier can offer
-            # jump-links (?thread=<root>) — assembling context before replying, never double-answering.
-            related: list[dict[str, str]] = []
+            # Carry a small labelled list (ADR-034) with the match REASON + the related thread's own
+            # momentum (ADR-037), so the dossier shows why two threads are linked and whether the
+            # other one is still live — not just a bare subject line.
+            #
+            # A prolific counterparty can have hundreds of by_contact hits (any topic, same person),
+            # which would otherwise fill all 8 slots before the rarer, more specific by_entity match
+            # (shared NIF/name/product) ever gets a look-in — measured on the real corpus (ADR-037):
+            # 15% of threads with a genuine entity match had it fully crowded out.
+            # _RELATED_ENTITY_RESERVE guarantees entity matches a shot regardless of contact volume.
+            related: list[dict[str, Any]] = []
             if r.get("message_id"):
-                rel = _crmdb.related(r["message_id"])
+                # contact_email: use the row's own resolved EXTERNAL contact (already computed above,
+                # including the ADR-033 P4a outbound-only fallback) — never the dominant message's raw
+                # from_email, which is an internal @lindoservico.pt mailbox whenever that message was
+                # OUTBOUND (ADR-037).
+                rel = _crmdb.related(r["message_id"], contact_email=r.get("contact") or "")
                 seen_roots = {r.get("thread_root"), "", None}
-                for grp in ("by_contact", "by_entity"):
-                    for x in rel.get(grp, []):
-                        root = x.get("thread_root")
-                        if root in seen_roots:
-                            continue
-                        seen_roots.add(root)
-                        related.append({"thread_root": root,
-                                        "subject": (x.get("subject") or "").strip() or "(sem assunto)"})
-                        if len(related) >= 8:
-                            break
+
+                def _add(x: dict, reason: str) -> None:
+                    root = x.get("thread_root")
+                    if root in seen_roots:
+                        return
+                    seen_roots.add(root)
+                    t = thread_summaries.get(root)
+                    related.append({
+                        "thread_root": root,
+                        "subject": (x.get("subject") or "").strip() or "(sem assunto)",
+                        "reason": reason,
+                        "momentum": cockpit.momentum(t.dates, now) if t else None,
+                    })
+
+                entity_hits = rel.get("by_entity", [])
+                for x in entity_hits[:_RELATED_ENTITY_RESERVE]:
                     if len(related) >= 8:
                         break
+                    _add(x, x.get("_matched_entity") or "entidade")
+                for x in rel.get("by_contact", []):
+                    if len(related) >= 8:
+                        break
+                    _add(x, "contacto")
+                for x in entity_hits[_RELATED_ENTITY_RESERVE:]:
+                    if len(related) >= 8:
+                        break
+                    _add(x, x.get("_matched_entity") or "entidade")
             r["related"] = related
             r["related_count"] = len(related)
         return rows

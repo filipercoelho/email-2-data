@@ -9,8 +9,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from email2data.cockpit import (AWAITING, HANDLED, INTERNAL, WE_OWE, _age_hours, _parse_dt,
-                                 build_fila, fold_threads, thread_clock)
+from email2data.cockpit import (AWAITING, G_BILL, G_CHASE, G_INFO, G_OWE, G_PAY, G_WAIT, HANDLED,
+                                 INFO, INTERNAL, TO_PAY, WE_OWE, _age_hours, _parse_dt, build_fila,
+                                 fold_threads, thread_clock)
+from email2data.schema import derive_priority
 from email2data.workspace import Workspace
 
 NOW = datetime(2026, 6, 3, 12, 0, tzinfo=timezone.utc)
@@ -21,12 +23,13 @@ def ago(hours: float) -> str:
 
 
 def _row(root, mid, date, *, direction="inbound", counterparty="CLIENT",
-         purpose="ESTIMATE_REQUEST_FROM_CLIENT", subject="Orçamento", has_attach=0, attach_kinds="",
-         from_email="maria@acme.pt", confidence=0.91, decided_by="tier1:gemini", reason="pede orçamento"):
+         purpose="ESTIMATE_REQUEST_FROM_CLIENT", speech_act="UNKNOWN", subject="Orçamento",
+         has_attach=0, attach_kinds="", from_email="maria@acme.pt", confidence=0.91,
+         decided_by="tier1:gemini", reason="pede orçamento"):
     return {"thread_root": root, "message_id": mid, "date": date, "direction": direction,
-            "counterparty": counterparty, "purpose": purpose, "subject": subject,
-            "has_attach": has_attach, "attach_kinds": attach_kinds, "from_email": from_email,
-            "confidence": confidence, "decided_by": decided_by, "reason": reason}
+            "counterparty": counterparty, "purpose": purpose, "speech_act": speech_act,
+            "subject": subject, "has_attach": has_attach, "attach_kinds": attach_kinds,
+            "from_email": from_email, "confidence": confidence, "decided_by": decided_by, "reason": reason}
 
 
 def _clock_for(rows, **state):
@@ -69,13 +72,170 @@ def test_awaited_outbound_purpose_is_awaiting():
     assert c["state"] == AWAITING
 
 
-def test_own_rejection_outbound_is_awaiting():
-    # We sent a definitive refusal → ball is in their court, but we owe nothing more.
+def test_own_rejection_outbound_auto_closes():
+    # ADR-036 Stage 0, Bug 1: we sent a definitive refusal → the thread closes from OUR side
+    # (auto-HANDLED, off the Fila), not AWAITING → a false «A cobrar». Reopens if the client writes back.
     rows = [_row("t1", "m1", ago(10)),
             _row("t1", "m2", ago(2), direction="outbound", purpose="OWN_REJECTION",
                  from_email="orcamentos@lindoservico.pt")]
     _, c = _clock_for(rows)
-    assert c["state"] == AWAITING
+    assert c["state"] == HANDLED
+    assert build_fila(rows, now=NOW) == []                       # off the active queue
+    [r] = build_fila(rows, now=NOW, include_resolved=True)
+    assert r["clock"]["state"] == HANDLED
+
+
+def test_new_inbound_after_own_rejection_reopens():
+    # Non-negotiable #2: our close is never sticky — a new client message reopens the thread (WE_OWE).
+    rows = [_row("t1", "m1", ago(30)),
+            _row("t1", "m2", ago(20), direction="outbound", purpose="OWN_REJECTION",
+                 from_email="orcamentos@lindoservico.pt"),
+            _row("t1", "m3", ago(1), purpose="ESTIMATE_REQUEST_FROM_CLIENT")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["state"] == WE_OWE
+
+
+# ── Fila obligation group (ADR-036 Stage 0): executed routing, not a source-string check ──────────
+
+def test_overdue_outbound_invoice_is_billing_group():
+    # A genuine unpaid invoice (OUTBOUND_INVOICE) past the 72h chase band → G_BILL «A cobrar».
+    rows = [_row("t1", "m1", ago(80), direction="outbound", counterparty="CLIENT",
+                 purpose="OUTBOUND_INVOICE", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["state"] == AWAITING and r["clock"]["band"] == "amber"
+    assert r["group"] == G_BILL
+
+
+def test_stale_followup_is_chase_not_billing():
+    # The mislabel we are fixing: a stalled proposal/follow-up is G_CHASE «A aguardar», NEVER billing.
+    rows = [_row("t1", "m1", ago(80), direction="outbound", counterparty="CLIENT",
+                 purpose="FOLLOW_UP", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["group"] == G_CHASE
+
+
+def test_fresh_awaiting_is_wait_group():
+    # We replied recently (<72h) → G_WAIT «À espera deles», muted.
+    rows = [_row("t1", "m1", ago(10)),
+            _row("t1", "m2", ago(2), direction="outbound", from_email="diogo@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["state"] == AWAITING and r["group"] == G_WAIT
+
+
+def test_inbound_last_is_owe_group():
+    [r] = build_fila([_row("t1", "m1", ago(6))], now=NOW)
+    assert r["group"] == G_OWE
+
+
+# ── Stage 1 (ADR-036): inbound bill = «A pagar»/TO_PAY (Bug 2), FOLLOW_UP split ───────────────────
+
+def _bill(mid, hours, root="t1"):
+    return _row(root, mid, ago(hours), direction="inbound", counterparty="SUPPLIER",
+                purpose="SUPPLIER_INVOICE", from_email="contabilidade@laminex.pt", subject="Fatura FT")
+
+
+def test_inbound_supplier_invoice_is_to_pay():
+    # Bug 2: a supplier bill is money-to-PAY, not a reply owed → TO_PAY, «por pagar», not WE_OWE.
+    _, c = _clock_for([_bill("m1", 60)])
+    assert c["state"] == TO_PAY
+    assert c["label"].startswith("por pagar")
+    assert c["band"] == "amber"                       # 60h ≥ 48h amber, < 168h red
+
+
+def test_supplier_invoice_stays_in_active_queue_as_pay_group():
+    [r] = build_fila([_bill("m1", 60)], now=NOW)      # default include_resolved=False
+    assert r["clock"]["state"] == TO_PAY and r["group"] == G_PAY
+
+
+def test_supplier_invoice_reopens_on_marca_tratado():
+    # A paid bill is marked tratado → HANDLED; a NEW bill after that reopens as TO_PAY (never lost).
+    _, c = _clock_for([_bill("m1", 50)], handled=True, handled_ts=ago(40))
+    assert c["state"] == HANDLED
+    reopened = [_bill("m1", 50), _bill("m2", 10)]
+    _, c2 = _clock_for(reopened, handled=True, handled_ts=ago(40))
+    assert c2["state"] == TO_PAY
+
+
+def test_derive_priority_new_purposes():
+    assert derive_priority("CLIENT", "OUTBOUND_QUOTE", 30, False) == "HIGH"     # client → HIGH (as FOLLOW_UP was)
+    assert derive_priority("SUPPLIER", "OUTBOUND_QUOTE", 30, False) == "LOW"    # awaited-outbound → LOW
+    assert derive_priority("SUPPLIER", "SUPPLIER_INVOICE", 30, False) == "MEDIUM"
+    assert derive_priority("SUPPLIER", "SUPPLIER_INVOICE", 80, False) == "HIGH"  # time-pressured → HIGH
+
+
+def test_outbound_quote_awaits_not_owe_or_billing():
+    # The FOLLOW_UP split: a sent quote awaiting a decision → «A aguardar», never billing/owe/pay.
+    rows = [_row("t1", "m1", ago(80), direction="outbound", counterparty="CLIENT",
+                 purpose="OUTBOUND_QUOTE", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["state"] == AWAITING and r["group"] == G_CHASE
+
+
+# ── Stage 2 (ADR-036): speech_act → obligation fold, act-driven grouping ──────────────────────────
+
+def test_inbound_ask_owes_reply():
+    [r] = build_fila([_row("t1", "m1", ago(6), direction="inbound", speech_act="ASK")], now=NOW)
+    assert r["clock"]["obligation"] == "OWE_REPLY" and r["clock"]["state"] == WE_OWE and r["group"] == G_OWE
+
+
+def test_inbound_obligation_invoice_is_payment():
+    # An inbound OBLIGATION on a bill → we owe a PAYMENT («A pagar»), not a reply (Bug 2, act-driven).
+    rows = [_row("t1", "m1", ago(20), direction="inbound", counterparty="SUPPLIER",
+                 purpose="SUPPLIER_INVOICE", speech_act="OBLIGATION")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_PAYMENT" and r["clock"]["state"] == TO_PAY
+    assert r["group"] == G_PAY and r["clock"]["label"].startswith("por pagar")
+
+
+def test_outbound_invoice_obligation_is_collect():
+    rows = [_row("t1", "m1", ago(20), direction="outbound", counterparty="CLIENT",
+                 purpose="OUTBOUND_INVOICE", speech_act="OBLIGATION", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "COLLECT" and r["group"] == G_BILL
+
+
+def test_outbound_ask_awaits_them_never_billing():
+    rows = [_row("t1", "m1", ago(80), direction="outbound", counterparty="CLIENT",
+                 purpose="OUTBOUND_QUOTE", speech_act="ASK", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "AWAIT_THEM" and r["group"] == G_CHASE   # stale → «A aguardar»
+
+
+def test_close_auto_resolves_from_either_side():
+    # Our decline (outbound CLOSE) and their thank-you (inbound CLOSE) both self-close (Bug 1 + "ack forever").
+    for direction, frm in (("outbound", "x@lindoservico.pt"), ("inbound", "maria@acme.pt")):
+        rows = [_row("t1", "m1", ago(10)),
+                _row("t1", "m2", ago(2), direction=direction, speech_act="CLOSE", from_email=frm)]
+        assert build_fila(rows, now=NOW) == []          # RESOLVED → off the active queue
+
+
+def test_ack_auto_resolves():
+    rows = [_row("t1", "m1", ago(10), direction="outbound", from_email="x@lindoservico.pt"),
+            _row("t1", "m2", ago(2), direction="inbound", speech_act="ACK")]
+    assert build_fila(rows, now=NOW) == []
+
+
+def test_fyi_is_quiet_info_pile_not_dropped():
+    [r] = build_fila([_row("t1", "m1", ago(6), direction="inbound", speech_act="FYI")], now=NOW)
+    assert r["clock"]["obligation"] == "FYI" and r["clock"]["state"] == INFO
+    assert r["group"] == G_INFO and r["clock"]["band"] == "none" and r["clock"]["label"] == "informação"
+
+
+def test_last_decisive_act_wins_fyi_does_not_override_ask():
+    # FYI/UNKNOWN never override a live move: an inbound ASK then an FYI still owes a reply.
+    rows = [_row("t1", "m1", ago(10), direction="inbound", speech_act="ASK"),
+            _row("t1", "m2", ago(2), direction="inbound", speech_act="FYI")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_REPLY" and r["group"] == G_OWE
+
+
+def test_legacy_fallback_when_no_speech_act():
+    # Pre-re-triage crm.db (UNKNOWN acts): the legacy fold reproduces Stage 0/1 routing exactly.
+    inbound = build_fila([_row("t1", "m1", ago(6), speech_act="UNKNOWN")], now=NOW)[0]
+    assert inbound["clock"]["obligation"] == "OWE_REPLY" and inbound["group"] == G_OWE
+    bill = build_fila([_row("t2", "m2", ago(30), direction="inbound", counterparty="SUPPLIER",
+                            purpose="SUPPLIER_INVOICE", speech_act="UNKNOWN")], now=NOW)[0]
+    assert bill["clock"]["state"] == TO_PAY and bill["group"] == G_PAY
 
 
 def test_client_rejection_after_own_rejection_auto_closes():

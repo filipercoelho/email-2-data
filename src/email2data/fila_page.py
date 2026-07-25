@@ -29,7 +29,7 @@ let focusRoot = null;
 let filters = {};   /* active filters — keys: counterparty, purpose, band, owner, domain,
                        hasAttachment, minAgeDays, search. Pass null to remove a key.
                        band pseudo-values: 'risk' = WE_OWE red|amber (the «a responder» chip),
-                       'chase' = AWAITING amber, i.e. past the 72h chase threshold («a cobrar»). */
+                       'chase' = AWAITING amber, i.e. past the 72h chase threshold («a aguardar»). */
 let _prevRisk = null, urlThread = null;
 /* 'ativos' (default) or 'tratados' — the decided ledger (rows fetched lazily from
    /api/fila?include=resolved). A decision must be reviewable after it is made, not vanish. */
@@ -116,32 +116,42 @@ function syncURL(){
 
 /* ── obligation grouping (ADR-029, refined by ADR-033) ──────────────────
    semGroup() carries the SEMANTIC id (owe / chase / wait / other); groupOf() returns that group's
-   TAB-AWARE RANK, so the same one-line stable partition lets Fornecedores lead with «A cobrar»
+   TAB-AWARE RANK, so the same one-line stable partition lets Fornecedores lead with «A aguardar»
    while Hoje/Clientes lead with «Precisam de resposta». Collapse is keyed semantically — folding
    «À espera deles» folds the same pile on every tab, whatever rank the tab gives it. */
-const G_OWE=0, G_CHASE=1, G_WAIT=2, G_OTHER=3;
+const G_OWE=0, G_CHASE=1, G_WAIT=2, G_OTHER=3, G_BILL=4, G_PAY=5, G_INFO=6;
 function semGroup(r){
-  const c=r.clock||{};
+  if(r.group!=null) return r.group;                 /* derived in Python build_fila — single source (ADR-036) */
+  const c=r.clock||{};                              /* fallback (pre-ADR-036 row): mirror cockpit.fila_group() */
   if(c.state==='WE_OWE') return G_OWE;
-  /* _band() only ambers AWAITING at the chase cutoff (72h), so band IS the chase signal. */
-  if(c.state==='AWAITING') return c.band==='amber' ? G_CHASE : G_WAIT;
+  if(c.state==='TO_PAY') return G_PAY;
+  if(c.state==='INFO') return G_INFO;
+  if(c.state==='AWAITING'){ if(c.band==='amber') return (r.purpose==='OUTBOUND_INVOICE')?G_BILL:G_CHASE; return G_WAIT; }
   return G_OTHER;
 }
+/* Ball is OURS (filled clock dot) when we owe a reply OR a payment; everything else is their move. */
+function isOurMove(r){ const g=semGroup(r); return g===G_OWE||g===G_PAY; }
 const TAB_SEQ={
-  all:[G_OWE,G_CHASE,G_WAIT,G_OTHER], CLIENT:[G_OWE,G_CHASE,G_WAIT,G_OTHER],
-  SUPPLIER:[G_CHASE,G_OWE,G_WAIT,G_OTHER], LEAD:[G_OWE,G_CHASE,G_WAIT,G_OTHER]};
+  all:[G_OWE,G_PAY,G_BILL,G_CHASE,G_WAIT,G_INFO,G_OTHER], CLIENT:[G_OWE,G_BILL,G_CHASE,G_WAIT,G_INFO,G_OTHER,G_PAY],
+  SUPPLIER:[G_CHASE,G_PAY,G_OWE,G_BILL,G_WAIT,G_INFO,G_OTHER], LEAD:[G_OWE,G_BILL,G_CHASE,G_WAIT,G_INFO,G_OTHER,G_PAY]};
 function groupOf(r){ return TAB_SEQ[tab].indexOf(semGroup(r)); }
-/* PT-PT, phrased as the answer to "who has the ball", keyed by SEMANTIC id. */
-const G_LABEL={0:'Precisam de resposta', 1:'A cobrar', 2:'À espera deles', 3:'Internos'};
+/* PT-PT, phrased as the answer to "who has the ball", keyed by SEMANTIC id. «A cobrar» is now GENUINE
+   billing only (our unpaid OUTBOUND_INVOICE, G_BILL); the follow-up pile is «A aguardar» (G_CHASE);
+   «A pagar» (G_PAY) is an inbound supplier bill WE must pay (ADR-036 Bug 2); «Informações» (G_INFO)
+   is FYI, no action. The group is the folded OBLIGATION (Python build_fila), not a clock reading. */
+const G_LABEL={0:'Precisam de resposta', 1:'A aguardar', 2:'À espera deles', 3:'Internos', 4:'A cobrar', 5:'A pagar', 6:'Informações'};
 const G_HINT ={0:'a bola está do nosso lado', 1:'sem resposta deles há 72h+ — candidatas a seguimento',
-               2:'já respondemos — a bola está do lado deles', 3:'sem relógio de resposta'};
-const G_CLASS={0:'owe', 1:'chase', 2:'wait', 3:'other'};
+               2:'já respondemos — a bola está do lado deles', 3:'sem relógio de resposta',
+               4:'faturas nossas por liquidar — a receber do cliente',
+               5:'faturas recebidas por liquidar — a bola está do nosso lado',
+               6:'notificações — sem ação necessária'};
+const G_CLASS={0:'owe', 1:'chase', 2:'wait', 3:'other', 4:'bill', 5:'pay', 6:'info'};
 
 /* ── group collapse (ADR-033 P0) ────────────────────────────────────────
    «À espera deles» (and Internos) are status reports, not to-do lists — they START collapsed to a
    counted header, and any group can be folded. The choice persists (localStorage). Collapsed rows
    leave view() entirely, so J/K, focus and data-i can never land on an invisible row. */
-const DEFAULT_COLLAPSED={[G_WAIT]:true,[G_OTHER]:true};
+const DEFAULT_COLLAPSED={[G_WAIT]:true,[G_INFO]:true,[G_OTHER]:true};
 let collapsed=(function(){
   try{const s=localStorage.getItem('fila-collapsed'); return s?JSON.parse(s):{...DEFAULT_COLLAPSED};}
   catch(_e){return {...DEFAULT_COLLAPSED};}
@@ -243,7 +253,7 @@ function renderFronts(){
     else if(d.resp>0||d.chase>0){
       const bits=[];
       if(d.resp>0) bits.push('<b class="r">'+d.resp+'</b> a responder');
-      if(d.chase>0) bits.push('<b class="c">'+d.chase+'</b> a cobrar');
+      if(d.chase>0) bits.push('<b class="c">'+d.chase+'</b> a aguardar');
       fs=bits.join('<span class="fdiv">·</span>');
     } else {
       /* Calm at zero — colour only appears when something demands you (the design guardrail). */
@@ -266,7 +276,7 @@ const V_ICON={
   risco:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M12 7.7V12l3 2.3"/></svg>',
   money:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.3"/><path d="M15 9.2a3.4 3.4 0 0 0-5.8 2.4c0 2.4 1.9 2.4 2.8 2.4M8.6 12h4.8"/></svg>',
   prazos:'<svg viewBox="0 0 24 24"><path d="M6 21V4"/><path d="M6 4.5h10.5L14.2 8l2.3 3.4H6"/></svg>',
-  cobrar:'<svg viewBox="0 0 24 24"><path d="M4.5 11a7.5 7.5 0 0 1 13-4.4M19.5 13a7.5 7.5 0 0 1-13 4.4"/><path d="M17.5 3.2v3.4h-3.4M6.5 20.8v-3.4h3.4"/></svg>',
+  aguardar:'<svg viewBox="0 0 24 24"><path d="M4.5 11a7.5 7.5 0 0 1 13-4.4M19.5 13a7.5 7.5 0 0 1-13 4.4"/><path d="M17.5 3.2v3.4h-3.4M6.5 20.8v-3.4h3.4"/></svg>',
   tratados:'<svg viewBox="0 0 24 24"><path d="M4.5 12.5l4.8 4.8L19.5 7"/></svg>'};
 function renderRail(){
   const el=$('#_vrail'); if(!el) return;
@@ -289,7 +299,7 @@ function renderRail(){
     +vit('risco','Em risco',nR,'1',(mode==='ativos'&&vista==='fila'&&!('band' in filters)))
     +vit('money','€ em jogo',nM,'2',vista==='money')
     +vit('prazos','Prazos',nD,'3',vista==='prazos')
-    +vit('cobrar','Cobranças',nC,'4',(vista==='fila'&&filters.band==='chase'))
+    +vit('aguardar','A aguardar',nC,'4',(vista==='fila'&&filters.band==='chase'))
     +vit('tratados','Tratados',null,'5',mode==='tratados');
   const est=[];
   if(tops.length) h+='<div class="rl">Tipo de pedido</div>'
@@ -308,7 +318,7 @@ function renderRail(){
 const _FLABEL = {
   counterparty: v=>'contraparte: '+v,
   purpose: v=>'tipo: '+v.toLowerCase().replace(/_/g,' '),
-  band: v=>({'red':'urgente','amber':'a atrasar','green':'recente','risk':'a responder','chase':'a cobrar'}[v]||v),
+  band: v=>({'red':'urgente','amber':'a atrasar','green':'recente','risk':'a responder','chase':'a aguardar'}[v]||v),
   owner: v=>v?'dono: @'+v:'sem dono',
   domain: v=>'domínio: '+v,
   hasAttachment: ()=>'com anexo',
@@ -457,7 +467,7 @@ function render(){
          `wait` hollows the dot whenever the ball is NOT ours (wait + chase): colour carries
          URGENCY, fill carries OBLIGATION — a row read outside its section still says whose move. */
       +'<span class="clock '+esc(c.band||'none')+((c.band==='red'&&(c.age_hours||0)>=72)?' crit':'')
-      +(semGroup(r)!==G_OWE?' wait':'')
+      +(!isOurMove(r)?' wait':'')
       +'" title="'+esc(c.label||'')+'"><span class="d" aria-hidden="true"></span>'+esc(ageTxt)+'</span>'
       +'<div class="rmain" data-act="thread" title="abrir no dossiê (Enter) · '+r.n_messages+' mensagens">'
       +'<div class="rline">'+cpPill+'<b class="rname">'+esc(name)+'</b>'
@@ -532,7 +542,7 @@ function dossierHTML(r){
   const mom=MOM[r.momentum];
   let h='<div class="dtop">'
     +'<button class="cp '+esc(r.counterparty||'OTHER')+'" data-act="reclassCp" title="contraparte: '+esc(cpLabel)+' — clica para corrigir">'+esc(cpLabel)+'</button>'
-    +'<span class="dclock clock '+esc(c.band||'none')+(semGroup(r)!==G_OWE?' wait':'')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
+    +'<span class="dclock clock '+esc(c.band||'none')+(!isOurMove(r)?' wait':'')+'"><span class="d" aria-hidden="true"></span>'+esc(c.label||'')+'</span>'
     +(mom?'<span class="dritmo" title="cadência da conversa" style="color:'+mom[1]+'">· '+mom[0]+'</span>':'')
     +'<button class="pur'+(tr.committed?' committed':'')+'" data-act="reclassPur" title="tipo: '+esc(purLabel)+' — clica para corrigir">'+esc(purLabel)+'</button>'
     +'<span class="dgrow"></span>'
@@ -606,12 +616,23 @@ function dossierHTML(r){
       ?'<span class="dcp-s"><b'+(r.project.estimable?' class="dgreen"':'')+'>'+Math.round((r.project.coverage||0)*100)+'%</b><small>'
         +(r.project.estimable?'pronto a orçamentar':'campos do spec')+'</small></span>':'')
     +'</div>';
-  /* Related threads (ADR-034): jump-links to other conversations with the same contact or a shared
-     entity (NIF/name/product) — assemble context before replying, never double-answer. */
+  /* Related threads (ADR-034/-037): jump-links to other conversations with the same contact or a
+     shared entity (NIF/name/e-mail/product) — assemble context before replying, never double-
+     answer. Each item is labelled with WHY it's related (mesmo contacto vs. a specific shared
+     field) and dotted with the OTHER thread's own momentum, reusing MOM from above — a same-
+     contact hit that's long stalled reads differently from one still active. */
+  const RELPT={contacto:'mesmo contacto',client_name:'nome',client_email:'e-mail',nif:'NIF',iban:'IBAN',product_or_service:'produto'};
   const rel=r.related||[];
   if(rel.length){
     h+='<div class="drel"><div class="drel-h">↻ '+rel.length+' conversa'+(rel.length===1?'':'s')+' relacionada'+(rel.length===1?'':'s')+'</div>'
-      +rel.map(x=>'<a class="drel-i" data-relroot="'+esc(x.thread_root)+'" href="?thread='+encodeURIComponent(x.thread_root)+'" title="abrir esta conversa">'+esc(x.subject)+'</a>').join('')
+      +rel.map(x=>{
+        const rm=MOM[x.momentum];
+        const dot='<span class="drel-dot" style="background:'+(rm?rm[1]:'var(--mut2)')+'" title="'+(rm?rm[0]:'sem atividade recente')+'"></span>';
+        const isEnt=x.reason&&x.reason!=='contacto';
+        const tag='<span class="drel-tag'+(isEnt?' ent':'')+'">'+esc(RELPT[x.reason]||x.reason||'')+'</span>';
+        return '<a class="drel-i" data-relroot="'+esc(x.thread_root)+'" href="?thread='+encodeURIComponent(x.thread_root)+'" title="abrir esta conversa">'
+          +dot+tag+'<span class="drel-s">'+esc(x.subject)+'</span></a>';
+      }).join('')
       +'</div>';
   }
   /* Conversa: the vertical in/out timeline (the spine is integrated into _threadHTML now). */
@@ -1147,7 +1168,7 @@ function paletteItems(q){
   });
   // The obligation pseudo-bands (the headline chips, reachable by keyboard too)
   items.push({kind:'urgência',label:'a responder',sub:'devemos resposta, vermelho+laranja',run:()=>setFilter('band','risk')});
-  items.push({kind:'urgência',label:'a cobrar',sub:'à espera deles há 72h+',run:()=>setFilter('band','chase')});
+  items.push({kind:'urgência',label:'a aguardar',sub:'à espera deles há 72h+',run:()=>setFilter('band','chase')});
 
   // Owner filters
   [...new Set(rows.map(r=>r.owner).filter(Boolean))].forEach(o=>
@@ -1269,7 +1290,7 @@ if(_vr) _vr.addEventListener('click',e=>{
     const k=vi.dataset.vista;
     if(k==='risco'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',null);}); }
     else if(k==='money'||k==='prazos'){ setMode('ativos').then(()=>setVista(vista===k?'fila':k)); }
-    else if(k==='cobrar'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',filters.band==='chase'?null:'chase');}); }
+    else if(k==='aguardar'){ setMode('ativos').then(()=>{vista='fila'; setFilter('band',filters.band==='chase'?null:'chase');}); }
     else if(k==='tratados'){ setMode(mode==='tratados'?'ativos':'tratados'); }
     return;
   }
@@ -1348,7 +1369,7 @@ _BODY_HTML = """
 <div class="mesa">
   <div class="bar">
     <!-- The fronts are the hero (ADR-034): each counterparty front is a status-bearing card whose
-         OWN demand («N a responder · N a cobrar») lives inside the button it describes — navigation
+         OWN demand («N a responder · N a aguardar») lives inside the button it describes — navigation
          and status in one glance, and a count that can never be misread as a global headline. -->
     <div id="_fronts" class="fronts" role="tablist" aria-label="Contraparte"></div>
     <span class="bgrow"></span>
@@ -1453,6 +1474,15 @@ _EXTRA_CSS = """
   .ghead.owe .gh-n{background:var(--red-bg);color:var(--red)}
   .ghead.chase{color:var(--amber);border-bottom-color:var(--amber-line)}
   .ghead.chase .gh-n{background:var(--amber-bg);color:var(--amber)}
+  /* genuine billing (G_BILL «A cobrar») — our unpaid invoices; shares the AWAITING-amber urgency family */
+  .ghead.bill{color:var(--amber);border-bottom-color:var(--amber-line)}
+  .ghead.bill .gh-n{background:var(--amber-bg);color:var(--amber)}
+  /* «A pagar» (G_PAY) — inbound bills WE owe; our-move obligation, so the red family like «Precisam» */
+  .ghead.pay{color:var(--red);border-bottom-color:var(--red-line)}
+  .ghead.pay .gh-n{background:var(--red-bg);color:var(--red)}
+  /* «Informações» (G_INFO) — FYI, no action; muted like «À espera deles» */
+  .ghead.info{color:var(--mut)}
+  .ghead.info .gh-n{background:var(--bd2);color:var(--mut)}
   .ghead.wait{color:var(--mut)}
   .ghead.wait .gh-n{background:var(--bd2);color:var(--mut)}
   .ghead.other{color:var(--ext)}
@@ -1523,13 +1553,18 @@ _EXTRA_CSS = """
   .dritmo{font-size:11px;font-weight:700}
   .dpedem{margin:0 0 4px}
   .dgreen{color:var(--green)}
-  /* related-thread jump-links (ADR-034) */
+  /* related-thread jump-links (ADR-034/-037) */
   .drel{border:1px solid var(--bd);border-radius:11px;background:var(--card);padding:9px 12px;margin-bottom:12px}
   .drel-h{font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--purple);margin-bottom:5px}
-  .drel-i{display:block;font-size:12px;color:var(--ac);text-decoration:none;padding:3px 0;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid var(--bd2)}
+  .drel-i{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ac);text-decoration:none;padding:5px 0;
+    white-space:nowrap;overflow:hidden;border-top:1px solid var(--bd2)}
   .drel-i:first-of-type{border-top:none}
-  .drel-i:hover{text-decoration:underline}
+  .drel-i:hover .drel-s{text-decoration:underline}
+  .drel-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+  .drel-tag{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:680;border-radius:5px;
+    padding:1px 6px;white-space:nowrap;flex-shrink:0;background:var(--ac-soft);color:var(--ac);border:1px solid var(--ac-line)}
+  .drel-tag.ent{background:var(--green-bg);color:var(--green);border-color:var(--green-line)}
+  .drel-s{overflow:hidden;text-overflow:ellipsis;min-width:0}
   /* ── dossier ──────────────────────────────────────────────────────── */
   .dtop{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
   .dgrow{flex:1}
