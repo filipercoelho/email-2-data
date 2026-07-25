@@ -195,3 +195,18 @@ def test_tier_model_is_the_one_actually_sent_to_the_provider():
     heavy.update(context_cache=False, max_retries=1)
     llm.call(client, heavy, "sys", "u", text=True)
     assert models == ["gemini-2.5-pro"]
+
+
+# ── billing label: materials-492723 is shared with materials-costing ────────────────────────────
+#
+# Both apps default to gemini-2.5-flash on the same GCP project, so there is no other way to tell
+# their Vertex spend apart in Cloud Monitoring / a future billing export. This label is that seam.
+
+def test_every_gemini_call_carries_the_app_billing_label():
+    client = FakeClient()
+    llm.call(client, _cfg(context_cache=False), "sys", "u", text=True)
+    assert client.models.calls[0].labels == {"app": "email2data"}
+
+    client = FakeClient()  # also on the cached-content path
+    llm.call(client, _cfg(), "PLAYBOOK " * 50, "u", text=True)
+    assert client.models.calls[0].labels == {"app": "email2data"}

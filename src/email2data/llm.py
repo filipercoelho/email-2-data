@@ -155,6 +155,9 @@ def _gemini(client, cfg, system, user, schema, text, temperature, images=None) -
                 temperature=temperature,
                 max_output_tokens=int(cfg.get("max_tokens", 1024)),
                 thinking_config=types.ThinkingConfig(thinking_budget=int(cfg.get("thinking_budget", 0))),
+                # Vertex bills materials-492723 across multiple apps (email2data + materials-costing);
+                # this label is what lets a billing/Monitoring query isolate this app's spend.
+                labels={"app": "email2data"},
             )
             # cached_content already carries the system_instruction — passing BOTH is an error, so
             # it is one or the other.
