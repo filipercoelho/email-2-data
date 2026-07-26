@@ -11,20 +11,27 @@ the route signatures (the future-import would make it an unresolved string -> 42
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from . import (accounts as _accounts, admin_page, capture_resolve, captures, captures_page,
-               classifier, clientdraft, cockpit, contrapartes_page, crm as _crm, descdraft,
-               export as _export, fila_page, jobspec as js, para_ti, para_ti_page,
+               classifier, clientdraft, cockpit, cockpit_ui, contrapartes_page, crm as _crm, descdraft,
+               export as _export, fila_page, home_page, jobspec as js, para_ti, para_ti_page,
                project as _project, projetos_page, replydraft, report, translate as _translate)
+from . import (auth as _authmod, auth_page as _auth_page, mailer as _mailer,
+               scopes as _scopesmod, signature as _signature)
 from .config import paths
 from .workspace import Workspace, RECLASSIFY_FIELDS
+
+logger = logging.getLogger(__name__)
 
 # ── Admin: the account-editor contract (see /api/admin/accounts) ────────────────────────────────
 # A plausible POSIX environment-variable NAME. ``password_env`` names the variable; the value never
@@ -185,14 +192,14 @@ def periodic_sync_loop(run_sync, interval_s: float, stop: threading.Event, log=p
 
 def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply_pb=None,
                prepared=None, crm_store=None, corpus_index=None, capture_store=None,
-               captures_dir=None):
+               captures_dir=None, auth_store=None):
     """Injectable factory. Defaults wire to the real files; tests pass prepared/jobspecs/workspace.
 
     ``crm_store`` is an open ``CrmStore`` instance; when omitted the factory opens ``out/crm.db``
     if it exists, or leaves relation queries unavailable (503) if it doesn't.
     """
-    from fastapi import FastAPI, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
     # Touch __settings_path__ only for args that aren't injected (tests inject everything).
     def _outdir():
@@ -204,17 +211,44 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             return Path(captures_dir)
         return paths(settings, settings["__settings_path__"])["captures_dir"]
     ws = workspace or Workspace(_outdir() / "workspace.db").connect()
+    # ADR-039 auth. Injectable for tests; otherwise out/auth.db beside the other stores. When the
+    # caller injected everything and there is no settings path (pure-fixture tests), fall back to an
+    # in-memory store so the gate is STILL ON -- a test must never silently run unauthenticated.
+    if auth_store is not None:
+        _auth = auth_store
+    elif settings.get("__settings_path__"):
+        _auth = _authmod.AuthStore(_outdir() / "auth.db").connect()
+    else:
+        _auth = _authmod.AuthStore(":memory:").connect()
     jspecs = jobspecs if jobspecs is not None else _load_jobspecs(_outdir())
     rpb = (reply_pb if reply_pb is not None
            else replydraft.load_playbook(Path(settings["__settings_path__"]).parents[1] / "config" / "reply_playbook.md"))
     emails, contacts, cost = prepared if prepared is not None else report.prepare(settings)
-    _team = list(settings.get("team", []) or [])  # base owner roster (settings.json); never removable in-app
+    _team = list(settings.get("team", []) or [])  # legacy seed roster (settings.json); see the backfill
+
+    # ONE roster (ADR-041 / W8). The owner picker used to read settings.team ∪ the in-app `roster`
+    # table while permissions read `people` — two vocabularies for one question, so a name could be
+    # assignable and not be a person: you could give Rita work and could not grant her anything.
+    # Folded here, once, at construction. Idempotent, and a no-op until an admin exists (there would
+    # be nobody to be accountable for the backfilled names), so a virgin install just runs it again
+    # on the boot after /setup. Adds rows; never rewrites or removes one — the precious store's rule.
+    def _fold_roster_into_people() -> None:
+        seeded = ws.backfill_people_from_roster(_team)
+        if seeded:
+            print(f"  roster → people: {len(seeded)} nome(s) migrado(s) ({', '.join(seeded)})")
+
+    # Called again right after /setup: on a real first boot there IS no admin yet — that is what
+    # /setup is for — so the construction-time attempt is always the no-op, and without the second
+    # call the configured team would sit unmigrated until somebody happened to restart.
+    _fold_roster_into_people()
 
     def _roster() -> list[str]:
-        """Effective owner roster = settings.team (in its configured order) followed by the in-app-added
-        names (workspace.db). Computed per request so a freshly-added owner shows up without a restart
-        (v4: "define new owners")."""
-        return list(_team) + [n for n in ws.roster() if n not in _team]
+        """The effective owner roster: every ACTIVE person, name-ordered.
+
+        Read per request, so someone added or deactivated in Administração appears (or stops
+        appearing) in the picker without a restart.
+        """
+        return [p["name"] for p in ws.people()]
 
     # When the caller injects state (tests), the data isn't backed by real files — disable the
     # rebuild/startup-sync machinery so we never try to re-read results.jsonl from a fixture.
@@ -368,6 +402,18 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
     @asynccontextmanager
     async def _lifespan(_app):
+        # Housekeeping: drop long-dead session rows (ADR-039). Purely cosmetic for security — expiry
+        # is enforced in the SELECT, so a row that outlives this sweep is already unusable — but
+        # without a caller the sessions table only ever grows, and `auth list`/"where am I signed in"
+        # get slower and noisier forever. Boot is the right hook: one cheap DELETE per deploy, no
+        # timer to own. Never fatal — a locked DB must not stop the app from serving.
+        try:
+            purged = _auth.purge_expired()
+            if purged:
+                print(f"  auth: {purged} dead session row(s) purged")
+        except Exception as exc:  # noqa: BLE001 — housekeeping must never block startup
+            print(f"  auth: session purge skipped — {type(exc).__name__}: {exc}")
+
         # Auto-sync on every deploy, in the background so the page serves immediately (the watermark
         # keeps token spend bounded to genuinely-new mail). Off for injected state (tests) or when
         # settings.sync.on_startup is false. A failure (e.g. no IMAP password) logs one line, never
@@ -394,6 +440,533 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     app.state.sync_lock = _sync_lock  # exposed for tests to force the "already running" path
     app.state.periodic_stop = _stop_periodic      # tests: assert the loop is wired + stoppable
     app.state.periodic_interval_s = resolve_sync_interval(settings)
+    app.state.auth = _auth
+    app.state.workspace = ws
+    # Outbound transactional mail (ADR-042). Built once at construction so a misconfigured `mail`
+    # block fails at boot with a readable error rather than at 2am when someone is locked out.
+    # None is legitimate -- it means recovery-by-email is off and /recuperar says so honestly.
+    # Tests replace this with a fake; nothing else in the app sends mail.
+    try:
+        app.state.mailer = _mailer.from_settings(settings)
+    except Exception as exc:  # noqa: BLE001 — a bad mail block must not make the whole app unbootable
+        logger.error("mail is configured but unusable, recovery-by-email is OFF: %s", exc)
+        app.state.mailer = None
+
+    # ── auth gate (ADR-039) ──────────────────────────────────────────────────────────────────────
+    #
+    # DEFAULT-DENY: every path is gated unless it is explicitly public. The allowlist is a closed
+    # set checked here, not a decorator each route must remember -- the sibling app's own U5a notes
+    # record 67 hand-copied inline checks and the bugs that came from forgetting one.
+    #
+    # /healthz MUST stay public: the image HEALTHCHECK probes it, and a 401 there would mark the
+    # container unhealthy, which would stop intake-bot too (it depends_on: email2data healthy).
+    #
+    # /recuperar is public by necessity (ADR-042): the whole point is that the visitor cannot sign
+    # in. The exact entry covers GET+POST /recuperar; the prefix covers /recuperar/{token} and
+    # /recuperar/definir. The gate matches on path only, never method, so one entry does both verbs
+    # -- intended here, and the reason the POST must be safe to reach unauthenticated (it is: it
+    # answers identically whatever it is given, and mints nothing an attacker can read).
+    _PUBLIC_EXACT = {"/healthz", "/login", "/logout", "/setup", "/aceitar-convite", "/recuperar"}
+    _PUBLIC_PREFIX = ("/static/", "/aceitar-convite/", "/recuperar/")
+    _COOKIE = "e2d_session"
+
+    # ── authorization (ADR-040) ──────────────────────────────────────────────────────────────────
+    #
+    # ADR-039 built authentication and explicitly deferred authorization, which left `is_admin` as a
+    # column nothing read: every signed-in person could reach /admin and POST /api/admin/accounts --
+    # the route that rewrites imap.accounts in settings.json. Anyone with a login could repoint the
+    # mail accounts.
+    #
+    # Expressed as a closed path set in the SAME middleware as the auth gate, deliberately, and not
+    # as an @admin_required decorator: default-deny only holds if a rule cannot be forgotten, and a
+    # decorator is forgettable exactly once per new route. `test_admin_paths_are_admin_only` walks the
+    # real route tree against this set, so both halves stay honest.
+    #
+    # /inbox is the legacy full report (ADR-045). It renders EVERY message body from a closure bound
+    # at startup, joins no crm data, and `report.build_html` takes no `person` at all — so it cannot
+    # be scoped without rebuilding a 1500-line module around a filtered list. Owner decision
+    # 2026-07-26: make it admin-only. That is honest and total, where a half-filtered report would
+    # look filtered and not be — the failure mode this whole phase exists to prevent. The static
+    # `out/report.html` is unaffected; it was always a full-corpus artefact.
+    _ADMIN_EXACT = {"/admin", "/inbox"}
+    _ADMIN_PREFIX = ("/api/admin/",)
+
+    # The person's own surface (ADR-041). Authenticated like everything else -- but exempt from the
+    # forced-password-change funnel below, because it is where that change happens.
+    _ACCOUNT = "/a-minha-conta"
+
+    def _project_id_in_path(path: str) -> str:
+        """The project id an id-bearing project path names, or '' (ADR-045).
+
+        Both shapes the app serves: the JSON surface ``/api/projects/{pid}[/...]`` and the HTML page
+        ``/projetos/{pid}``. The bare collection paths (``/api/projects``, ``/projetos``) return ''
+        because they are filtered by content, not refused.
+        """
+        for prefix in ("/api/projects/", "/projetos/"):
+            if path.startswith(prefix):
+                rest = path[len(prefix):]
+                return rest.split("/", 1)[0]
+        return ""
+
+    def _is_admin_path(path: str) -> bool:
+        return path in _ADMIN_EXACT or path.startswith(_ADMIN_PREFIX)
+
+    def _who(request: Request) -> dict[str, Any] | None:
+        """The signed-in person, for the shell to render identity from (ADR-041).
+
+        Reads what `_auth_gate` already resolved — never re-queries, so a page can never disagree
+        with the gate that let it through. ``None`` only where the gate does not run (an unguarded
+        render path), and the shell treats that as default-deny.
+        """
+        return getattr(request.state, "person", None)
+
+    def _form(body: bytes) -> dict[str, str]:
+        """Parse an urlencoded form body with the stdlib.
+
+        Starlette's request.form() would pull in python-multipart; HTML forms post urlencoded by
+        default, so parsing it here keeps the dependency count where it is (see auth.py).
+        """
+        from urllib.parse import parse_qs
+        return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace")).items() if v}
+
+    def _current_person(request) -> dict[str, Any] | None:
+        """The signed-in person, re-read from workspace.db on EVERY request.
+
+        Never cached in the cookie: deactivating or demoting someone must take effect on their next
+        request, not whenever their session happens to expire.
+        """
+        person_id = _auth.session_person(request.cookies.get(_COOKIE, ""))
+        if not person_id:
+            return None
+        person = ws.person_by_id(person_id)
+        if person is None or not person["active"] or not person["can_login"]:
+            return None
+        return person
+
+    def _safe_next(raw: str) -> str:
+        """Open-redirect guard: only same-site absolute paths survive.
+
+        "//evil.example" is a protocol-relative URL that browsers treat as another origin, so the
+        second character has to be checked too -- a bare startswith("/") is the classic hole.
+        """
+        if not raw or not raw.startswith("/") or raw.startswith("//"):
+            return "/"
+        return raw
+
+    def _set_session_cookie(response, token: str, request) -> None:
+        # secure is derived from the live scheme rather than hard-coded, so the flag is correct under
+        # opt-in TLS without a second setting to keep in sync (and is not set on plain-HTTP loopback,
+        # where it would silently drop the cookie).
+        response.set_cookie(
+            _COOKIE, token, httponly=True, samesite="strict",
+            secure=(request.url.scheme == "https"), path="/", max_age=_authmod.SESSION_TTL_HOURS * 3600)
+
+    @app.middleware("http")
+    async def _auth_gate(request, call_next):
+        path = request.url.path
+        if path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIX):
+            return await call_next(request)
+        person = _current_person(request)
+        if person is None:
+            if not _auth.has_any_credentials():
+                # Virgin install: funnel to first-run setup rather than a login nobody can pass.
+                # Checked AFTER the session so an authenticated user is never bounced to /setup.
+                # /api/* still gets a status it can act on -- an API client cannot follow a 303 to an
+                # HTML setup form and would otherwise read "not configured" as "endpoint moved".
+                if path.startswith("/api/"):
+                    return JSONResponse(
+                        {"error": "instalação por configurar — abre /setup"}, status_code=401)
+                return RedirectResponse("/setup", status_code=303)
+            if path.startswith("/api/"):
+                return JSONResponse({"error": "autenticação necessária"}, status_code=401)
+            from urllib.parse import quote
+            # safe="" so the whole path is encoded: quote()'s default leaves "/" bare, which is fine
+            # for a plain path but truncates one carrying reserved characters.
+            return RedirectResponse(f"/login?next={quote(path, safe='')}", status_code=303)
+        # Authenticated -- now authorized? (ADR-040). 403, never a 303 to /login: bouncing a signed-in
+        # person to a login page they would pass instantly is a loop that reads as a broken app, and
+        # it misnames the problem ("who are you?" when the answer is "not enough").
+        if not person["is_admin"] and _is_admin_path(path):
+            if path.startswith("/api/"):
+                return JSONResponse({"error": "acesso reservado a administradores"}, status_code=403)
+            return HTMLResponse(
+                # `person` is passed EXPLICITLY: the gate has not assigned
+                # request.state.person yet (that happens below, after authorisation), so
+                # `_who(request)` would be None here and `_nav_counts` would fail closed to
+                # zero — or, before ADR-045, leak unfiltered demand to the person being refused.
+                cockpit_ui.forbidden_page(nav_counts=_nav_counts(person=person), person=person),
+                status_code=403, headers=_NO_STORE)
+        # Per-person project visibility (ADR-045), in the SAME middleware as authentication and
+        # authorization and for the same reason: there are 23 id-bearing project routes, and a
+        # per-route guard is a guard the 24th route forgets. Every one of them is
+        # /api/projects/{pid}[/...] or /projetos/{pid}, so one path rule covers the whole surface by
+        # construction — ADR-040 §1's argument applied to data instead of to admin rights.
+        #
+        # 404, not 403: a 403 would confirm the project exists, which is most of what an
+        # unauthorised caller wanted to know.
+        _pid = _project_id_in_path(path)
+        if _pid and not _may_open_project(person, _pid):
+            if path.startswith("/api/"):
+                return JSONResponse({"error": "não encontrado"}, status_code=404)
+            return HTMLResponse(
+                cockpit_ui.forbidden_page(nav_counts=_nav_counts(person=person), person=person),
+                status_code=404, headers=_NO_STORE)
+        # A password an admin chose is temporary by definition (ADR-041). The flag has existed since
+        # ADR-039 and nothing read it, so "temporário" was a promise the app never kept. Held here,
+        # in the same middleware, for the same reason authorization is: a funnel that each route has
+        # to remember is a funnel with holes. /a-minha-conta is the way out and /logout is public, so
+        # this refuses without trapping.
+        if not path.startswith(_ACCOUNT) and _auth.must_change_password(person["person_id"]):
+            if path.startswith("/api/"):
+                return JSONResponse({"error": "tens de definir uma nova palavra-passe"},
+                                    status_code=403)
+            return RedirectResponse(_ACCOUNT, status_code=303)
+        request.state.person = person
+        return await call_next(request)
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request):
+        if _current_person(request) is not None:
+            return RedirectResponse(_safe_next(request.query_params.get("next", "/")), status_code=303)
+        return HTMLResponse(_auth_page.build_login_html(
+            next_url=_safe_next(request.query_params.get("next", "/"))))
+
+    @app.post("/login")
+    async def login_submit(request: Request):
+        form = _form(await request.body())
+        target = _safe_next(form.get("next", "/"))
+        person = ws.person(form.get("name", ""))
+        # One message for every failure mode (unknown / not a login account / inactive / wrong
+        # password) so the page never becomes a "who works here" oracle. AuthStore.check_password
+        # burns an equivalent scrypt for an unknown person so the timing does not leak it either.
+        if (person is None or not person["can_login"] or not person["active"]
+                or not _auth.check_password(person["person_id"], form.get("password", ""))):
+            return HTMLResponse(_auth_page.build_login_html(
+                error="Nome ou palavra-passe incorretos.", next_url=target), status_code=401)
+        token = _auth.start_session(person["person_id"],
+                                    user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse(target, status_code=303)
+        _set_session_cookie(response, token, request)
+        return response
+
+    @app.post("/logout")
+    def logout(request: Request):
+        # Revoke the ROW, not just the cookie: clearing a cookie leaves a copied token usable, which
+        # is exactly the gap the review found in the sibling app.
+        _auth.revoke_session(request.cookies.get(_COOKIE, ""))
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(_COOKIE, path="/")
+        return response
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_form():
+        if _auth.has_any_credentials():
+            raise HTTPException(status_code=404)
+        return HTMLResponse(_auth_page.build_setup_html())
+
+    @app.post("/setup")
+    async def setup_submit(request: Request):
+        # 404 once any credential exists, so this can never mint a second admin.
+        if _auth.has_any_credentials():
+            raise HTTPException(status_code=404)
+        form = _form(await request.body())
+        name, pw, confirm = form.get("name", ""), form.get("password", ""), form.get("confirm", "")
+        problem = ""
+        if not name.strip():
+            problem = "Indica um nome."
+        elif len(pw) < 8:
+            problem = "A palavra-passe precisa de pelo menos 8 caracteres."
+        elif pw != confirm:
+            problem = "As palavras-passe não coincidem."
+        if problem:
+            return HTMLResponse(_auth_page.build_setup_html(error=problem), status_code=400)
+        person = ws.person(name) or ws.create_person(name, can_login=True, is_admin=True)
+        if not (person["can_login"] and person["is_admin"]):
+            return HTMLResponse(_auth_page.build_setup_html(
+                error=f"Já existe alguém com o nome {person['name']!r}."), status_code=400)
+        _auth.set_password(person["person_id"], pw)
+        # There is now an admin, so the legacy roster finally has someone to be accountable for it
+        # (ADR-041/W8). This is the only moment on a real install where that becomes true without a
+        # restart, and the picker would otherwise open empty on the very first session.
+        _fold_roster_into_people()
+        token = _auth.start_session(person["person_id"],
+                                    user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse("/", status_code=303)
+        _set_session_cookie(response, token, request)
+        return response
+
+    @app.get("/aceitar-convite/{token}", response_class=HTMLResponse)
+    def invite_form(token: str):
+        person_id = _auth.invite_person(token)
+        person = ws.person_by_id(person_id) if person_id else None
+        if person is None:
+            return HTMLResponse(_auth_page.build_invite_expired_html(), status_code=404)
+        return HTMLResponse(_auth_page.build_invite_html(person_name=person["name"], token=token))
+
+    @app.post("/aceitar-convite")
+    async def invite_submit(request: Request):
+        form = _form(await request.body())
+        token = form.get("token", "")
+        person_id = _auth.invite_person(token)
+        person = ws.person_by_id(person_id) if person_id else None
+        if person is None:
+            return HTMLResponse(_auth_page.build_invite_expired_html(), status_code=404)
+        pw, confirm = form.get("password", ""), form.get("confirm", "")
+        problem = ""
+        if len(pw) < 8:
+            problem = "A palavra-passe precisa de pelo menos 8 caracteres."
+        elif pw != confirm:
+            problem = "As palavras-passe não coincidem."
+        if problem:
+            return HTMLResponse(_auth_page.build_invite_html(
+                person_name=person["name"], token=token, error=problem), status_code=400)
+        if _auth.redeem_invite(token, pw) is None:      # atomic single-use gate
+            return HTMLResponse(_auth_page.build_invite_expired_html(), status_code=409)
+        session = _auth.start_session(person["person_id"],
+                                      user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse("/", status_code=303)
+        _set_session_cookie(response, session, request)
+        return response
+
+    # ── password recovery (ADR-042) ──────────────────────────────────────────
+    #
+    # The one self-service way back in. Public by necessity, and therefore written to the rule that
+    # an unauthenticated caller learns NOTHING from it: every POST /recuperar answers with the same
+    # page and the same status whether the name matched a person, matched nobody, matched someone
+    # with no address on file, or matched someone whose mail then failed to send. The roster is
+    # people's names -- a distinguishable "no such person" would make it enumerable by anyone who
+    # can reach the port.
+    #
+    # This does NOT repair a zero-admin install, and must not be mistaken for that: it needs a
+    # person row with an address, which a bricked install has no way to create (ADR-041 §10).
+
+    def _reset_base_url() -> str:
+        """Absolute base for the link that goes in the mail.
+
+        Read from settings, never from the request's Host header. A reset link built from an
+        attacker-controlled Host is the classic reset-poisoning bug: the victim receives a genuine
+        token pointing at the attacker's server. Configuration is the only trustworthy source here.
+        """
+        return str(((settings or {}).get("mail") or {}).get("base_url", "")).rstrip("/")
+
+    @app.get("/recuperar", response_class=HTMLResponse)
+    def forgot_form(request: Request):
+        if _current_person(request) is not None:
+            return RedirectResponse("/", status_code=303)
+        if app.state.mailer is None or not _reset_base_url():
+            return HTMLResponse(_auth_page.build_recovery_unavailable_html(), status_code=503,
+                                headers=_NO_STORE)
+        return HTMLResponse(_auth_page.build_forgot_html(), headers=_NO_STORE)
+
+    @app.post("/recuperar")
+    async def forgot_submit(request: Request):
+        mailer = app.state.mailer
+        base = _reset_base_url()
+        if mailer is None or not base:
+            return HTMLResponse(_auth_page.build_recovery_unavailable_html(), status_code=503,
+                                headers=_NO_STORE)
+        form = _form(await request.body())
+        name = form.get("name", "").strip()
+        if not name:
+            return HTMLResponse(
+                _auth_page.build_forgot_html(error="Indica o teu nome."),
+                status_code=400, headers=_NO_STORE)
+
+        # From here to the return there is exactly ONE response, built once. Every branch below is a
+        # reason to send nothing -- and none of them may change what the visitor sees.
+        neutral = HTMLResponse(_auth_page.build_forgot_html(sent=True), headers=_NO_STORE)
+        person = ws.person(name)
+        if person is None or not person["active"] or not person["can_login"]:
+            logger.info("password-reset requested for an unknown or non-login name")
+            return neutral
+        if not person.get("email"):
+            logger.info("password-reset requested for a person with no address on file")
+            return neutral
+        cap = int(((settings or {}).get("mail") or {}).get("reset_max_per_hour", 5) or 5)
+        if _auth.recent_reset_count(person["person_id"]) >= cap:
+            # Refusing to MAIL, never refusing to reset: this cannot lock anyone out, it only bounds
+            # how much mail one name can cause. The person's existing password stays valid and an
+            # admin reset still works.
+            logger.warning("password-reset throttled for one person (cap %s/hour)", cap)
+            return neutral
+        token = _auth.create_reset(person["person_id"],
+                                   user_agent=request.headers.get("user-agent", ""))
+        try:
+            mailer.send_password_reset(
+                to_address=person["email"], person_name=person["name"],
+                reset_url=f"{base}/recuperar/{token}",
+                ttl_minutes=_authmod.RESET_TTL_MINUTES)
+        except _mailer.MailError as exc:
+            # The token stays live and unused; the visitor is told nothing different. A send failure
+            # is an operator problem, visible in the log, not a signal handed to whoever asked.
+            logger.error("password-reset mail failed to send: %s", exc)
+        return neutral
+
+    @app.get("/recuperar/{token}", response_class=HTMLResponse)
+    def reset_form(token: str):
+        person_id = _auth.reset_person(token)
+        person = ws.person_by_id(person_id) if person_id else None
+        if person is None or not person["active"] or not person["can_login"]:
+            return HTMLResponse(_auth_page.build_reset_expired_html(), status_code=404,
+                                headers=_NO_STORE)
+        return HTMLResponse(
+            _auth_page.build_reset_html(person_name=person["name"], token=token),
+            headers=_NO_STORE)
+
+    @app.post("/recuperar/definir")
+    async def reset_submit(request: Request):
+        form = _form(await request.body())
+        token = form.get("token", "")
+        person_id = _auth.reset_person(token)
+        person = ws.person_by_id(person_id) if person_id else None
+        if person is None or not person["active"] or not person["can_login"]:
+            return HTMLResponse(_auth_page.build_reset_expired_html(), status_code=404,
+                                headers=_NO_STORE)
+        pw, confirm = form.get("password", ""), form.get("confirm", "")
+        problem = ""
+        if len(pw) < 8:
+            problem = "A palavra-passe precisa de pelo menos 8 caracteres."
+        elif pw != confirm:
+            problem = "As palavras-passe não coincidem."
+        if problem:
+            return HTMLResponse(
+                _auth_page.build_reset_html(person_name=person["name"], token=token, error=problem),
+                status_code=400, headers=_NO_STORE)
+        if _auth.redeem_reset(token, pw) is None:      # atomic single-use gate
+            return HTMLResponse(_auth_page.build_reset_expired_html(), status_code=409,
+                                headers=_NO_STORE)
+        # redeem_reset -> set_password already revoked every prior session, so the person is signed
+        # out everywhere and then signed in here, on this device only.
+        session = _auth.start_session(person["person_id"],
+                                      user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse("/", status_code=303)
+        _set_session_cookie(response, session, request)
+        return response
+
+    # ── «A minha conta» (ADR-041) ────────────────────────────────────────────
+    #
+    # Every route here acts on the SIGNED-IN person and takes no id: there is nothing in the URL or
+    # the form to tamper with, so "can I edit someone else's account?" is not a question this surface
+    # can be asked. The admin-side equivalent lives behind /admin.
+
+    def _account_html(request: Request, *, error: str = "", ok: str = "",
+                      person: dict | None = None, signature: str | None = None) -> str:
+        person = person or _who(request)
+        return cockpit_ui.account_page(
+            person,
+            sessions=_auth.live_sessions(person["person_id"]),
+            scopes=list(person.get("scopes") or []),
+            must_change=_auth.must_change_password(person["person_id"]),
+            # What the person would actually send, rendered with their own values — not the raw
+            # template. A preview of the template is a preview of nothing: the whole point of the
+            # empty-line rule is that you cannot tell what the block looks like by reading it.
+            signature_preview=_signature.for_person(person, _config_dir()),
+            # On a rejected save, echo back WHAT THEY TYPED rather than the stored value, or the
+            # error message arrives beside a textarea that no longer contains the mistake.
+            signature=person.get("signature") or "" if signature is None else signature,
+            error=error, ok=ok, nav_counts=_nav_counts(person=person))
+
+    @app.get(_ACCOUNT, response_class=HTMLResponse)
+    def account_view(request: Request):
+        ok = {
+            "pw": "Palavra-passe alterada.",
+            "s": "As outras sessões foram terminadas.",
+            "sig": "Assinatura guardada.",
+            "sightml": ("Reconhecemos uma assinatura em HTML (colada do Outlook/Gmail) e convertámos"
+                        " para texto — os rascunhos de resposta são texto simples, e o «Abrir no"
+                        " mail» também. Confirma em baixo e ajusta se precisares."),
+        }.get(request.query_params.get("ok", ""), "")
+        return HTMLResponse(_account_html(request, ok=ok), headers=_NO_STORE)
+
+    @app.post(_ACCOUNT + "/assinatura")
+    async def account_signature(request: Request):
+        """The person's own closing + the profile fields that fill it (ADR-047).
+
+        Deliberately reachable during the forced-password-change funnel, like every other route under
+        this prefix — the funnel exempts the whole of «A minha conta», and narrowing that here would
+        put a second, differently-shaped rule beside the one in the gate.
+
+        ``email`` is NOT editable here even though ``{email}`` renders it: it is where a password-reset
+        link is sent (ADR-042), so a stolen session that could rewrite it becomes a permanent takeover
+        rather than a walk-up. An admin sets it in Administração → Pessoas.
+        """
+        person = _current_person(request)
+        if person is None:                       # mirrors account_password: the funnel path has no
+            return RedirectResponse("/login", status_code=303)   # request.state.person to read
+        form = _form(await request.body())
+        sig = form.get("signature", "")
+        try:
+            _row, converted = ws.set_person_profile(
+                person["person_id"], signature=sig,
+                job_title=form.get("job_title", ""), phone=form.get("phone", ""))
+        except ValueError as exc:
+            # Nothing was written — set_person_profile validates before it touches the row — so the
+            # re-render carries the TYPED values over the stored ones. Handing back the old job title
+            # beside "fix your signature" makes the person retype work they did not get wrong.
+            person = {**(ws.person_by_id(person["person_id"]) or person),
+                      "job_title": form.get("job_title", ""), "phone": form.get("phone", "")}
+            return HTMLResponse(
+                _account_html(request, error=str(exc), person=person, signature=sig),
+                status_code=400, headers=_NO_STORE)
+        # A pasted Outlook/Gmail signature is HTML and was just flattened to text. Saying so is not
+        # politeness: the textarea now holds something different from what they pasted, and a person
+        # who is not told that reads it as the app having mangled their signature.
+        return RedirectResponse(f"{_ACCOUNT}?ok={'sightml' if converted else 'sig'}", status_code=303)
+
+    @app.post(_ACCOUNT + "/palavra-passe")
+    async def account_password(request: Request):
+        # The gate exempts /a-minha-conta from the forced-change funnel, so `person` is read here the
+        # same way the funnel does -- from the session, never from the form.
+        person = _current_person(request)
+        if person is None:                       # the funnel path skips request.state.person
+            return RedirectResponse("/login", status_code=303)
+        form = _form(await request.body())
+        current, new, confirm = form.get("current", ""), form.get("new", ""), form.get("confirm", "")
+        problem = ""
+        # Re-authenticate before changing. A session left open on a shared workshop machine is
+        # otherwise a permanent takeover rather than a walk-up: change the password and the owner is
+        # locked out of their own account.
+        if not _auth.check_password(person["person_id"], current):
+            problem = "A palavra-passe atual não está correta."
+        elif len(new) < 8:
+            problem = "A nova palavra-passe precisa de pelo menos 8 caracteres."
+        elif new != confirm:
+            problem = "As palavras-passe não coincidem."
+        elif new == current:
+            problem = "A nova palavra-passe tem de ser diferente da atual."
+        if problem:
+            return HTMLResponse(_account_html(request, error=problem, person=person),
+                                status_code=400, headers=_NO_STORE)
+        _auth.set_password(person["person_id"], new)     # …which revokes every session, incl. this one
+        # So mint a fresh one: without it the success case logs you out, which reads as a failure and
+        # invites a retry with the old password.
+        token = _auth.start_session(person["person_id"],
+                                    user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse(f"{_ACCOUNT}?ok=pw", status_code=303)
+        _set_session_cookie(response, token, request)
+        return response
+
+    @app.post(_ACCOUNT + "/sessoes")
+    def account_end_other_sessions(request: Request):
+        """Sign out everywhere else, without changing the password — the answer to a laptop left
+        signed in at a client's office."""
+        person = _who(request)
+        _auth.revoke_all_sessions(person["person_id"])
+        token = _auth.start_session(person["person_id"],
+                                    user_agent=request.headers.get("user-agent", ""))
+        response = RedirectResponse(f"{_ACCOUNT}?ok=s", status_code=303)
+        _set_session_cookie(response, token, request)
+        return response
+
+    @app.get("/api/me")
+    def api_me(request: Request):
+        """Who am I — the seam Phase C/D permission checks will read."""
+        person = _current_person(request)
+        if person is None:
+            return JSONResponse({"error": "autenticação necessária"}, status_code=401)
+        return JSONResponse({"name": person["name"], "person_id": person["person_id"],
+                             "is_admin": person["is_admin"], "scopes": person["scopes"]})
+
 
     def _spec_payload(mid: str) -> dict:
         """Merged spec + readiness in the wire shape the report renders (job_fields + items[])."""
@@ -509,8 +1082,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         spec, rd = ws.merge(jspecs[mid])
         spec_d = spec.to_dict()
         ck = _reply_key(mid, spec_d, rd)
+        # The signature is applied AFTER the cache, never baked into it (ADR-047): the cache key is
+        # the spec, which says nothing about who is signed in, so a cached signed draft would hand
+        # the next reader the previous reader's name and phone number.
         if ck in _reply_cache:  # unchanged spec since last draft — serve cached, spend 0 tokens
-            return JSONResponse({"reply": _reply_cache[ck], "cached": True})
+            return JSONResponse({"reply": _sign_for(request, _reply_cache[ck]), "cached": True})
         # The Gemini round-trip is BLOCKING — dispatch it OFF the event loop (mirror /api/sync,
         # NOT a bare in-loop call) so a multi-second LLM call can't freeze the single worker for
         # every other request (nav badges, list fetches). Any future LLM endpoint must do the same.
@@ -523,7 +1099,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
         text = await anyio.to_thread.run_sync(_draft)
         _reply_cache[ck] = text
-        return JSONResponse({"reply": text})
+        return JSONResponse({"reply": _sign_for(request, text)})
 
     @app.post("/api/reply/stream")
     async def reply_stream(request: Request):
@@ -531,6 +1107,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
 
         The non-streaming ``/api/reply`` above stays as the tested fallback the UI uses when the
         browser can't read a streaming body or this route errors before the first chunk.
+
+        Signing a STREAM (ADR-047) needs one extra move: text already yielded cannot be retracted, so
+        a model-written sign-off would be on the reader's screen before there was anything to strip
+        it with. The tail — the last few lines, where a sign-off can only be — is therefore held back
+        until the generator ends, and `signature.sign` runs on that. Both reply paths then produce
+        byte-identical text, instead of the streaming one quietly closing twice.
         """
         from fastapi.responses import StreamingResponse
         body = await request.json()
@@ -540,20 +1122,36 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         spec, rd = ws.merge(jspecs[mid])
         spec_d = spec.to_dict()
         ck = _reply_key(mid, spec_d, rd)
+        person = _who(request)          # read OUT here: the generator runs off the event loop
+        cfg = _config_dir()
+        # +2, not +1: `strip_closing` ignores a match on line 0 (a body that IS only a sign-off must
+        # survive), so the held window needs a line of margin above the furthest-back closing it can
+        # legitimately cut, or a sign-off landing exactly on the boundary is missed.
+        hold = _signature._CLOSING_TAIL_LINES + 2
 
         def gen():
             # Runs in Starlette's threadpool (sync generator), so the blocking client init +
             # token generation stay off the event loop — keep make_client INSIDE the generator.
             if ck in _reply_cache:  # cached (e.g. a prior reload/non-stream draft) — replay, 0 tokens
-                yield _reply_cache[ck]
+                yield _signature.sign(_reply_cache[ck], person, cfg)
                 return
             if app.state.client is None:
                 app.state.client = classifier.make_client(settings)
             chunks: list[str] = []
+            pending, emitted = "", False
             for piece in replydraft.draft_reply_stream(spec_d, rd, rpb, app.state.client, settings):
                 chunks.append(piece)
-                yield piece
+                pending += piece
+                lines = pending.split("\n")
+                if len(lines) > hold:
+                    yield "\n".join(lines[:-hold]) + "\n"
+                    emitted = True
+                    pending = "\n".join(lines[-hold:])
             _reply_cache[ck] = "".join(chunks)  # populate so the next reload / non-stream call is free
+            signed = _signature.sign(pending, person, cfg)
+            # A tail that is pure whitespace makes `sign` return the block alone — which would weld
+            # itself onto the last emitted line. The blank line has to come from here, not from sign.
+            yield signed if (pending.strip() or not emitted) else "\n" + signed
 
         return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                                  headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
@@ -641,7 +1239,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return JSONResponse(out)
 
     @app.get("/api/thread/{thread_root:path}")
-    def api_thread(thread_root: str):
+    def api_thread(thread_root: str, request: Request):
         """Return the messages of one email thread with body text.
 
         Merges two sources:
@@ -653,16 +1251,26 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         Both are returned in chronological order. Embedded messages carry ``"embedded": true``
         so the UI can render them with a subtle visual distinction.
         """
+        from . import attachments as _att
         from .envelope import clean_email_body as _clean_body
         from .envelope import extract_embedded_messages as _extract_embedded
         from .envelope import parse_eml as _parse_eml
         from .signals import OUR_DOMAIN
         if _crmdb is None:
             return JSONResponse({"error": "CRM not available"}, status_code=503)
+        # ADR-045. 404 rather than 403, deliberately: a 403 here would confirm that the thread
+        # exists, which is most of what an unauthorised caller wanted to learn. The honest-refusal
+        # rule (ADR-040) applies to a person's OWN surfaces, not to someone else's mail.
+        if not _may_open_thread(_who(request), thread_root):
+            return JSONResponse({"error": "não encontrado"}, status_code=404)
         interactions = _crmdb.thread(thread_root)
         if not interactions:
             return JSONResponse({"error": "thread not found"}, status_code=404)
         messages = []
+        # The attachment funnel's raw input (ADR-046). Collected from EVERY interaction, in the
+        # CRM's oldest-first order, and folded *before* the message dedup below — a file whose
+        # only carrier is a suppressed Trash copy must still reach the funnel.
+        thread_parts: list[dict[str, Any]] = []
         # Track (from_email, date_prefix) of real messages so we don't duplicate as embedded.
         real_keys: set[tuple[str, str]] = set()
         for row in interactions:
@@ -683,14 +1291,20 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             f = _file_for(mid)
             if f:
                 try:
-                    env = _parse_eml(Path(f).read_bytes())
+                    _raw = Path(f).read_bytes()
+                    env = _parse_eml(_raw)
                     body = env.get("body_text") or ""
                     msg["body"] = body[:3000]
                     msg["body_clean"] = _clean_body(body)[:3000]
                     msg["body_truncated"] = len(body) > 3000
+                    # ADR-046: the same parts _attachments() yields, in the same index order that
+                    # attachment_part re-walks, plus the band + content hash. Additive metadata —
+                    # the per-message chip list is still index-aligned with /api/attachment/…/{i}.
+                    _parts = _att.message_parts(_raw)
                     msg["attachments"] = [
-                        {"name": a.get("filename") or "(sem nome)", "type": a.get("content_type", "")}
-                        for a in (env.get("attachments") or [])
+                        {"name": p["name"] or "(sem nome)", "type": p["type"],
+                         "sha": p["sha"], "band": p["band"]}
+                        for p in _parts
                     ]
                     # MIME To: header
                     msg["to"] = [a.get("email") for a in (env.get("to") or []) if a.get("email")]
@@ -722,6 +1336,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                                 for e in msg["to"]
                             )
                             msg["direction"] = "outbound" if has_external_to else "internal"
+                    # Feed the funnel LAST, so ``first_seen``/``from_email`` carry the values
+                    # recovered above — a Trash copy with stripped headers would otherwise
+                    # attribute its files to "" on a blank date.
+                    thread_parts.append({"message_id": mid, "date": msg["date"],
+                                         "from_email": msg["from_email"], "parts": _parts})
                 except Exception:  # noqa: BLE001
                     pass
             real_keys.add((msg["from_email"].lower(), (msg["date"] or "")[:10]))
@@ -794,13 +1413,21 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         for group in by_fp.values():
             deduped.append(max(group, key=lambda x: len(x.get("attachments") or [])))
 
-        # Keep empty-body messages only if they carry attachments not seen elsewhere
-        all_att_names = {a["name"] for m in deduped for a in (m.get("attachments") or [])}
+        # Keep empty-body messages only if they carry attachments not seen elsewhere.
+        # Keyed by CONTENT HASH, not by filename (ADR-046). Measured on the corpus: 220 pairs
+        # share a filename while differing in bytes — one thread carries composition.pdf at both
+        # 154 KB and 152 KB. A name key silently dropped the second, different document; it also
+        # missed 181 byte-identical duplicates that happened to be renamed. Parts with no bytes
+        # have no hash, so they fall back to the name rather than collapsing into one another.
+        def _att_keys(m: dict) -> set[str]:
+            return {(a.get("sha") or ("name:" + a.get("name", ""))) for a in (m.get("attachments") or [])}
+
+        all_att_keys = {k for m in deduped for k in _att_keys(m)}
         for m in no_fp:
-            unique = {a["name"] for a in (m.get("attachments") or [])} - all_att_names
+            unique = _att_keys(m) - all_att_keys
             if unique:
                 deduped.append(m)
-                all_att_names |= unique
+                all_att_keys |= unique
 
         messages = deduped
 
@@ -878,12 +1505,20 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                               "title": pr.get("title") or pr["project_id"],
                               "stage": pr.get("stage") or "", "fields_confirmed": int(nf)}
                 break
+        # ── The attachment funnel (ADR-046) ──────────────────────────────────────────────────
+        # Deduped by content hash across the WHOLE thread and sorted into three bands. Built from
+        # ``thread_parts``, which was collected from every interaction above — before the message
+        # dedup — so a file carried only by a suppressed Trash copy still appears here.
+        att_items = _att.fold_thread(thread_parts)
         return JSONResponse({"thread_root": thread_root, "messages": all_msgs, "spec": spec_block,
                              "facts": facts, "decisions": decisions,
-                             "ledger_project": proj_block})
+                             "ledger_project": proj_block,
+                             "attachments": {"items": att_items,
+                                             "counts": _att.band_counts(att_items),
+                                             "bands": list(_att.BANDS)}})
 
     @app.get("/api/relations/{message_id}")
-    def get_relations(message_id: str):
+    def get_relations(message_id: str, request: Request):
         """Return thread siblings, same-contact history, and entity cross-refs for one message.
 
         Requires ``out/crm.db`` (run ``email2data crm`` first).  Returns 503 when the CRM is
@@ -899,6 +1534,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             return JSONResponse(
                 {"error": "CRM not available — run `email2data crm` first"}, status_code=503
             )
+        person = _who(request)
+        if not _may_open_thread(person, _root_for_message(message_id)):
+            return JSONResponse({"error": "não encontrado"}, status_code=404)
         result = _crmdb.related(message_id)
         if not any(result.values()):
             # Check whether the message_id is simply unknown vs genuinely no relations.
@@ -907,6 +1545,17 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             ).fetchone()
             if known is None:
                 return JSONResponse({"error": "message_id not found in CRM"}, status_code=404)
+        # Being allowed to ask about THIS message does not make every relation it returns readable:
+        # `related()` reaches across threads by contact and by entity, which is exactly how a
+        # scoped reader would otherwise pull back subjects from inboxes they were never granted
+        # (ADR-045). Each bucket is filtered by the same rule the Fila's related-list uses.
+        allowed = _visible_roots(person)
+        if allowed is not None:
+            result = {
+                bucket: [x for x in rows
+                         if (x.get("thread_root") or x.get("message_id") or "") in allowed]
+                for bucket, rows in result.items()
+            }
         return JSONResponse(result)
 
     # -------------------------------------------------------------------------
@@ -1001,9 +1650,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return root, seed_mid, rows
 
     @app.get("/api/projects")
-    def list_projects(archived: bool = False):
+    def list_projects(request: Request, archived: bool = False):
         out = []
-        for pr in pstore.list(include_archived=archived):
+        # Filtered by CONTENT, not refused: a collection endpoint answers "here is what is yours",
+        # which for someone with no matching grants is legitimately an empty list (ADR-045).
+        for pr in _visible_projects(_who(request), pstore.list(include_archived=archived)):
             cov, est = _summary_for(pr)   # denormalized read (F3); no per-row build_canonical
             out.append({**pr, "n_threads": len(pstore.threads_for(pr["project_id"])),
                         "owners": pstore.owners_for(pr["project_id"]),
@@ -1240,6 +1891,17 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         without a settings file — the signal to use built-in defaults."""
         sp = settings.get("__settings_path__")
         return (Path(sp).parents[1] / "config") if sp else None
+
+    def _sign_for(request: Request, body: str) -> str:
+        """``body`` closed with the SIGNED-IN person's signature (ADR-047).
+
+        The single call site shape for every reply draft the email detail panel serves. The person is
+        read from the gate's resolution, never from the request body: a signature is identity, and an
+        endpoint that let a caller name whose signature to use would be a way to send mail as someone
+        else. `person=None` (an unguarded render path) falls through to the install default, which
+        names nobody — the honest output when we do not know who is asking.
+        """
+        return _signature.sign(body, _who(request), _config_dir())
 
     def _client_email_template_for(purpose: str) -> str:
         """The editable per-purpose skeleton (config/client_email_<id>_template.md), re-read per
@@ -1544,12 +2206,29 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                              "missing": missing, "dropped_gaps": descdraft.dropped_gaps(polished, base),
                              "n_facts": len(facts)})
 
-    @app.get("/api/attachment/{message_id}/{index}")
-    def get_attachment(message_id: str, index: int):
+    @app.get("/api/attachment/{ref:path}")
+    def get_attachment(ref: str, request: Request):
         """Serve one attachment's raw bytes for view/download. Read-only, local, NO parsing.
-        Previewable types (PDF, images) open inline; everything else downloads."""
+        Previewable types (PDF, images) open inline; everything else downloads.
+
+        ``ref`` is ``<message_id>/<index>`` and is a ``:path`` split on the **last** slash, because
+        an Outlook ``Message-ID`` routinely contains ``/`` (they are base64-ish blobs). With a plain
+        ``{message_id}/{index}`` pair those never matched: the ASGI server percent-decodes before
+        routing, so the client's ``%2F`` became a real separator and the extra segment 404'd. That
+        silently broke **201 of 1039** attachment links on the current corpus — one in five 📎 — and
+        it looked like missing data rather than a routing bug. Verified by fetching every funnel
+        item's bytes back and comparing sha256 (see ADR-046).
+        """
         from fastapi.responses import Response
         from .envelope import attachment_part
+        message_id, _, _index = ref.rpartition("/")
+        if not message_id or not _index.isdigit():
+            return JSONResponse({"error": "attachment not found"}, status_code=404)
+        index = int(_index)
+        # This route reads the corpus file DIRECTLY — no crm join, no thread fold — so it is the one
+        # escape that hands over real bytes (a client's PDF quote) with nothing else in the way.
+        if not _may_open_thread(_who(request), _root_for_message(message_id)):
+            return JSONResponse({"error": "não encontrado"}, status_code=404)
         f = _file_for(message_id)
         if f is None:
             return JSONResponse({"error": "message not found"}, status_code=404)
@@ -1558,8 +2237,16 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             return JSONResponse({"error": "attachment not found"}, status_code=404)
         name, ctype, data = part
         disp = "inline" if (ctype.startswith("image/") or ctype == "application/pdf") else "attachment"
-        return Response(content=data, media_type=ctype,
-                        headers={"Content-Disposition": f'{disp}; filename="{name.replace(chr(34), chr(39))}"'})
+        # RFC 6266/5987. A raw non-ASCII filename here is not a cosmetic issue: HTTP header values
+        # are latin-1, so `Comprovativo Pag. Lindo Serviço.pdf` emitted a byte no UTF-8 reader
+        # accepts — and in a pt-PT shop the accented filename is the common case, not the edge. Send
+        # a transliterated ASCII `filename=` for old clients plus the percent-encoded `filename*=`
+        # that every current browser prefers, so the name survives the download intact.
+        ascii_name = (unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+                      or "anexo")
+        cd = (f'{disp}; filename="{ascii_name.replace(chr(34), chr(39))}"; '
+              f"filename*=UTF-8''{quote(name, safe='')}")
+        return Response(content=data, media_type=ctype, headers={"Content-Disposition": cd})
 
     # -------------------------------------------------------------------------
     # Caixa de Capturas — the conversational-intake validation queue (ADR-019 §5 / R9 no-auto-apply).
@@ -1575,7 +2262,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                  "stage": p.get("stage") or ""} for p in active]
 
     @app.get("/capturas", response_class=HTMLResponse)
-    def capturas_view():
+    def capturas_view(request: Request):
         """The Caixa de Capturas validation queue (ADR-019 §5 / R9 no-auto-apply). The page is glue
         over the M3 API; nothing is applied without a deliberate click."""
         pending = cstore.list_pending()
@@ -1589,7 +2276,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 c["suggested_project_id"] = (capture_resolve.best_project(
                     hay, active, aliases=_cap_aliases, gazetteer=_cap_gazetteer)
                     if hay.strip() else None)
-        return HTMLResponse(captures_page.build_html(pending, active, nav_counts=_nav_counts()))
+        return HTMLResponse(captures_page.build_html(pending, active,
+                                                     nav_counts=_nav_counts(person=_who(request)),
+                                                     person=_who(request)))
 
     @app.get("/api/captures")
     def list_captures():
@@ -1671,10 +2360,92 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # Cockpit Fila — response queue (cockpit.build_fila over the CRM + thread_state overlay).
     # A SEPARATE render path from "/" (the inbox report) so it doesn't collide with that template.
     # -------------------------------------------------------------------------
-    def _fila_rows(*, include_resolved: bool = False) -> list[dict[str, Any]]:
+    # ── per-person visibility (Phase D, ADR-045) ─────────────────────────────
+    #
+    # ADR-038 recorded WHICH of our inboxes each message reached and said plainly that it contained
+    # no policy — `scopes.visible()` was "the seam Phase D still owes a caller". This is that caller.
+    #
+    # The filter is applied to `ints` inside `_fila_rows`, BEFORE `cockpit.build_fila`, and not to
+    # `rows` afterwards. Everything else in that function is recomputed from `ints` rather than from
+    # `rows`: the thread summaries, the outbound-only contact fallback, the entity join, the
+    # novo/first_seen derivation, and the «relacionados» list. Filtering `rows` would leave
+    # «↻ 5 relacionadas» pointing at threads the reader cannot open — a filter that hides the row and
+    # keeps the pointer is not a filter, it is a leak with extra steps.
+
+    _scope_cache: dict[str, Any] = {"key": None, "map": {}}
+
+    def _scope_map() -> dict[str, set[str]]:
+        """``{thread_root: {scope, ...}}``, cached until crm.db or sync.db changes.
+
+        Recomputed by mtime rather than per request because `scopes.thread_scopes` scans all of
+        `message_scope` plus all of `interactions`, and `_fila_rows` runs up to four times on a
+        single `/contrapartes/{key}` render. Both stores are rebuilt only by a sync, so mtime is a
+        sufficient key — and a stale map can only ever be *narrower* than the truth for a moment,
+        never wider, because a new message starts unattributed and unattributed fails closed.
+        """
+        if _crmdb is None or not settings.get("__settings_path__"):
+            return {}
+        crm_path = _outdir() / "crm.db"
+        sync_path = _outdir() / "sync.db"
+        try:
+            key = (crm_path.stat().st_mtime_ns if crm_path.exists() else 0,
+                   sync_path.stat().st_mtime_ns if sync_path.exists() else 0)
+        except OSError:
+            key = None
+        if key is not None and _scope_cache["key"] == key:
+            return _scope_cache["map"]
+        if not sync_path.exists():
+            return {}
+        from . import sync as _syncmod
+        try:
+            store = _syncmod.SyncStore(sync_path).connect()
+        except Exception:  # noqa: BLE001 — no attribution store yet is not a render failure
+            return {}
+        try:
+            mapping = _scopesmod.thread_scopes(store, crm_path)
+        except Exception:  # noqa: BLE001
+            mapping = {}
+        finally:
+            store.close()
+        _scope_cache["key"], _scope_cache["map"] = key, mapping
+        return mapping
+
+    def _visible_roots(person: dict[str, Any] | None) -> set[str] | None:
+        """Thread roots this person may see, or ``None`` meaning "no restriction" (an admin).
+
+        ``person is None`` returns an EMPTY set, not None — fail closed. The gate assigns
+        `request.state.person` only after it has authorised the request, so a render path that has
+        no person is either unguarded or being called from inside the gate itself, and neither is a
+        reason to hand over the queue. Same rule as `cockpit_ui.page(person=None)` (ADR-041).
+        """
+        if person is None:
+            return set()
+        if person.get("is_admin"):
+            return None
+        granted = set(person.get("scopes") or [])
+        return {root for root, scope in _scope_map().items()
+                if _scopesmod.visible(scope, granted, is_admin=False)}
+
+    def _person_sees_everything(person: dict[str, Any] | None) -> bool:
+        return bool(person and person.get("is_admin"))
+
+    def _fila_rows(*, person: dict[str, Any] | None,
+                   include_resolved: bool = False) -> list[dict[str, Any]]:
+        """The Fila rows this PERSON may see.
+
+        ``person`` is a REQUIRED keyword with no default, deliberately. A default of ``None`` would
+        fail closed and therefore be safe, but a default of any kind means a new call site can omit
+        it and silently get someone else's idea of visibility; with no default, a forgotten call site
+        is a TypeError the suite raises immediately. Default-deny expressed in the signature rather
+        than in a convention someone has to remember (ADR-040 §1's argument, one layer down).
+        """
         if _crmdb is None:
             return []
         ints = _crmdb.all_interactions()
+        allowed = _visible_roots(person)
+        if allowed is not None:
+            ints = [i for i in ints
+                    if (i.get("thread_root") or i.get("message_id") or "") in allowed]
         now = datetime.now(timezone.utc)
         rows = cockpit.build_fila(ints, ws.thread_states(),
                                   now=now,
@@ -1728,7 +2499,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         # and carry their cluster's rollup so the dossier's counterparty card needs no second call.
         # Precedence mirrors _clusters_as_dicts: v8 override (precious) → derived name → the contact.
         by_email: dict[str, dict[str, Any]] = {}
-        for cd in _clusters_as_dicts(_clusters(), frows=rows):
+        for cd in _clusters_as_dicts(_clusters(), frows=rows, person=person):
             for e in cd.get("emails") or []:
                 by_email.setdefault(e, cd)
         for r in rows:
@@ -1811,6 +2582,14 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                     root = x.get("thread_root")
                     if root in seen_roots:
                         return
+                    # `_crmdb.related()` queries the store DIRECTLY, so it does NOT inherit the
+                    # `ints` filter above — this is the second gate, and it is load-bearing.
+                    # Measured on the real corpus before it existed: a member scoped to one inbox
+                    # saw **26** «relacionados» entries pointing at threads they could not open,
+                    # each leaking a real client subject line and a jump-link that 404s. A filter
+                    # that hides the row and keeps the pointer is a leak with extra steps.
+                    if allowed is not None and root not in allowed:
+                        return
                     seen_roots.add(root)
                     t = thread_summaries.get(root)
                     related.append({
@@ -1837,13 +2616,93 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             r["related_count"] = len(related)
         return rows
 
-    def _needs_review_count() -> int:
+    def _may_open_thread(person: dict[str, Any] | None, thread_root: str) -> bool:
+        """Whether this person may open ONE thread by root (ADR-045).
+
+        The row-level filter in `_fila_rows` decides what a person is SHOWN. This decides what they
+        may FETCH — and the two are different questions, because every id-bearing route below can be
+        called directly with a root the caller guessed, copied from a colleague, or kept from before
+        their grants changed. Hiding a row while leaving its `/api/thread/{root}` open would protect
+        the index and publish the contents.
+        """
+        allowed = _visible_roots(person)
+        return allowed is None or (thread_root or "") in allowed
+
+    def _root_for_message(message_id: str) -> str:
+        """The canonical thread_root a message belongs to, or the message id itself.
+
+        Attachment and relation routes are keyed by MESSAGE, while scopes are keyed by THREAD, so
+        the join has to happen somewhere; here, once, rather than in three call sites.
+        """
+        if _crmdb is None or not message_id:
+            return message_id or ""
+        try:
+            row = _crmdb._conn.execute(
+                "SELECT thread_root FROM interactions WHERE message_id=? LIMIT 1",
+                (message_id,)).fetchone()
+        except Exception:  # noqa: BLE001 — a missing/locked crm must not 500 an auth check
+            return message_id
+        return (row["thread_root"] if row and row["thread_root"] else message_id) or message_id
+
+    def _project_roots(project_id: str) -> list[str]:
+        try:
+            return pstore.threads_for(project_id)
+        except Exception:  # noqa: BLE001 — a missing project is "no roots", not a 500
+            return []
+
+    def _may_open_project(person: dict[str, Any] | None, project_id: str) -> bool:
+        """Whether this person may open ONE project (ADR-045, owner decision 2026-07-26).
+
+        Projects have **no scope column and never touch crm.db**, so visibility here is *derived*:
+        you may see a project if you may see any of its threads — the same union rule
+        `scopes.thread_scopes` already uses, and the same safe direction (a union can only widen).
+
+        A project with **no threads yet** is admin-only, deliberately. It is the fail-closed reading,
+        and it is the honest one: nothing has been attached, so there is no evidence anybody should
+        see it. The alternative — visible-to-all until its first thread — would make every new
+        project briefly public, which is precisely backwards.
+
+        The rejected alternative was `project_owners`: that column is a free-text NAME rather than a
+        `person_id`, so it cannot be validated without a name join, and existing rows carry owners
+        that may match no person at all — projects would have silently vanished for everyone.
+        """
+        allowed = _visible_roots(person)
+        if allowed is None:
+            return True
+        return any(root in allowed for root in _project_roots(project_id))
+
+    def _visible_projects(person: dict[str, Any] | None,
+                          projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        allowed = _visible_roots(person)
+        if allowed is None:
+            return projects
+        return [pr for pr in projects
+                if any(root in allowed for root in _project_roots(pr.get("project_id") or ""))]
+
+    def _has_no_grants(person: dict[str, Any] | None) -> bool:
+        """True when this person's queue is empty because nothing is GRANTED (ADR-045).
+
+        Not the same question as "are there zero rows": a person with grants and a clear queue has
+        genuinely finished, and deserves «Tudo tratado». Only a non-admin with no scopes at all is
+        looking at a queue they were never given.
+        """
+        return bool(person) and not person.get("is_admin") and not (person.get("scopes") or [])
+
+    def _needs_review_count(*, person: dict[str, Any] | None) -> int:
         """Verdicts the cascade could not decide (tier-1 failure → NEEDS_REVIEW, ADR-016) — the
-        «rever N» strip chip finally gives them a surface."""
+        «rever N» strip chip finally gives them a surface.
+
+        Scoped like every other count (ADR-045): unscoped, it reads the whole corpus and puts
+        «rever 12» in front of a reader whose queue holds three of them — and clicking through
+        would show a shorter list than the chip promised.
+        """
         if _crmdb is None:
             return 0
+        allowed = _visible_roots(person)
         return sum(1 for it in _crmdb.all_interactions()
-                   if (it.get("priority") or "") == "NEEDS_REVIEW")
+                   if (it.get("priority") or "") == "NEEDS_REVIEW"
+                   and (allowed is None
+                        or (it.get("thread_root") or it.get("message_id") or "") in allowed))
 
     # -------------------------------------------------------------------------
     # Shared cluster builder (C1a/C1b) — assembled per-request; cheap (in-memory).
@@ -1858,10 +2717,15 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         )
 
     def _clusters_as_dicts(cls: list[_accounts.AccountCluster],
-                           frows: list | None = None) -> list[dict[str, Any]]:
+                           frows: list | None = None, *,
+                           person: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Serialize clusters + enrich with Fila response-risk for the UI. Accepts a prebuilt
-        ``frows`` so the caller's Fila build is reused, not recomputed (F3)."""
-        frows = _fila_rows() if frows is None else frows
+        ``frows`` so the caller's Fila build is reused, not recomputed (F3).
+
+        ``person`` is required for the same reason `_fila_rows` requires it: the risk bands and
+        «a responder» counts below are computed FROM the rows, so an unfiltered build here would
+        put another reader's demand on this reader's counterparty cards (ADR-045)."""
+        frows = _fila_rows(person=person) if frows is None else frows
         # Human display-name overrides (v8): a person manages "Tempus Lda", not "nif:274023911".
         name_overrides = ws.counterparty_names()
         # Index fila rows by each email that appears in them
@@ -1889,8 +2753,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             # Find open projects for this cluster
             open_proj = 0
             if _crmdb is not None:
+                visible_projects = _visible_projects(person, pstore.list())
                 for e in cl.emails:
-                    for p in pstore.list():
+                    for p in visible_projects:
                         if (p.get("client_email") or "") == e and p.get("stage") not in ("WON", "LOST", "ARCHIVED"):
                             open_proj += 1
             out.append({
@@ -1905,18 +2770,28 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return out
 
     def _nav_counts(frows: list | None = None,
-                    clusters: list | None = None) -> dict[str, int]:
+                    clusters: list | None = None, *,
+                    person: dict[str, Any] | None) -> dict[str, int]:
         """Live counts for the nav badges (C5). Only shows non-zero. Accepts an already-built
         ``frows``/``clusters`` so a page that also renders them doesn't rebuild the whole Fila +
-        cluster set a second time per request (F3)."""
-        frows = _fila_rows() if frows is None else frows
+        cluster set a second time per request (F3).
+
+        A badge is a claim about work waiting for YOU. Counted from unfiltered rows it would say
+        «7 a responder» over a queue showing three — and the number the operator trusts is the one
+        in the nav, so the disagreement resolves in favour of the lie (ADR-045).
+
+        NOTE for the caller inside `_auth_gate`: `request.state.person` is not assigned until the
+        gate has finished authorising, so `_who(request)` returns None there. The 403 render passes
+        its local `person` explicitly — otherwise the refusal page would leak aggregate demand to
+        exactly the person being refused."""
+        frows = _fila_rows(person=person) if frows is None else frows
         clusters = _clusters() if clusters is None else clusters
         # The Fila badge carries DEMAND, not inventory (ADR-034): what actually needs a reply
         # (WE_OWE red+amber) — the same number the «Hoje» front shows as «N a responder» — never the
-        # total active count, which reads as N fires when far fewer demand the operator.
-        fila_demand = sum(1 for r in frows
-                          if (r.get("clock") or {}).get("state") == cockpit.WE_OWE
-                          and (r.get("clock") or {}).get("band") in ("red", "amber"))
+        # total active count, which reads as N fires when far fewer demand the operator. Defined in
+        # cockpit.respond_demand since ADR-044, so the badge, the Início headline and the Fila's own
+        # front card cannot drift apart while sitting in the same viewport.
+        fila_demand = cockpit.respond_demand(frows)
         para_ti_count = len(para_ti.all_items(
             frows, clusters,
             {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])},
@@ -1927,36 +2802,63 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                                   "capturas": capturas_count}.items() if v}
 
     @app.get("/", response_class=HTMLResponse)
+    def inicio(request: Request):
+        """Início (ADR-044) — the landing page: the day's demand and four big buttons, no rows.
+
+        Shares ``_fila_rows()`` with the nav badges the same way the Fila does (F3), so arriving
+        costs exactly one queue build — the same one the next click would have paid for anyway."""
+        person = _who(request)
+        frows = _fila_rows(person=person)
+        return HTMLResponse(home_page.build_home_html(
+            cockpit.home_summary(frows),
+            synced_at=_sync["last_ts"] or "",
+            nav_counts=_nav_counts(frows=frows, person=person), person=person),
+            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/inicio")
+    def api_inicio(request: Request):
+        """Início's numbers, for the in-place repaint after a sync (ADR-023 §7) — same shape the page
+        was rendered from, so the refresh path and the first paint cannot disagree."""
+        person = _who(request)
+        frows = _fila_rows(person=person)
+        return JSONResponse({"summary": cockpit.home_summary(frows),
+                             "synced_at": _sync["last_ts"], "syncing": _sync["running"],
+                             "nav_counts": _nav_counts(frows=frows, person=person)},
+                            headers={"Cache-Control": "no-store"})
+
     @app.get("/fila", response_class=HTMLResponse)
-    def fila():
-        frows = _fila_rows()  # build once, share with the nav badges (F3)
+    def fila(request: Request):
+        person = _who(request)
+        frows = _fila_rows(person=person)  # build once, share with the nav badges (F3)
         return HTMLResponse(fila_page.build_fila_html(
             frows, _roster(),
             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             # The freshness stamp (ADR-033 P0): same source as /api/para-ti's synced_at, so the
             # hero page can say how old the mail behind its clocks actually is.
             synced_at=_sync["last_ts"] or "",
-            needs_review=_needs_review_count(),
-            nav_counts=_nav_counts(frows=frows)),
+            needs_review=_needs_review_count(person=person),
+            no_scopes=_has_no_grants(person),
+            nav_counts=_nav_counts(frows=frows, person=person), person=person),
             # Rebuilt per request; the only stale path is an HTTP cache in front of us (ADR-023).
             headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fila")
-    def api_fila(include: str = ""):
+    def api_fila(request: Request, include: str = ""):
         """The active queue. ``?include=resolved`` adds HANDLED/INTERNAL rows — the "Tratados"
         ledger: what was already decided, so a decision can be reviewed (and reopened) instead of
         vanishing without a trace the moment it is made.
 
         Carries ``synced_at``/``syncing``/``nav_counts``/``needs_review`` alongside the rows so the
         Fila's ADR-023 poll updates the whole page in one round-trip (mirrors /api/para-ti)."""
-        frows = _fila_rows(include_resolved=(include == "resolved"))
+        person = _who(request)
+        frows = _fila_rows(person=person, include_resolved=(include == "resolved"))
         # The fila badge must count the ACTIVE queue even when the ledger view asked for resolved.
         active = ([r for r in frows if (r.get("clock") or {}).get("state")
                    in (cockpit.WE_OWE, cockpit.AWAITING)] if include else frows)
         return JSONResponse({"rows": frows, "team": _roster(),
                              "synced_at": _sync["last_ts"], "syncing": _sync["running"],
-                             "nav_counts": _nav_counts(frows=active),
-                             "needs_review": _needs_review_count()},
+                             "nav_counts": _nav_counts(frows=active, person=person),
+                             "needs_review": _needs_review_count(person=person)},
                             headers={"Cache-Control": "no-store"})
 
     @app.post("/api/thread/handled")
@@ -2011,7 +2913,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         root = str(body.get("thread_root", "")).strip()
         if not root:
             return JSONResponse({"error": "thread_root required"}, status_code=400)
-        row = next((x for x in _fila_rows(include_resolved=True)
+        row = next((x for x in _fila_rows(person=_who(request), include_resolved=True)
                     if x.get("thread_root") == root), None)
         if row is None:
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -2023,12 +2925,27 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         draft = (clientdraft.build_purpose_draft(kind, tmpl, questions=[])
                  if p.input_kind == "questions"
                  else clientdraft.build_purpose_draft(kind, tmpl, content=""))
-        return JSONResponse({"kind": kind, "draft": draft})
+        # Signed here and NOT in clientdraft (ADR-047): the same templates feed the Projetos
+        # composer, whose draft goes through an AI polish that is allowed to reword the prose. A
+        # signature that passed through the polish would come back reworded — a contact block the
+        # model paraphrased is exactly the kind of confident wrongness this project refuses.
+        return JSONResponse({"kind": kind, "draft": _sign_for(request, draft)})
 
-    # -- in-app owner roster (v4): effective roster = settings.team ∪ ws.roster() ------------------
+    # -- the owner roster (v4 "define new owners", now people-backed: ADR-041 / W8) ----------------
+    #
+    # These stay reachable by any signed-in person, deliberately: naming a new owner is a decision
+    # made mid-flow from the Fila/Projetos picker, and a member could always do it. What changes is
+    # what it creates — a real person, assignable-only, accountable to whoever added them — instead
+    # of free text that no permission could ever attach to.
     @app.get("/api/roster")
     def get_roster():
-        return JSONResponse({"roster": _roster(), "team": _team, "added": ws.roster()})
+        people = ws.people()
+        return JSONResponse({"roster": [p["name"] for p in people], "team": _team,
+                             # Who a member may retire from the picker here: assignable-only people.
+                             # Anyone who can sign in is managed in Administração (ADR-040/-041), and
+                             # is reported as protected so the UI can say so before the click.
+                             "added": [p["name"] for p in people if not p["can_login"]],
+                             "protected": _protected_owners()})
 
     @app.post("/api/roster")
     async def add_roster(request: Request):
@@ -2036,40 +2953,71 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         name = str(body.get("name", "")).strip()
         if not name:
             return JSONResponse({"error": "name required"}, status_code=400)
-        ws.roster_add(name)
+        if ws.person(name) is not None:
+            return JSONResponse({"ok": True, "roster": _roster()})      # idempotent, as it always was
+        me = _who(request) or {}
+        try:
+            # Accountable to whoever added them: they are signed in, so there is a real answer, and
+            # the alternative (nobody) is the queue-that-nobody-opens the CHECK exists to prevent.
+            ws.create_person(name, responsible=me.get("name", ""))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "roster": _roster()})
 
     @app.post("/api/roster/remove")
     async def remove_roster(request: Request):
-        """Remove an in-app-added owner name. settings.team names live in config and are not removable
-        here (returned in ``protected``)."""
+        """Retire an assignable-only owner from the picker (deactivate, never delete — their past
+        assignments stay attributed to them).
+
+        Anyone who can SIGN IN is refused here: this endpoint is open to every member, and before W8
+        it could only ever remove an in-app-added name. Letting it deactivate a colleague's login —
+        or an admin's — would turn a picker affordance into a permission change.
+        """
         body = await request.json()
         name = str(body.get("name", "")).strip()
-        ws.roster_remove(name)
-        return JSONResponse({"ok": True, "roster": _roster(), "protected": _team})
+        person = ws.person(name)
+        if person is None:
+            return JSONResponse({"ok": True, "roster": _roster(), "protected": _protected_owners()})
+        if person["can_login"]:
+            return JSONResponse(
+                {"error": f"{person['name']} entra na plataforma — quem tem acesso é gerido em "
+                          f"Administração, não a partir do seletor de donos."}, status_code=400)
+        try:
+            ws.set_person_active(person["person_id"], False)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "roster": _roster(), "protected": _protected_owners()})
+
+    def _protected_owners() -> list[str]:
+        """Names this endpoint will not retire — everyone who can sign in."""
+        return [p["name"] for p in ws.people() if p["can_login"]]
 
     # -------------------------------------------------------------------------
     # C2 — Contrapartes lens
     # -------------------------------------------------------------------------
     @app.get("/contrapartes", response_class=HTMLResponse)
-    def contrapartes_list():
+    def contrapartes_list(request: Request):
         cls = _clusters()
-        frows = _fila_rows()  # build Fila + clusters once, reuse for both the list and the badges (F3)
+        person = _who(request)
+        frows = _fila_rows(person=person)  # build Fila + clusters once, reuse for list + badges (F3)
         return HTMLResponse(contrapartes_page.build_list_html(
-            _clusters_as_dicts(cls, frows=frows), nav_counts=_nav_counts(frows=frows, clusters=cls)))
+            _clusters_as_dicts(cls, frows=frows, person=person),
+            nav_counts=_nav_counts(frows=frows, clusters=cls, person=person),
+            person=_who(request)))
 
     @app.get("/api/contrapartes")
-    def api_contrapartes():
-        return JSONResponse(_clusters_as_dicts(_clusters()))
+    def api_contrapartes(request: Request):
+        return JSONResponse(_clusters_as_dicts(_clusters(), person=_who(request)))
 
-    def _contraparte_detail_data(key: str) -> dict[str, Any] | None:
+    def _contraparte_detail_data(key: str, *,
+                                 person: dict[str, Any] | None) -> dict[str, Any] | None:
         """Everything the Contrapartes detail hub needs: the cluster, a navigable timeline (each row
         carries its ``thread_root`` + direction so the UI can link into the Fila / inbox), server-side
         rollup ``stats``, the cluster's open Fila threads + projects, and the Para-ti decisions that
         belong to this contraparte. Returns ``None`` when the key is unknown."""
         from collections import Counter
         cluster_dict: dict[str, Any] | None = None
-        for c in _clusters_as_dicts(_clusters()):
+        for c in _clusters_as_dicts(_clusters(), person=person):
             if c["key"] == key:
                 cluster_dict = c
                 break
@@ -2082,10 +3030,19 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         from_counts: Counter = Counter()
         if _crmdb is not None:
             seen: set[str] = set()
+            # `by_contact` queries the store directly, so it does NOT inherit the Fila filter
+            # (ADR-045). Both the timeline AND the `stats` rollup below are computed from these rows,
+            # so filtering here fixes both at once — and not filtering here would print an honest
+            # `we_owe: 0` beside a `messages: 87` counted over mail the reader cannot open, which is
+            # the worst of the two states: a number that contradicts the page it sits on.
+            _allowed_roots = _visible_roots(person)
             for email in cluster_dict["emails"]:
                 for row in _crmdb.by_contact(email):
                     mid = row["message_id"]
                     if mid in seen:
+                        continue
+                    if _allowed_roots is not None and (
+                            row.get("thread_root") or mid or "") not in _allowed_roots:
                         continue
                     seen.add(mid)
                     fe = row.get("from_email") or ""
@@ -2105,10 +3062,10 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         # Projects whose client_email matches a cluster email.
         cluster_projects = [p for p in pstore.list() if (p.get("client_email") or "") in emails]
         # Fila rows for this cluster (the still-open response queue).
-        cluster_frows = [r for r in _fila_rows() if (r.get("contact") or "") in emails]
+        cluster_frows = [r for r in _fila_rows(person=person) if (r.get("contact") or "") in emails]
         # Para-ti decisions belonging to this contraparte (by thread, contact, or proposed cluster).
         gates = [
-            it for it in _para_ti_items()
+            it for it in _para_ti_items(person=person)
             if (it.get("thread_root") in thread_set
                 or (it.get("context") or {}).get("contact") in emails
                 or it.get("email") in emails
@@ -2138,13 +3095,15 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 "fila_rows": cluster_frows, "gates": gates, "stats": stats}
 
     @app.get("/contrapartes/{key:path}", response_class=HTMLResponse)
-    def contrapartes_detail(key: str):
-        data = _contraparte_detail_data(key)
+    def contrapartes_detail(key: str, request: Request):
+        data = _contraparte_detail_data(key, person=_who(request))
         if data is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return HTMLResponse(contrapartes_page.build_detail_html(
             data["cluster"], data["timeline"], data["projects"], data["fila_rows"],
-            stats=data["stats"], gates=data["gates"], nav_counts=_nav_counts()))
+            stats=data["stats"], gates=data["gates"],
+            nav_counts=_nav_counts(person=_who(request)),
+            person=_who(request)))
 
     @app.post("/api/contrapartes/{key:path}/name")
     async def contraparte_set_name(key: str, request: Request):
@@ -2156,8 +3115,8 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                              "name": ws.counterparty_names().get(key, "")})
 
     @app.get("/api/contrapartes/{key:path}")
-    def api_contrapartes_detail(key: str):
-        data = _contraparte_detail_data(key)
+    def api_contrapartes_detail(key: str, request: Request):
+        data = _contraparte_detail_data(key, person=_who(request))
         if data is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return JSONResponse(data)   # {cluster, stats, timeline, projects, fila_rows, gates}
@@ -2166,8 +3125,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # C3 — Para ti decision inbox
     # -------------------------------------------------------------------------
     def _para_ti_items(frows: list | None = None,
-                       clusters: list | None = None) -> list[dict[str, Any]]:
-        frows = _fila_rows() if frows is None else frows
+                       clusters: list | None = None, *,
+                       person: dict[str, Any] | None) -> list[dict[str, Any]]:
+        frows = _fila_rows(person=person) if frows is None else frows
         clusters = _clusters() if clusters is None else clusters
         all_threads = {t for p in pstore.list() for t in pstore.threads_for(p["project_id"])}
         # Persisted "Ignorar" (v8): a dismissed decision stays dismissed across reloads/restarts.
@@ -2180,22 +3140,25 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     _NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
 
     @app.get("/para-ti", response_class=HTMLResponse)
-    def para_ti_view():
-        frows = _fila_rows()  # build once, reuse for items + badges (F3)
+    def para_ti_view(request: Request):
+        person = _who(request)
+        frows = _fila_rows(person=person)  # build once, reuse for items + badges (F3)
         clusters = _clusters()
         return HTMLResponse(para_ti_page.build_html(
-            _para_ti_items(frows, clusters), nav_counts=_nav_counts(frows=frows, clusters=clusters),
-            roster=_roster()), headers=_NO_STORE)
+            _para_ti_items(frows, clusters, person=person),
+            nav_counts=_nav_counts(frows=frows, clusters=clusters, person=person),
+            roster=_roster(), person=_who(request)), headers=_NO_STORE)
 
     @app.get("/api/para-ti")
-    def api_para_ti():
+    def api_para_ti(request: Request):
         """Live decision queue. Carries ``nav_counts`` + sync state alongside the items so the page's
         refresh poll updates the badges and the freshness stamp in a single round-trip."""
-        frows = _fila_rows()
+        person = _who(request)
+        frows = _fila_rows(person=person)
         clusters = _clusters()
         return JSONResponse({
-            "items": _para_ti_items(frows, clusters),
-            "nav_counts": _nav_counts(frows=frows, clusters=clusters),
+            "items": _para_ti_items(frows, clusters, person=person),
+            "nav_counts": _nav_counts(frows=frows, clusters=clusters, person=person),
             "synced_at": _sync["last_ts"],
             "syncing": _sync["running"],
             "served_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -2235,31 +3198,33 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     # -------------------------------------------------------------------------
     # C4 — Projetos lens (sidesteps report.py WIP; reuses existing /api/projects*)
     # -------------------------------------------------------------------------
-    def _projetos_html() -> str:
+    def _projetos_html(request: Request) -> str:
         # Cheap list: read the denormalized coverage/estimable off each project row (F3). Only a
         # stale/NULL summary (post-migration / post-sync) triggers a single build_canonical that then
         # persists — so this is no longer an O(projects×messages) recompute on every render.
         projects_summary = []
-        for p in pstore.list():
+        for p in _visible_projects(_who(request), pstore.list()):
             cov, est = _summary_for(p)
             projects_summary.append({**p, "coverage": cov, "estimable": est,
                                      "n_threads": len(pstore.threads_for(p["project_id"])),
                                      "owners": pstore.owners_for(p["project_id"])})
-        return projetos_page.build_html(projects_summary, nav_counts=_nav_counts(), roster=_roster())
+        return projetos_page.build_html(projects_summary,
+                                        nav_counts=_nav_counts(person=_who(request)),
+                                        roster=_roster(), person=_who(request))
 
     @app.get("/projetos", response_class=HTMLResponse)
-    def projetos_view():
-        return HTMLResponse(_projetos_html())
+    def projetos_view(request: Request):
+        return HTMLResponse(_projetos_html(request))
 
     @app.get("/projetos/{pid}", response_class=HTMLResponse)
-    def projetos_detail_view(pid: str):
+    def projetos_detail_view(pid: str, request: Request):
         # REST deep-link: ``/projetos/<pid>`` is the detail *resource* URL (mirrors
         # ``/contrapartes/<key>``). The same lens HTML is served — the page JS reads the id from the
         # path and opens that project's workbench. 404 on an unknown id so a stale/shared link fails
         # honestly instead of opening an empty workbench.
         if pstore.get(pid) is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        return HTMLResponse(_projetos_html())
+        return HTMLResponse(_projetos_html(request))
 
     # -------------------------------------------------------------------------
     # Scoped re-extraction (ADR-025 §4) — the sanctioned bypass of the idempotency rule.
@@ -2445,9 +3410,11 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                          "failures": dict(_sync.get("account_failures") or {})}}
 
     @app.get("/admin", response_class=HTMLResponse)
-    def admin_view():
+    def admin_view(request: Request):
         return HTMLResponse(admin_page.build_html(
-            _admin_accounts(), sync=_admin_sync_state(), nav_counts=_nav_counts()),
+            _admin_accounts(), sync=_admin_sync_state(),
+            nav_counts=_nav_counts(person=_who(request)),
+            person=_who(request)),
             headers=_NO_STORE)
 
     @app.get("/api/admin/accounts")
@@ -2513,6 +3480,226 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         finally:
             _sync_lock.release()
         return JSONResponse({"ok": True, "accounts": _admin_accounts()})
+
+    # ── «Pessoas»: the roster surface (ADR-041) ──────────────────────────────
+    #
+    # Everything past `create_person` used to be hand-written SQL against workspace.db — the PRECIOUS
+    # store, the one with no rebuild path. Promoting someone, marking a leaver inactive, fixing a
+    # typo: a sqlite3 prompt each time. Every rule these routes enforce lives in workspace.py, not
+    # here; this layer only turns a ValueError into a 400 a person can read.
+
+    def _attributed_addresses() -> list[str]:
+        """Every address that real mail was actually attributed to, from ``sync.message_scope``.
+
+        Read-only, and only when the file exists — merely viewing /admin must never create or
+        migrate a store (same rule as ``_cursors_for``). A missing table degrades to ``[]``.
+        """
+        if not settings.get("__settings_path__"):
+            return []
+        db = _outdir() / "sync.db"
+        if not db.exists():
+            return []
+        import sqlite3
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT address FROM message_scope WHERE address != ''").fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        return [str(r[0]).strip().lower() for r in rows if str(r[0] or "").strip()]
+
+    def _known_scopes() -> list[str]:
+        """The inbox tokens that can actually be granted: every address real mail reached, our
+        configured mailbox addresses, plus the unattributed bucket (a real, grantable token by
+        ADR-038's design).
+
+        The vocabulary exists so a grant can be VALIDATED. `set_person_scopes` stores any string, so
+        a mistyped address would round-trip through the UI and read as a permission — while matching
+        no mail at all. A permission that looks granted and is not is worse than no permission.
+
+        **Configured accounts are not the vocabulary** (ADR-045). ADR-038 deliberately made the scope
+        token the ADDRESS a message reached, not a configured account id, precisely so the inboxes we
+        never fetch are still grantable — mail reaches them by Cc, by forward, by delivery to an
+        alias. Measured on the real corpus 2026-07-26: `message_scope` held **10** addresses while
+        `imap.accounts[]` named **4**, and **22 of 374 threads (5.9%)** carried none of those 4.
+        Only **one** thread carried `sem-atribuicao`, so the admin bucket did not reach them either.
+        Validating grants against the configured 4 would therefore have made those 22 threads
+        ungrantable — invisible to every non-admin with no way to fix it from the UI. That is the
+        "never silently bin a client" non-negotiable, reached through a permission vocabulary
+        instead of through a classifier.
+        """
+        imap = settings.get("imap", {}) or {}
+        addresses = list(_attributed_addresses())
+        for a in (imap.get("accounts") or []):
+            if isinstance(a, dict):
+                username = str(a.get("username", "") or "").strip().lower()
+                if username:
+                    addresses.append(username)
+        return sorted(dict.fromkeys(addresses)) + [_scopesmod.SCOPE_UNATTRIBUTED]
+
+    def _people_view() -> list[dict[str, Any]]:
+        """The roster as the panel shows it. Nothing secret: whether a password EXISTS, never a hash,
+        and a session COUNT, never a token."""
+        by_id = {p["person_id"]: p for p in ws.people(include_inactive=True)}
+        rows = []
+        for p in by_id.values():
+            responsible = by_id.get(p.get("responsible_id") or "")
+            rows.append({
+                "person_id": p["person_id"], "name": p["name"],
+                # Contact data, not password material (ADR-042) — the same class of fact as `name`,
+                # so it travels with the roster the panel already renders.
+                "email": p.get("email", ""),
+                "can_login": bool(p["can_login"]), "is_admin": bool(p["is_admin"]),
+                "active": bool(p["active"]), "scopes": list(p["scopes"]),
+                "responsible": (responsible or {}).get("name", ""),
+                "has_credential": _auth.has_credential(p["person_id"]),
+                "sessions": len(_auth.live_sessions(p["person_id"])),
+                "must_change": _auth.must_change_password(p["person_id"]),
+            })
+        return rows
+
+    def _people_payload() -> dict[str, Any]:
+        return {"people": _people_view(), "known_scopes": _known_scopes()}
+
+    @app.get("/api/admin/people")
+    def api_admin_people():
+        return JSONResponse(_people_payload(), headers=_NO_STORE)
+
+    @app.post("/api/admin/people")
+    async def api_admin_people_add(request: Request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "corpo inválido (JSON esperado)."}, status_code=400)
+        access = str((body or {}).get("access", "assign"))
+        scopes, err = _validated_scopes((body or {}).get("scopes"))
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        name = " ".join(str((body or {}).get("name", "")).split())
+        responsible = str((body or {}).get("responsible", "") or "").strip()
+        can_login = access in ("login", "admin")
+        # The form states its own requirements in pt-PT. Workspace still enforces every one of them
+        # (and stays the only enforcer -- these are reads, not a second copy of the rule); its
+        # messages are the English developer contract eight tests in test_people.py pin by text.
+        if not name:
+            problem = "Indica um nome."
+        elif ws.person(name) is not None:
+            problem = f"Já existe alguém com o nome {name!r}."
+        elif not can_login and not responsible:
+            problem = ("Quem não entra na plataforma precisa de um responsável — sem ele, o trabalho "
+                       "que lhe for atribuído não aparece na vista de ninguém.")
+        elif responsible and ws.person(responsible) is None:
+            problem = f"O responsável {responsible!r} não existe."
+        else:
+            problem = ""
+        if problem:
+            return JSONResponse({"error": problem}, status_code=400)
+        try:
+            person = ws.create_person(name, can_login=can_login, is_admin=(access == "admin"),
+                                      responsible=responsible)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if scopes:
+            ws.set_person_scopes(person["person_id"], scopes)
+        return JSONResponse({"ok": True, **_people_payload()})
+
+    def _validated_scopes(raw: Any) -> tuple[list[str] | None, str]:
+        """``(scopes, error)``. ``None`` scopes = the caller did not ask to change them."""
+        if raw is None:
+            return None, ""
+        if not isinstance(raw, list):
+            return None, "as caixas têm de vir numa lista."
+        wanted = [str(s).strip().lower() for s in raw if str(s).strip()]
+        known = set(_known_scopes())
+        unknown = [s for s in wanted if s not in known]
+        if unknown:
+            return None, (f"{', '.join(unknown)} não é uma caixa desta instalação — uma caixa "
+                          f"escrita ao lado fica guardada e não dá acesso a correio nenhum. "
+                          f"Conhecidas: {', '.join(sorted(known))}.")
+        return list(dict.fromkeys(wanted)), ""
+
+    @app.post("/api/admin/people/{person_id}")
+    async def api_admin_people_update(person_id: str, request: Request):
+        """Promote/demote, activate/deactivate, re-grant scopes. Each field is optional; absent means
+        unchanged, so the panel can send one intent at a time."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "corpo inválido (JSON esperado)."}, status_code=400)
+        body = body or {}
+        me = _who(request)
+        # Self-demotion and self-deactivation are refused even when another admin exists. The store's
+        # last-admin invariant already prevents the unrecoverable case; this prevents the ordinary
+        # misclick, which has no undo from inside the app either — you would be locked out of the
+        # screen you would need to fix it.
+        if person_id == (me or {}).get("person_id"):
+            if body.get("is_admin") is False:
+                return JSONResponse(
+                    {"error": "não te podes despromover a ti próprio — pede a outro administrador."},
+                    status_code=400)
+            if body.get("active") is False:
+                return JSONResponse(
+                    {"error": "não te podes desativar a ti próprio — ficarias de fora do ecrã que "
+                              "precisas para o desfazer."}, status_code=400)
+        scopes, err = _validated_scopes(body.get("scopes"))
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        try:
+            if "is_admin" in body:
+                ws.set_person_admin(person_id, bool(body["is_admin"]))
+            if "active" in body:
+                ws.set_person_active(person_id, bool(body["active"]))
+                if not body["active"]:
+                    # Deactivation has to end the live sessions too, or the person keeps the app open
+                    # until their cookie expires -- `_current_person` re-reads workspace.db every
+                    # request, but only the NEXT request.
+                    _auth.revoke_all_sessions(person_id)
+            if scopes is not None:
+                ws.set_person_scopes(person_id, scopes)
+            if "email" in body:
+                # Validation (shape + one-address-one-person) lives in the store, so the CLI gets it
+                # too and the refusal text reaches the panel verbatim via the ValueError below.
+                ws.set_person_email(person_id, str(body["email"] or ""))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, **_people_payload()})
+
+    @app.post("/api/admin/people/{person_id}/convite")
+    def api_admin_people_invite(person_id: str, request: Request):
+        """Mint a single-use invite link, in the browser.
+
+        `email2data auth invite` printed the token to a terminal, where it stayed — in shell history,
+        in a scrollback buffer, and then in whatever chat it was pasted into. Minted here it can be
+        copied straight from the panel and the terminal never sees it.
+        """
+        person = ws.person_by_id(person_id)
+        if person is None:
+            return JSONResponse({"error": "pessoa desconhecida."}, status_code=404)
+        if not (person["can_login"] and person["active"]):
+            return JSONResponse(
+                {"error": f"{person['name']} não tem acesso à plataforma — um convite para quem não "
+                          f"pode entrar não leva a lado nenhum."}, status_code=400)
+        token = _auth.create_invite(person_id, created_by=(_who(request) or {}).get("name", ""))
+        return JSONResponse({"ok": True, "url": f"/aceitar-convite/{token}",
+                             "expires_hours": _authmod.INVITE_TTL_HOURS,
+                             "name": person["name"]}, headers=_NO_STORE)
+
+    @app.delete("/api/admin/people/{person_id}")
+    def api_admin_people_delete(person_id: str, request: Request):
+        if person_id == (_who(request) or {}).get("person_id"):
+            return JSONResponse({"error": "não te podes remover a ti próprio."}, status_code=400)
+        try:
+            ws.delete_person(person_id)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        # workspace.db and auth.db are joined by person_id with NO foreign key -- SQLite cannot
+        # enforce one across files. Leaving the credential behind is exactly the orphan drift
+        # `auth list` reports as a warning.
+        _auth.purge_person(person_id)
+        return JSONResponse({"ok": True, **_people_payload()})
 
     return app
 

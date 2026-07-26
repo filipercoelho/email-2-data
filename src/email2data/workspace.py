@@ -10,6 +10,8 @@ this layer only adds.
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -190,6 +192,71 @@ CREATE TABLE IF NOT EXISTS counterparty_names (
     name TEXT NOT NULL,          -- the human-chosen display name (v8)
     ts   TEXT                    -- UTC ISO when set (v8)
 );
+
+-- People (v10, ADR-039): the ONE namespace for anyone who can be ASSIGNED work. Login is an
+-- ATTRIBUTE here, not a separate kind of record -- some people are held accountable *through* a
+-- platform user and never sign in themselves (they may not even have a mailbox). Before v10 the
+-- roster was free text in two places (settings.json `team` UNION the in-app `roster` table), so
+-- "who is Rita" had no single answer and could never carry a permission.
+--
+-- ``name`` is UNIQUE and is BOTH the display name AND the join key: thread_owners.owner,
+-- project_owners.owner and captures.asserted_by all store a name, and all three stayed TEXT. That
+-- is deliberate -- at v10 those tables hold 0, 0 and 3 rows respectively, so an id migration would
+-- have bought churn across six modules and nothing else. A rename must therefore cascade (see
+-- ``rename_person``), which is the price of the name-as-key choice.
+--
+-- ``responsible_id`` is REQUIRED for a non-login person and enforced by the CHECK below, not by
+-- convention: work assigned to someone who never logs in must appear in some signed-in human's
+-- view, or it sits in a queue nobody opens -- the "never silently bin a client" non-negotiable
+-- reaching ownership. Credentials live in a SEPARATE auth.db; no password material is ever here.
+CREATE TABLE IF NOT EXISTS people (
+    person_id       TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    -- Uniqueness runs on this folded key, NOT on ``name`` with COLLATE NOCASE: SQLite's NOCASE only
+    -- folds ASCII, so "Luis" and "LUIS" collide but "Luis" and "LUIS" spelled with an accented I do
+    -- NOT -- and the team has accented names. Without this column the UNIQUE constraint would let
+    -- one person exist twice, each owning half a queue. NFKC + casefold, set by ``_name_key``.
+    name_key        TEXT NOT NULL UNIQUE,
+    -- Where a password-reset link is sent (v11, ADR-042). '' means "no address on file", which is
+    -- the honest default: this column is NEVER inferred from person_scopes or imap.accounts[] --
+    -- a scope grant is an inbox someone READS, not proof of their own address, and guessing here
+    -- would mail a credential-bearing link to the wrong human. An admin sets it explicitly.
+    -- It is contact data, not password material, so it belongs in the precious DB beside `name`
+    -- and not in auth.db (which holds only secrets).
+    email           TEXT NOT NULL DEFAULT '',
+    -- The person's own closing (v12, ADR-047): a template, not rendered text, so a rename or a new
+    -- phone number updates every future draft instead of leaving stale contact details in a block
+    -- somebody pasted once. '' means "use the install-wide config/signature_template.md" -- the
+    -- ordinary case, not an error. `job_title`/`phone` exist ONLY to fill {cargo}/{telefone}: they
+    -- are self-service contact data the person types about themselves, which is why they live here
+    -- and are editable from «A minha conta» while `email` (the reset-link destination) is not --
+    -- letting a session holder redirect password recovery is a takeover, letting them change their
+    -- own job title is a Tuesday.
+    signature       TEXT NOT NULL DEFAULT '',
+    job_title       TEXT NOT NULL DEFAULT '',
+    phone           TEXT NOT NULL DEFAULT '',
+    can_login       INTEGER NOT NULL DEFAULT 0,
+    is_admin        INTEGER NOT NULL DEFAULT 0,
+    responsible_id  TEXT REFERENCES people(person_id),
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_ts      TEXT NOT NULL,
+    updated_ts      TEXT NOT NULL,
+    CHECK (can_login IN (0, 1) AND is_admin IN (0, 1) AND active IN (0, 1)),
+    -- an admin must be able to sign in, else the grant is unusable
+    CHECK (is_admin = 0 OR can_login = 1),
+    -- the accountability rule, structural rather than advisory
+    CHECK (can_login = 1 OR responsible_id IS NOT NULL)
+);
+
+-- Which inbox scopes a person may SEE (v10). Tokens are ADR-038 scope tokens: a delivery address,
+-- or scopes.SCOPE_UNATTRIBUTED for the admin-visible bucket. Absent rows mean "no inbox granted";
+-- an admin bypasses this table entirely (scopes.visible), so an admin is never locked out by it.
+CREATE TABLE IF NOT EXISTS person_scopes (
+    person_id   TEXT NOT NULL REFERENCES people(person_id),
+    scope       TEXT NOT NULL,
+    ts          TEXT,
+    PRIMARY KEY (person_id, scope)
+);
 """
 
 # Precious-DB schema version. Bumped when `SCHEMA` changes shape; `Workspace.connect` records it in
@@ -207,9 +274,22 @@ CREATE TABLE IF NOT EXISTS counterparty_names (
 # v8 (2026-07-20): para_ti_dismissals (persisted "Ignorar" on decision cards — was a JS Set that lost
 # every dismissal on reload) + counterparty_names (human display-name override for cluster keys).
 # Both brand-new TABLES, delivered by SCHEMA's CREATE IF NOT EXISTS with no ALTER needed.
+# v10 (2026-07-25): people + person_scopes — the single assignable-identity namespace and its
+# inbox grants (ADR-039). Both brand-new TABLES, delivered by SCHEMA's CREATE IF NOT EXISTS
+# with no ALTER needed. Seeding is NOT done here: _migrate has no access to settings.json, and
+# creating the first admin is a human act — see `email2data auth setup`.
 # v9 (2026-07-23): thread_snooze — the Fila's Adiar store (ADR-033 P3). A brand-new TABLE, delivered
 # by SCHEMA with no ALTER; the wake-on-date-OR-new-inbound rule lives in cockpit.build_fila.
-SCHEMA_VERSION = 9
+# v11 (2026-07-26): people.email — where a password-reset link is sent (ADR-042). A NEW COLUMN on the
+# pre-existing people table, so SCHEMA's CREATE-IF-NOT-EXISTS cannot deliver it and it needs the
+# guarded ALTER in _migrate. Backfill is deliberately EMPTY: there is no address anywhere in this
+# system to backfill FROM, and inventing one would mail a reset link to a guess.
+# v12 (2026-07-26): people.signature + people.job_title + people.phone — the per-person closing of a
+# reply draft and the two profile fields that fill {cargo}/{telefone} (ADR-047). THREE new COLUMNS on
+# the pre-existing people table, so SCHEMA cannot deliver them and each needs its own guarded ALTER.
+# Every row lands at '', which is a real state meaning "close with the install default", so there is
+# nothing to backfill and no behaviour change for anyone who never opens the editor.
+SCHEMA_VERSION = 12
 
 # Who ended a project (CANCELLED/LOST close-out). From Lindo's POV; "our" = our own decision.
 CLOSE_PARTIES = ("client", "supplier", "our")
@@ -224,6 +304,41 @@ ITEM_COUNT_FIELD = "__n_items__"
 # A single table → the timeline is one indexed SELECT, no second store, no UNION.
 EVENT_KINDS = ("note", "decision", "opinion", "todo")
 EVENT_OP = "event"
+
+
+def _name_key(name: str) -> str:
+    """The uniqueness/lookup key for a person name: whitespace-collapsed, NFKC-normalised, casefolded.
+
+    ``casefold`` rather than ``lower`` so eszett/sigma-style pairs fold too; NFKC first so a composed
+    "í" and a decomposed "i + combining acute" are the same person rather than two.
+    """
+    return unicodedata.normalize("NFKC", " ".join((name or "").split())).casefold()
+
+
+def normalize_email(email: str) -> str:
+    """Trim + lowercase an address, or return '' for blank. Raises ValueError on a malformed one.
+
+    Deliberately a *shape* check, not RFC 5322: one ``@``, something either side, a dot in the
+    domain, no whitespace. The purpose is to catch a typo before it becomes a reset link mailed into
+    the void -- not to adjudicate exotic-but-legal addresses. Rejecting a valid address is the
+    cheaper failure here (an admin retypes it) than accepting an invalid one (a person silently
+    cannot recover, and finds out only when locked out).
+
+    Lowercased because it is compared and displayed, never used as a login key -- ``name`` is the
+    login key (ADR-041), so two people with case-different addresses is not a collision this must
+    resolve.
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return ""
+    if any(c.isspace() for c in addr):
+        raise ValueError(f"endereço inválido: {email!r} — não pode conter espaços")
+    local, sep, domain = addr.partition("@")
+    if not sep or not local or not domain or "@" in domain or "." not in domain:
+        raise ValueError(f"endereço inválido: {email!r} — esperado algo como nome@dominio.pt")
+    if domain.startswith(".") or domain.endswith(".") or ".." in addr:
+        raise ValueError(f"endereço inválido: {email!r} — domínio malformado")
+    return addr
 
 
 def event_field(kind: str) -> str:
@@ -344,6 +459,22 @@ class Workspace:
         # v8 (para_ti_dismissals + counterparty_names) adds only NEW TABLES — delivered by SCHEMA
         # above (CREATE IF NOT EXISTS runs before _migrate), so there is no ALTER to do here.
         # v9 (thread_snooze) likewise: a new TABLE only, delivered by SCHEMA — no ALTER.
+        # v10 (people + person_scopes) likewise: new TABLES only — no ALTER.
+        if version < 11:
+            # people.email (ADR-042): the reset-link destination. A NEW COLUMN on a table that
+            # already exists on every real install, so SCHEMA cannot add it. No backfill runs and
+            # none is possible — person_scopes holds inboxes a person may READ and
+            # imap.accounts[].username holds mailboxes the app FETCHES; neither is evidence of
+            # whose address it is. Every row lands at '' and an admin fills it in.
+            self._add_column("people", "email", "TEXT NOT NULL DEFAULT ''")
+        if version < 12:
+            # The per-person signature (ADR-047) and the two profile fields that fill it. Three NEW
+            # COLUMNS on a table that already exists on every real install. No backfill: '' means
+            # "use config/signature_template.md", so every existing person keeps closing exactly as
+            # they did before this version, with their name filled in.
+            self._add_column("people", "signature", "TEXT NOT NULL DEFAULT ''")
+            self._add_column("people", "job_title", "TEXT NOT NULL DEFAULT ''")
+            self._add_column("people", "phone", "TEXT NOT NULL DEFAULT ''")
         self._conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         self._conn.commit()
 
@@ -539,6 +670,379 @@ class Workspace:
         assert self._conn is not None, "call connect() first"
         return [r["name"] for r in self._conn.execute(
             "SELECT name FROM roster ORDER BY name").fetchall()]
+
+    # -- people: the single assignable-identity namespace (v10, ADR-039) -------------------------
+    #
+    # ``name`` is the join key into thread_owners.owner / project_owners.owner / captures.asserted_by,
+    # all of which are still TEXT. Every write below normalises whitespace but PRESERVES case, because
+    # the name is also what the UI renders. Lookups are case-insensitive (the column is COLLATE NOCASE)
+    # so "filipe" and "Filipe" can never become two people.
+
+    def create_person(self, name: str, *, can_login: bool = False, is_admin: bool = False,
+                      responsible: str = "", email: str = "", ts: str = "") -> dict[str, Any]:
+        """Create a person. Returns the new row.
+
+        ``responsible`` is another person's NAME and is REQUIRED when ``can_login`` is False -- the DB
+        CHECK enforces it too, but resolving it here gives a usable error instead of an opaque
+        IntegrityError. Raises ValueError on a blank/duplicate name, a missing responsible person, or
+        a non-login person with no responsible.
+
+        ``email`` is optional and defaults to '' (no address on file). It is never derived from
+        anything -- see ``normalize_email`` and the v11 note in ``_migrate``.
+        """
+        assert self._conn is not None, "call connect() first"
+        nm = " ".join((name or "").split())
+        if not nm:
+            raise ValueError("a person needs a name")
+        addr = normalize_email(email)
+        key = _name_key(nm)
+        if self.person(nm) is not None:
+            raise ValueError(f"person {nm!r} already exists")
+        responsible_id = None
+        if not can_login:
+            rnm = " ".join((responsible or "").split())
+            if not rnm:
+                raise ValueError(
+                    f"{nm!r} cannot sign in, so they need a responsible person -- work assigned to "
+                    f"them must appear in some signed-in user's view")
+            row = self.person(rnm)
+            if row is None:
+                raise ValueError(f"responsible person {rnm!r} does not exist")
+            if not row["can_login"]:
+                raise ValueError(f"responsible person {rnm!r} cannot sign in either")
+            responsible_id = row["person_id"]
+        now = ts or self._now_iso()
+        person_id = f"PER-{uuid.uuid4().hex[:8].upper()}"
+        self._conn.execute(
+            "INSERT INTO people (person_id, name, name_key, email, can_login, is_admin, "
+            "responsible_id, active, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,1,?,?)",
+            (person_id, nm, key, addr, int(bool(can_login)), int(bool(is_admin)), responsible_id,
+             now, now))
+        self._conn.commit()
+        return self.person(nm)  # type: ignore[return-value]
+
+    def person(self, name: str) -> dict[str, Any] | None:
+        """One person by name (case-insensitive), or None."""
+        assert self._conn is not None, "call connect() first"
+        row = self._conn.execute(
+            "SELECT * FROM people WHERE name_key = ?", (_name_key(name),)).fetchone()
+        return self._person_row(row) if row else None
+
+    def person_by_id(self, person_id: str) -> dict[str, Any] | None:
+        assert self._conn is not None, "call connect() first"
+        row = self._conn.execute(
+            "SELECT * FROM people WHERE person_id = ?", (person_id,)).fetchone()
+        return self._person_row(row) if row else None
+
+    def people(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
+        """Every person, name-ordered. The effective owner roster once v10 is seeded."""
+        assert self._conn is not None, "call connect() first"
+        q = "SELECT * FROM people" + ("" if include_inactive else " WHERE active = 1") + " ORDER BY name"
+        return [self._person_row(r) for r in self._conn.execute(q).fetchall()]
+
+    def _person_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        for flag in ("can_login", "is_admin", "active"):
+            d[flag] = bool(d[flag])
+        d["scopes"] = self.person_scopes(d["person_id"])
+        return d
+
+    def set_person_scopes(self, person_id: str, scopes: list[str], ts: str = "") -> None:
+        """REPLACE the person's granted inbox scopes (ADR-038 tokens). ``[]`` revokes all.
+
+        Idempotent -- the resulting set depends only on the argument, never on prior state.
+        """
+        assert self._conn is not None, "call connect() first"
+        now = ts or self._now_iso()
+        self._conn.execute("DELETE FROM person_scopes WHERE person_id=?", (person_id,))
+        for scope in dict.fromkeys(s.strip().lower() for s in (scopes or []) if s and s.strip()):
+            self._conn.execute(
+                "INSERT OR IGNORE INTO person_scopes(person_id, scope, ts) VALUES (?,?,?)",
+                (person_id, scope, now))
+        self._conn.commit()
+
+    def person_scopes(self, person_id: str) -> list[str]:
+        """The inbox scopes granted to one person (sorted). Empty = none granted."""
+        assert self._conn is not None, "call connect() first"
+        return [r["scope"] for r in self._conn.execute(
+            "SELECT scope FROM person_scopes WHERE person_id=? ORDER BY scope", (person_id,)).fetchall()]
+
+    # -- the lifecycle: promote, deactivate, remove (ADR-041) ------------------------------------
+    #
+    # The invariant every one of these enforces: THE INSTALL CAN NEVER REACH ZERO ACTIVE
+    # ADMINISTRATORS. /setup 404s as soon as any credential exists (ADR-039), so an install with no
+    # admin cannot be repaired from the app at all -- the recovery is deleting auth.db by hand and
+    # re-onboarding everybody. Enforced in the store rather than in the webapp so the CLI and any
+    # later caller inherit it; a rule that lives in one route is a rule the next route forgets.
+
+    def _active_admin_ids(self) -> set[str]:
+        assert self._conn is not None, "call connect() first"
+        return {r["person_id"] for r in self._conn.execute(
+            "SELECT person_id FROM people WHERE is_admin = 1 AND active = 1").fetchall()}
+
+    def _require_person(self, person_id: str) -> dict[str, Any]:
+        row = self.person_by_id(person_id)
+        if row is None:
+            raise ValueError(f"person {person_id!r} does not exist")
+        return row
+
+    def _refuse_if_last_admin(self, person: dict[str, Any], what: str) -> None:
+        admins = self._active_admin_ids()
+        if admins == {person["person_id"]}:
+            raise ValueError(
+                f"{person['name']!r} é o único administrador ativo — {what} deixaria a instalação "
+                f"sem ninguém que possa administrar, e o /setup já está fechado. "
+                f"Promove outra pessoa primeiro.")
+
+    def set_person_admin(self, person_id: str, is_admin: bool, ts: str = "") -> dict[str, Any]:
+        """Promote or demote. Idempotent; returns the updated row."""
+        assert self._conn is not None, "call connect() first"
+        person = self._require_person(person_id)
+        if is_admin and not person["can_login"]:
+            raise ValueError(
+                f"{person['name']!r} não tem acesso à plataforma — um administrador que não pode "
+                f"entrar é uma permissão que ninguém exerce.")
+        if not is_admin:
+            self._refuse_if_last_admin(person, "despromovê-lo")
+        self._conn.execute("UPDATE people SET is_admin=?, updated_ts=? WHERE person_id=?",
+                           (int(bool(is_admin)), ts or self._now_iso(), person_id))
+        self._conn.commit()
+        return self.person_by_id(person_id)  # type: ignore[return-value]
+
+    def set_person_email(self, person_id: str, email: str, ts: str = "") -> dict[str, Any]:
+        """Set (or clear, with '') where this person's password-reset link is sent. Returns the row.
+
+        Clearing is allowed and is not a soft delete: it means "no address on file", after which
+        ``/recuperar`` simply has nowhere to send and the person recovers the pre-ADR-042 way, via an
+        admin. That is a real state, so it must be expressible.
+
+        Raises ValueError on a malformed address, or when another person already holds it -- an
+        address that maps to two people is a reset link whose destination is ambiguous, and this
+        column exists precisely to be unambiguous.
+        """
+        assert self._conn is not None, "call connect() first"
+        self._require_person(person_id)
+        addr = normalize_email(email)
+        if addr:
+            clash = self._conn.execute(
+                "SELECT name FROM people WHERE email = ? AND person_id != ?",
+                (addr, person_id)).fetchone()
+            if clash is not None:
+                raise ValueError(
+                    f"{addr} já está associado a {clash['name']!r} — um endereço só pode pertencer "
+                    f"a uma pessoa, senão o link de recuperação tem dois destinos possíveis.")
+        self._conn.execute("UPDATE people SET email=?, updated_ts=? WHERE person_id=?",
+                           (addr, ts or self._now_iso(), person_id))
+        self._conn.commit()
+        return self.person_by_id(person_id)  # type: ignore[return-value]
+
+    def set_person_profile(self, person_id: str, *, signature: str | None = None,
+                           job_title: str | None = None, phone: str | None = None,
+                           ts: str = "") -> tuple[dict[str, Any], bool]:
+        """Set the person's own signature template and the profile fields that fill it (ADR-047).
+
+        Returns ``(person_row, converted_from_html)``. The second value is not decoration: a real
+        signature is COPIED out of Outlook or Gmail, so it arrives as an HTML table of logos and
+        inline styles, and this method flattens it to the plain text every draft surface actually
+        uses. Rewriting what somebody pasted without telling them is its own failure, so the caller
+        is handed the fact and must say so.
+
+        Every argument is optional and ``None`` means "leave it alone", so a form that posts only the
+        signature cannot silently blank a phone number it never showed. ``''`` is a real value and
+        clears the field -- for ``signature`` that means "close with the install default", which is
+        the state most people are in and must stay reachable after someone has tried a custom one.
+
+        Raises ValueError when the signature carries a placeholder the renderer cannot fill (the
+        alternative is a client email with a literal ``{telemovel}`` in it), or when a non-empty
+        paste flattens to nothing -- an HTML block that is entirely images has no text to keep, and
+        silently turning that into "use the install default" would look like the save was ignored.
+        Validation is HERE and not in the route so the CLI and any later caller inherit it.
+        """
+        assert self._conn is not None, "call connect() first"
+        self._require_person(person_id)
+        sets: list[str] = []
+        args: list[Any] = []
+        converted = False
+        if signature is not None:
+            from .signature import normalize_signature, unknown_tokens
+            text, converted = normalize_signature(signature)
+            if converted and not text:
+                raise ValueError(
+                    "a assinatura colada é HTML sem texto — só imagens. Escreve o texto do fecho "
+                    "(nome, função, contacto); os rascunhos são texto simples.")
+            bad = unknown_tokens(text)
+            if bad:
+                raise ValueError(
+                    f"a assinatura usa {', '.join(bad)}, que não existe(m). Tokens disponíveis: "
+                    f"{{nome}}, {{cargo}}, {{telefone}}, {{email}}.")
+            sets.append("signature=?")
+            args.append(text)
+        if job_title is not None:
+            sets.append("job_title=?")
+            args.append(" ".join(job_title.split()))
+        if phone is not None:
+            sets.append("phone=?")
+            args.append(" ".join(phone.split()))
+        if sets:
+            sets.append("updated_ts=?")
+            args.append(ts or self._now_iso())
+            self._conn.execute(f"UPDATE people SET {', '.join(sets)} WHERE person_id=?",
+                               (*args, person_id))
+            self._conn.commit()
+        return self.person_by_id(person_id), converted  # type: ignore[return-value]
+
+    def person_by_email(self, email: str) -> dict[str, Any] | None:
+        """The ACTIVE, login-capable person at ``email``, or None. The reset flow's only lookup.
+
+        Blank never matches: most rows carry '' by default, so a blank probe would otherwise return
+        an arbitrary person and mail them a reset link. Inactive and non-login people are excluded
+        here rather than at the call site -- a deactivated person is exactly who a stale address
+        would still reach, and they must not be able to sign back in through recovery.
+        """
+        assert self._conn is not None, "call connect() first"
+        try:
+            addr = normalize_email(email)
+        except ValueError:
+            return None
+        if not addr:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM people WHERE email = ? AND active = 1 AND can_login = 1",
+            (addr,)).fetchone()
+        return self._person_row(row) if row else None
+
+    def set_person_active(self, person_id: str, active: bool, ts: str = "") -> dict[str, Any]:
+        """Deactivate (the normal way someone leaves) or bring them back. Idempotent.
+
+        Deliberately NOT a delete: past assignments stay attributed to them, so who decided what is
+        preserved. ``people()`` drops them, so they stop being offered as an owner.
+        """
+        assert self._conn is not None, "call connect() first"
+        person = self._require_person(person_id)
+        if not active:
+            self._refuse_if_last_admin(person, "desativá-lo")
+        self._conn.execute("UPDATE people SET active=?, updated_ts=? WHERE person_id=?",
+                           (int(bool(active)), ts or self._now_iso(), person_id))
+        self._conn.commit()
+        return self.person_by_id(person_id)  # type: ignore[return-value]
+
+    def person_history(self, name: str) -> dict[str, int]:
+        """Where a person's NAME still appears as a foreign key. ``{}`` = safe to remove.
+
+        Name-as-key (see the ``people`` schema comment) means a DELETE cannot cascade the way a real
+        FK would: the owner rows would simply point at somebody who no longer exists, and the thread
+        would lose its owner without anyone being told.
+        """
+        assert self._conn is not None, "call connect() first"
+        nm = " ".join((name or "").split())
+        counts = {}
+        for table, column in (("thread_owners", "owner"), ("project_owners", "owner"),
+                              ("captures", "asserted_by"), ("capture_users", "roster_owner")):
+            n = self._conn.execute(
+                f'SELECT COUNT(*) AS n FROM "{table}" WHERE "{column}"=?', (nm,)).fetchone()["n"]
+            if n:
+                counts[table] = int(n)
+        return counts
+
+    def delete_person(self, person_id: str) -> None:
+        """Remove a person outright — only the ones who never did anything.
+
+        The honest scope of this call is "undo a mistyped name". Anyone who owns a thread, a project,
+        a capture, or another person's accountability is refused: removing them would rewrite the
+        record of who decided what. ``set_person_active(False)`` is the answer for someone who left.
+        """
+        assert self._conn is not None, "call connect() first"
+        person = self._require_person(person_id)
+        self._refuse_if_last_admin(person, "removê-lo")
+        history = self.person_history(person["name"])
+        if history:
+            where = ", ".join(f"{t} ({n})" for t, n in sorted(history.items()))
+            raise ValueError(
+                f"{person['name']!r} tem histórico atribuído — {where}. Remover apagaria o registo "
+                f"de quem decidiu o quê. Desativa-o em vez de o remover.")
+        dependents = [r["name"] for r in self._conn.execute(
+            "SELECT name FROM people WHERE responsible_id=? ORDER BY name", (person_id,)).fetchall()]
+        if dependents:
+            raise ValueError(
+                f"{person['name']!r} é o responsável de {', '.join(dependents)} — sem ele, o "
+                f"trabalho dessas pessoas deixa de aparecer na vista de alguém.")
+        self._conn.execute("DELETE FROM person_scopes WHERE person_id=?", (person_id,))
+        self._conn.execute("DELETE FROM people WHERE person_id=?", (person_id,))
+        self._conn.commit()
+
+    def backfill_people_from_roster(self, team: list[str] | None = None) -> list[str]:
+        """Fold the legacy owner rosters into ``people``. Idempotent; returns the names created.
+
+        Before this the owner picker read ``settings.json team`` ∪ the in-app ``roster`` table while
+        permissions read ``people`` — two vocabularies for one question, so "Rita" could be an owner
+        and not a person. Assigning her work was possible; granting her anything was not.
+
+        Backfilled names are **assignable-only**: they were free text a moment ago and nobody decided
+        they could sign in. The accountability rule then requires a responsible user, so this needs an
+        active admin and does nothing without one — on a virgin install it simply runs again next
+        boot. Existing people are never touched, including deactivated ones: someone who left is
+        still in ``settings.team`` (config nobody edits), and re-creating them every boot would make
+        deactivation impossible to keep.
+        """
+        assert self._conn is not None, "call connect() first"
+        admins = sorted(self._active_admin_ids())
+        if not admins:
+            return []
+        responsible_id = admins[0]
+        known = {_name_key(p["name"]) for p in self.people(include_inactive=True)}
+        created = []
+        for name in list(team or []) + self.roster():
+            nm = " ".join((name or "").split())
+            key = _name_key(nm)
+            if not nm or key in known:
+                continue
+            known.add(key)
+            now = self._now_iso()
+            person_id = f"PER-{uuid.uuid4().hex[:8].upper()}"
+            self._conn.execute(
+                "INSERT INTO people (person_id, name, name_key, can_login, is_admin, "
+                "responsible_id, active, created_ts, updated_ts) VALUES (?,?,?,0,0,?,1,?,?)",
+                (person_id, nm, key, responsible_id, now, now))
+            created.append(nm)
+        if created:
+            self._conn.commit()
+        return created
+
+    def rename_person(self, old: str, new: str) -> int:
+        """Rename a person, CASCADING into every table that stores the name as a foreign key.
+
+        This is the price of name-as-key (see the ``people`` schema comment): thread_owners.owner,
+        project_owners.owner and captures.asserted_by all hold the NAME, so a bare UPDATE on
+        ``people`` would orphan every assignment silently. One transaction, so a partial rename can
+        never be committed. Returns the number of rows touched outside ``people``.
+        """
+        assert self._conn is not None, "call connect() first"
+        src = " ".join((old or "").split())
+        dst = " ".join((new or "").split())
+        if not dst:
+            raise ValueError("a person needs a name")
+        if self.person(src) is None:
+            raise ValueError(f"person {src!r} does not exist")
+        clash = self.person(dst)
+        if clash is not None and _name_key(clash["name"]) != _name_key(src):
+            raise ValueError(f"person {dst!r} already exists")
+        touched = 0
+        try:
+            self._conn.execute("BEGIN")
+            for table, column in (("thread_owners", "owner"), ("project_owners", "owner"),
+                                  ("captures", "asserted_by"), ("capture_users", "roster_owner"),
+                                  ("roster", "name")):
+                cur = self._conn.execute(
+                    f'UPDATE OR IGNORE "{table}" SET "{column}"=? WHERE "{column}"=?', (dst, src))
+                touched += cur.rowcount or 0
+            self._conn.execute(
+                "UPDATE people SET name=?, name_key=?, updated_ts=? WHERE name_key=?",
+                (dst, _name_key(dst), self._now_iso(), _name_key(src)))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return touched
 
     # -- Para ti dismissals (v8) ------------------------------------------------------------
 

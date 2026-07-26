@@ -4,6 +4,7 @@ WIP-laden test_webapp.py.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from email2data import fila_page
 from email2data.crm import CrmStore
 from email2data.webapp import create_app
 from email2data.workspace import Workspace
+from conftest import signed_in_client
 
 NOW = datetime(2026, 6, 3, 12, 0, tzinfo=timezone.utc)
 
@@ -43,15 +45,20 @@ def _client(tmp_path, crm):
     ws = Workspace(tmp_path / "w.db").connect()
     app = create_app({"team": ["Diogo", "Bruno"]}, workspace=ws, jobspecs={},
                      prepared=([], [], {}), reply_pb="", crm_store=crm)
-    return TestClient(app), ws
+    return signed_in_client(TestClient(app), ws), ws
 
 
 def test_api_fila_lists_we_owe_thread(tmp_path):
-    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    cl, ws = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    # The owner picker is the PEOPLE roster since ADR-041/W8 — one vocabulary for "who can own this",
+    # not settings.team ∪ an in-app table while permissions read a third. `settings.team` is now only
+    # a seed, folded into people once an admin exists (see workspace.backfill_people_from_roster);
+    # this fixture creates its admin directly, so the names arrive here rather than at construction.
+    ws.backfill_people_from_roster(["Diogo", "Bruno"])
     r = cl.get("/api/fila")
     assert r.status_code == 200
     data = r.json()
-    assert data["team"] == ["Diogo", "Bruno"]
+    assert set(data["team"]) >= {"Diogo", "Bruno"}
     rows = {x["thread_root"]: x for x in data["rows"]}
     assert "mid:t1" in rows and rows["mid:t1"]["clock"]["state"] == "WE_OWE"
 
@@ -82,6 +89,30 @@ def test_fila_page_renders(tmp_path):
     r = cl.get("/fila")
     assert r.status_code == 200
     assert "Fila" in r.text and "Orçamento 50 placas" in r.text
+
+
+def test_inicio_and_its_api_are_built_from_the_same_queue(tmp_path):
+    """ADR-044: /api/inicio feeds the post-sync repaint, so it must return exactly what the first
+    paint was rendered from. Two code paths producing the landing page's numbers is two places for
+    them to diverge, and the divergence would only ever show up *after* a sync — the moment someone
+    is most likely to trust the new figure."""
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+
+    page = cl.get("/")
+    assert page.status_code == 200
+    assert page.headers.get("cache-control") == "no-store"      # rebuilt per request, like the Fila
+
+    api = cl.get("/api/inicio")
+    assert api.status_code == 200 and api.headers.get("cache-control") == "no-store"
+    body = api.json()
+    assert set(body["summary"]) == {"all", "CLIENT", "SUPPLIER", "LEAD"}
+
+    # The embedded SUMMARY and the API's summary are the same object, field for field.
+    embedded = json.loads(re.search(r"const SUMMARY = (\{.*?\});\n", page.text, re.S).group(1))
+    assert embedded == body["summary"]
+
+    # …and it agrees with the queue it summarises: «Hoje» totals the active Fila.
+    assert body["summary"]["all"]["total"] == len(cl.get("/api/fila").json()["rows"])
 
 
 def test_api_fila_empty_without_crm(tmp_path):
@@ -166,10 +197,21 @@ def test_crm_carries_trust_fields():
     assert row["reason"] == "pede orçamento"
 
 
-def test_home_serves_fila(tmp_path):
+def test_fila_lives_at_its_own_path_and_no_longer_owns_the_root(tmp_path):
+    """ADR-044 moved the queue off «/» so arriving is a decision, not a wall of rows.
+
+    Both halves matter. «/fila» must still be the Mesa — that is where every nav link, palette entry
+    and deep link now points. And «/» must NOT be it: the whole change is worthless if the root
+    still renders the cockpit, and a redirect back to it would be the same regression wearing a
+    302."""
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
-    r = cl.get("/")
+    r = cl.get("/fila")
     assert r.status_code == 200 and "Fila" in r.text
+    assert 'class="mesa"' in r.text                       # the three-pane cockpit, unchanged
+
+    root = cl.get("/", follow_redirects=False)
+    assert root.status_code == 200                        # Início renders; it does not bounce
+    assert 'class="mesa"' not in root.text                # …and it is not the Mesa wearing a new URL
 
 
 def test_inbox_serves_report(tmp_path):
@@ -324,7 +366,7 @@ def test_fila_page_reflects_filter_and_open_thread_in_url(tmp_path):
     """Deep-linkable Fila: the counterparty filter and the expanded thread are written to the query
     string (?counterparty= / ?thread=) and re-applied on load + Back/Forward; the old URL-wipe that
     discarded the ?focus= deep-link is gone, and project chips point at /projetos/<pid>."""
-    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/").text
+    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/fila").text
     assert "function syncURL(" in html and "function applyURLState(" in html
     assert "p.set('counterparty'" in html and "p.set('thread'" in html
     assert "get('counterparty')" in html and "get('thread')" in html
@@ -338,7 +380,7 @@ def test_fila_multi_filter_dimensions(tmp_path):
     """Multi-filter: purpose, urgency band, owner, domain, search, attachment, and age filters
     are wired to URL state and applied by view().  The filter bar (_fbar) and inline search input
     (_search) appear in the rendered page, and renderFbar() / clearFilters() are present."""
-    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/").text
+    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/fila").text
     # URL serialisation covers all new filter dimensions
     for key in ("purpose", "band", "domain", "search", "minDays", "attachment"):
         assert f"p.set('{key}'" in html, f"syncURL must write '{key}'"
@@ -370,7 +412,7 @@ def test_para_ti_keyboard_accept_honours_navigation_only_items(tmp_path):
 
 def test_fila_page_contains_nav_links(tmp_path):
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
-    html = cl.get("/").text
+    html = cl.get("/fila").text
     for href in ["/contrapartes", "/projetos", "/para-ti"]:
         assert href in html
 
@@ -523,7 +565,7 @@ def _client_with_spec(tmp_path, crm, mid="t1"):
     app = create_app({"team": ["Diogo", "Bruno"]}, workspace=ws,
                      jobspecs={mid: _spec_for(mid)},
                      prepared=([], [], {}), reply_pb="", crm_store=crm)
-    return TestClient(app), ws
+    return signed_in_client(TestClient(app), ws), ws
 
 
 def test_thread_endpoint_carries_the_job_spec_for_the_detail_panel(tmp_path):
@@ -618,6 +660,9 @@ def test_fila_timeline_reversal_is_idempotent_across_renders():
         "function msgThreadSummary(msgs){return msgs.map(m=>m.message_id).join('>');}\n"
         "function _projHTML(r){return '';}\n"
         "function _fmtGap(ms){return 'g';} function _gapBand(ms){return '';} const CLOCK_ICON='';\n"
+        # The attachment funnel is shared-kit (ADR-046), stubbed here like msgHTML — this test pins
+        # the timeline's ordering, not the funnel's contents.
+        "function attFunnelHTML(a){return a?'[att]':'';}\n"
         "function _threadHTML(" + _thread_html_js() + "\n"
         "const msgs=[{message_id:'m1'},{message_id:'m2'},{message_id:'m3'}];\n"
         "const r={_open:true,_threadMsgs:msgs};\n"
@@ -637,7 +682,7 @@ def test_fila_page_offers_selectable_order_defaulting_to_risk(tmp_path):
     """ADR-033: the queue order is user-selectable and DEFAULTS to response risk — the highest-stakes
     thread is on top at load ('the next move is never a question'). `Mais recentes` stays one click
     away, and the choice is still carried in the URL (the default stays out of the address bar)."""
-    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/").text
+    html = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))[0].get("/fila").text
     assert 'id="_order"' in html
     assert 'value="recent">Mais recentes' in html            # pt-PT labels
     assert 'value="risk">Risco de resposta' in html          # both orders reachable
@@ -749,7 +794,8 @@ def test_fila_rows_carry_can_draft_flag(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = create_app({"team": []}, workspace=ws, jobspecs={"t1": {"message_id": "t1"}},
                      prepared=([], [], {}), reply_pb="", crm_store=crm)
-    rows = {x["thread_root"]: x for x in TestClient(app).get("/api/fila").json()["rows"]}
+    rows = {x["thread_root"]: x
+            for x in signed_in_client(TestClient(app), ws).get("/api/fila").json()["rows"]}
     assert rows["mid:t1"]["can_draft"] is True
     cl2, _ = _client(tmp_path, _crm_with([(_env("t2", 3), _verdict())]))  # no jobspec → no draft
     assert all(r["can_draft"] is False for r in cl2.get("/api/fila").json()["rows"])
@@ -838,7 +884,7 @@ def test_fila_page_groups_queue_by_obligation(tmp_path):
 
 def _p0_page(tmp_path):
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
-    return cl.get("/").text
+    return cl.get("/fila").text
 
 
 def test_fila_fronts_carry_their_own_demand(tmp_path):
@@ -1222,7 +1268,7 @@ def test_fila_routes_forbid_http_caching(tmp_path):
     """The queue is rebuilt per request; the only way to serve a stale one is an HTTP cache in front
     of us. Both the page and its API opt out (same rule Para ti already pins)."""
     cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
-    assert cl.get("/").headers.get("cache-control") == "no-store"
+    assert cl.get("/fila").headers.get("cache-control") == "no-store"
     assert cl.get("/api/fila").headers.get("cache-control") == "no-store"
 
 
@@ -1306,7 +1352,7 @@ def test_api_reply_draft_maps_purpose_to_composer(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = create_app({"team": ["Diogo"]}, workspace=ws, jobspecs={"t1": {}},       # t1 has a JobSpec (keyed by message_id, not thread_root)
                      prepared=([], [], {}), reply_pb="", crm_store=crm)
-    cl = TestClient(app)
+    cl = signed_in_client(TestClient(app), ws)
     assert cl.post("/api/thread/reply-draft", json={}).status_code == 400
     assert cl.post("/api/thread/reply-draft",
                    json={"thread_root": "mid:nope"}).status_code == 404
@@ -1510,3 +1556,74 @@ def test_fila_css_is_fully_tokenized_for_dark_mode(tmp_path):
     for hard in ("background:#fff", "background:#f3f4f6", "background:#fffdf8",
                  "background:#f0fdfa", "#D5E4EF", "background:#f7f4fd"):
         assert hard not in css, hard
+
+
+# ── ADR-047 — the draft leaves for the person's own mail client, closed in their name ─────────────
+
+def test_the_draft_box_offers_to_open_the_default_mail_client(tmp_path):
+    """The reply used to end at a readonly textarea and a Copiar button: the person then switched
+    app, found the thread, pasted, and retyped the address and the subject by hand. `mailto:` hands
+    the whole thing over in one click — and still never sends, because `mailto:` opens a composer."""
+    html = _p0_page(tmp_path)
+    assert 'data-act="opendraft"' in html and "Abrir no mail" in html
+    assert "function openDraftInMail(" in html
+    assert "'mailto:'+encodeURIComponent(r.contact||'')" in html
+    assert "+'&body='+encodeURIComponent(r._draft)" in html
+    # Copiar stays: it is the fallback on a machine with no mail client registered.
+    assert 'data-act="copydraft"' in html
+    assert "a app nunca envia" in html
+
+
+def test_the_mail_handoff_carries_the_subject_and_does_not_stack_re(tmp_path):
+    html = _p0_page(tmp_path)
+    assert "function _replySubject(" in html
+    assert "+'?subject='+encodeURIComponent(_replySubject(r))" in html
+    assert "'Re: '+s" in html
+    # A reply to a reply must not become «Re: Re: Re: Orçamento» — pin the exact prefix set, in both
+    # languages, so dropping one from the regex is a failure and not a silent regression.
+    assert r"/^\s*(re|rv|res|fw|fwd|enc)\s*:/i.test(s)" in html
+
+
+def test_the_mail_button_says_where_it_is_going_including_when_it_cannot(tmp_path):
+    """An outbound-only thread can have no known contact. The button still works (the person types
+    the address) but must not silently pretend it knows one."""
+    html = _p0_page(tmp_path)
+    assert "function _mailToTitle(" in html
+    assert "sem endereço conhecido" in html
+
+
+def test_reply_draft_is_closed_with_the_signed_in_person_s_signature(tmp_path):
+    """ADR-047 on the deterministic path: /api/thread/reply-draft serves the follow-up and payment
+    templates into the email detail panel, so they carry the person's closing — not the fixed
+    «Lindo Serviço» block that used to live in every template."""
+    crm = _crm_with([(_env("t2", 4, frm="fat@acme.pt", subject="Fatura 123"),
+                      _verdict(purpose="OUTBOUND_INVOICE"))])
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": ["Diogo"]}, workspace=ws, jobspecs={},
+                     prepared=([], [], {}), reply_pb="", crm_store=crm)
+    cl = signed_in_client(TestClient(app), ws)
+    from conftest import TEST_ADMIN
+    ws.set_person_profile(ws.person(TEST_ADMIN)["person_id"],
+                          signature="Abraço,\n{nome} · {cargo}\nTel.: {telefone}",
+                          job_title="Produção")
+    draft = cl.post("/api/thread/reply-draft", json={"thread_root": "mid:t2"}).json()["draft"]
+    assert draft.rstrip().endswith(f"Abraço,\n{TEST_ADMIN} · Produção")
+    assert "Tel.:" not in draft, "an empty phone must take its label with it, not dangle"
+    # The payment template ships with its own «Com os melhores cumprimentos, / Lindo Serviço» — it is
+    # stripped, not stacked, so the client never reads two sign-offs.
+    assert draft.count("cumprimentos") == 0
+    assert draft.count("Abraço,") == 1
+
+
+def test_a_person_with_no_signature_gets_the_install_default_in_their_draft(tmp_path):
+    """The no-change case, and the one most installs are in: nobody has opened the editor, so the
+    draft closes exactly as it did before ADR-047 — with a name under it."""
+    crm = _crm_with([(_env("t2", 4, frm="fat@acme.pt", subject="Fatura 123"),
+                      _verdict(purpose="OUTBOUND_INVOICE"))])
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": ["Diogo"]}, workspace=ws, jobspecs={},
+                     prepared=([], [], {}), reply_pb="", crm_store=crm)
+    cl = signed_in_client(TestClient(app), ws)
+    from conftest import TEST_ADMIN
+    draft = cl.post("/api/thread/reply-draft", json={"thread_root": "mid:t2"}).json()["draft"]
+    assert draft.rstrip().endswith(f"Com os melhores cumprimentos,\n{TEST_ADMIN}\nLindo Serviço")

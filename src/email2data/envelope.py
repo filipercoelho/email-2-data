@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 import re
 import struct
-from email import message_from_bytes
-from email.header import decode_header
 from email.message import Message
 from email.utils import getaddresses, parsedate_to_datetime
 from html import unescape
 from typing import Any, Optional
 
+from .headers import decode_value, header_text, parse_message
 from .identity import canonical_id
 
 logger = logging.getLogger(__name__)
@@ -23,33 +22,17 @@ _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _BLANKLINES_RE = re.compile(r"\n{3,}")
 
 
-def _decode_header(value: str | None) -> str:
-    if not value:
-        return ""
-    parts = []
-    for chunk, enc in decode_header(str(value)):
-        if isinstance(chunk, bytes):
-            try:
-                parts.append(chunk.decode(enc or "utf-8", errors="replace"))
-            except (LookupError, ValueError):
-                # bogus/unknown charset label (e.g. "unknown-8bit") — fall back, never raise
-                parts.append(chunk.decode("utf-8", errors="replace"))
-        else:
-            parts.append(chunk)
-    return "".join(parts).strip()
-
-
 def _addr(value: str | None) -> dict[str, str]:
     pairs = getaddresses([value or ""])
     if not pairs:
         return {"name": "", "email": ""}
     name, email_addr = pairs[0]
-    return {"name": _decode_header(name), "email": email_addr.lower()}
+    return {"name": decode_value(name), "email": email_addr.lower()}
 
 
 def _addr_list(value: str | None) -> list[dict[str, str]]:
     return [
-        {"name": _decode_header(n), "email": e.lower()}
+        {"name": decode_value(n), "email": e.lower()}
         for n, e in getaddresses([value or ""])
         if e
     ]
@@ -111,7 +94,7 @@ def _attachments(msg: Message) -> list[dict[str, Any]]:
         payload = part.get_payload(decode=True)
         out.append(
             {
-                "filename": _decode_header(filename) if filename else None,
+                "filename": decode_value(filename) if filename else None,
                 "content_type": part.get_content_type(),
                 "size_bytes": len(payload) if payload else 0,
             }
@@ -120,7 +103,7 @@ def _attachments(msg: Message) -> list[dict[str, Any]]:
 
 
 def _date_iso(msg: Message) -> str | None:
-    raw = msg.get("Date")
+    raw = header_text(msg, "Date")
     if not raw:
         return None
     try:
@@ -140,14 +123,14 @@ def attachment_part(raw: bytes, index: int) -> tuple[str, str, bytes] | None:
     ``_attachments``. Bytes only — no parsing/extraction (we never read the contents). None if the
     index is out of range. Used to serve an attachment for view/download in the UI."""
     i = 0
-    for part in message_from_bytes(raw).walk():
+    for part in parse_message(raw).walk():
         disp = str(part.get("Content-Disposition") or "").lower()
         filename = part.get_filename()
         if "attachment" not in disp and not filename:
             continue
         if i == index:
             payload = part.get_payload(decode=True) or b""
-            name = _decode_header(filename) if filename else f"anexo-{index}"
+            name = decode_value(filename) if filename else f"anexo-{index}"
             return name, (part.get_content_type() or "application/octet-stream"), payload
         i += 1
     return None
@@ -647,12 +630,12 @@ def attachment_media(raw: bytes, *, max_images: int = 4, min_image_bytes: int = 
     texts: list[dict[str, str]] = []
     imgs: list[dict[str, Any]] = []
     i = 0
-    for part in message_from_bytes(raw).walk():
+    for part in parse_message(raw).walk():
         disp = str(part.get("Content-Disposition") or "").lower()
         filename = part.get_filename()
         if "attachment" not in disp and not filename:
             continue
-        name = _decode_header(filename) if filename else f"anexo-{i}"
+        name = decode_value(filename) if filename else f"anexo-{i}"
         ctype = (part.get_content_type() or "").lower()
         payload = part.get_payload(decode=True) or b""
         i += 1
@@ -720,9 +703,9 @@ def _recover_from_body(body_text: str) -> tuple[str, str]:
 
 def parse_eml(raw: bytes) -> dict[str, Any]:
     """Raw RFC822 bytes -> trimmed envelope.v1 dict (see approach.md data flow)."""
-    msg = message_from_bytes(raw)
+    msg = parse_message(raw)
     body_text, has_html = _extract_body(msg)
-    from_parsed = _addr(str(msg.get("From") or ""))
+    from_parsed = _addr(header_text(msg, "From"))
     date_parsed = _date_iso(msg)
     # Recovery: some Outlook messages saved to Trash lose From/Date headers entirely.
     # The sender and date are only in the quoted body block — recover them as a fallback.
@@ -731,15 +714,15 @@ def parse_eml(raw: bytes) -> dict[str, Any]:
         if recovered_email:
             from_parsed = {"name": "", "email": recovered_email}
     return {
-        "message_id": canonical_id(msg.get("Message-ID"), raw),
-        "subject": _decode_header(msg.get("Subject")),
+        "message_id": canonical_id(header_text(msg, "Message-ID"), raw),
+        "subject": decode_value(msg.get("Subject")),
         "from": from_parsed,
-        "reply_to": _addr(str(msg.get("Reply-To") or "")),
-        "to": _addr_list(str(msg.get("To") or "")),
-        "cc": _addr_list(str(msg.get("Cc") or "")),
+        "reply_to": _addr(header_text(msg, "Reply-To")),
+        "to": _addr_list(header_text(msg, "To")),
+        "cc": _addr_list(header_text(msg, "Cc")),
         "date": date_parsed,
-        "in_reply_to": str(msg.get("In-Reply-To") or "").strip() or None,
-        "references": _references(str(msg.get("References") or "")),
+        "in_reply_to": header_text(msg, "In-Reply-To").strip() or None,
+        "references": _references(header_text(msg, "References")),
         "body_text": body_text,
         "has_html": has_html,
         "attachments": _attachments(msg),

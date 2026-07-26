@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed |
+| Status | Accepted (2026-07-25, via ADR-039) |
 | Date | 2026-06-16 |
 
 ## Context
@@ -33,12 +33,12 @@ authentication** today; the sibling materials-costing app is LAN-reachable but s
 
 ## Consequences
 
-- **Status path:** **Still Proposed** (2026-06-23). Decisions 2 + 4 (no inbound port; the worker
+- **Status path:** **Accepted 2026-07-25** — decisions 1 + 3 shipped in [ADR-039](adr-039-people-auth-and-the-default-deny-gate.md), which **supersedes decision 3's "single shared secret"** with per-person accounts (scrypt credentials, revocable sessions, admin-created invites) and makes the LAN bind **opt-in** (`--host` + opt-in TLS) rather than the default. Decisions 2 + 4 are unchanged and still hold. Historical note (2026-06-23): Decisions 2 + 4 (no inbound port; the worker
   bypasses the HTTP surface via the store seam) are **shipped**; decisions 1 + 3 (LAN bind + the app's
   **first auth gate**) are **not yet built** — `serve` still defaults to `127.0.0.1` loopback with no
   authentication, matching the live README/CLAUDE.md. The conversational-intake build (M1–M3 +
   Increments 1–2) did **not** require them (the bot needs no inbound port), so they were deliberately
-  left for a later milestone; this ADR graduates to **Accepted only when the auth gate + LAN bind ship**.
+  left for a later milestone; this ADR graduated to **Accepted** when the auth gate + LAN bind shipped (ADR-039).
 - **Net-new (when built):** the app gains its first auth layer; until now its security model *is* the
   loopback bind. The threat model shifts from "physical access to the host" to "trusted-LAN + a single
   shared secret."

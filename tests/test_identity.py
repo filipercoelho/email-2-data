@@ -28,3 +28,17 @@ def test_fetch_and_envelope_agree():
 def test_safe_filename_is_flat():
     fn = safe_filename("mid:<a/b c>@host")
     assert "/" not in fn and " " not in fn and fn.endswith(".eml")
+
+
+RAW_8BIT_MID = b"Message-ID: <ol\xc3\xa1@example.pt>\r\nSubject: teste\r\n\r\nbody\r\n"
+
+
+def test_raw_8bit_message_id_does_not_crash_the_id_derivation():
+    """The default parser returns a Header here, which has no .strip() — one out-of-spec header
+    used to abort the whole fetch with AttributeError (ADR-043)."""
+    from email2data.envelope import parse_eml
+
+    cid = canonical_id_from_raw(RAW_8BIT_MID)
+    assert cid == "mid:olá@example.pt"
+    assert cid == parse_eml(RAW_8BIT_MID)["message_id"]   # fetch and envelope must still agree
+    cid.encode("utf-8")                                   # storable: no surrogates left behind

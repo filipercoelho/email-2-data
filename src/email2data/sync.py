@@ -8,6 +8,9 @@ This module adds the "since last retrieve" cursor for fetch (per-mailbox IMAP UI
 ``fetch.py``) and a single ``run_sync`` that pulls only new mail then classifies only the new emails.
 Triage's own incremental gate lives in ``cascade.triage_corpus`` (it keys off results.jsonl, the
 source of truth — no second cursor to drift).
+
+It also owns ``message_scope`` (ADR-038): which of our inboxes each message reached, the durable
+fact a per-user visibility layer filters on. Derivation lives in ``scopes.py``; only storage is here.
 """
 
 from __future__ import annotations
@@ -28,14 +31,47 @@ CREATE TABLE IF NOT EXISTS fetch_cursor (
     updated_ts   TEXT,
     PRIMARY KEY (account_id, mailbox)
 );
+
+-- Which of OUR inboxes a message reached (ADR-038). One row per (message, address): a message CC'd
+-- to two of our mailboxes gets two rows, and a thread's visibility scope is the UNION over its
+-- messages — so a shared thread is never hidden from one of its legitimate readers.
+--
+-- ``address`` is the scope token and is deliberately an ADDRESS, not a configured account id: mail
+-- reaches margarida.reis@ / carmen.martins@ / lindoservico@, which are real inboxes we do NOT
+-- fetch, and keying on the address lets those be granted without inventing a fetch account.
+--
+-- ``source`` records the EVIDENCE CLASS, per the PROFILE.md FACT/INFERENCE/UNKNOWN rule:
+--   'fetch'       FACT      — the account we authenticated as when we cached it (strongest)
+--   'header'      FACT      — the server's own Envelope-to / Delivered-To / X-Original-To
+--   'participant' INFERENCE — one of our addresses in From/To/Cc/Reply-To (no delivery header)
+-- A message with no row at all is UNKNOWN and folds to scopes.SCOPE_UNATTRIBUTED (admin-visible).
+-- Stronger sources overwrite weaker ones; the reverse is refused (see ``set_message_scopes``).
+CREATE TABLE IF NOT EXISTS message_scope (
+    message_id  TEXT NOT NULL,       -- identity.canonical_id ("mid:..." / "sha256:...")
+    address     TEXT NOT NULL,       -- lowercased mailbox address (the grantable scope token)
+    source      TEXT NOT NULL,       -- 'fetch' | 'header' | 'participant'
+    updated_ts  TEXT,
+    PRIMARY KEY (message_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_scope_address ON message_scope(address);
 """
+
+# Evidence ranking for ``message_scope.source``. A re-attribution may only move UP this ladder, so a
+# cheap participant guess can never overwrite what the IMAP server actually told us at fetch time.
+# Lives beside the schema because the ordering IS part of the table's contract.
+SOURCE_RANK = {"participant": 1, "header": 2, "fetch": 3}
 
 
 class SyncStore:
-    """Per-(account, mailbox) IMAP UID watermark. Lives at ``out/sync.db``.
+    """Per-(account, mailbox) IMAP UID watermark + per-message inbox attribution. ``out/sync.db``.
 
     Mirrors the lightweight style of ``store.KnowledgeStore`` (check_same_thread=False so the webapp
     threadpool / startup thread can share it safely).
+
+    This DB is regenerable by design. Losing it costs the tier-1 ``fetch`` attribution rows, which
+    ``scopes.backfill`` then re-derives from headers at tier 2/3 — strictly *less* precise, never
+    wrong, and it degrades toward the admin-visible bucket rather than toward hiding mail.
     """
 
     def __init__(self, db_path: str | Path) -> None:
@@ -73,6 +109,90 @@ class SyncStore:
              datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         self._conn.commit()
+
+    # -- inbox attribution (ADR-038) -----------------------------------------------------------
+
+    def set_message_scopes(self, message_id: str, addresses: list[str], source: str) -> int:
+        """Record ``message_id`` as having reached each of ``addresses``. Returns rows written.
+
+        **Upgrade-only**: an existing row is overwritten only when ``source`` outranks the stored one
+        (``SOURCE_RANK``). That is what makes ``scopes.backfill`` safe to re-run alongside a live
+        fetch — a header/participant derivation can never clobber the account we authenticated as.
+        Re-recording the same (message, address, source) writes nothing, so callers are idempotent.
+        """
+        assert self._conn is not None, "SyncStore not connected"
+        rank = SOURCE_RANK.get(source)
+        if rank is None:
+            raise ValueError(f"unknown message_scope source {source!r} "
+                             f"(expected one of {sorted(SOURCE_RANK)})")
+        if not message_id:
+            return 0
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        written = 0
+        for address in dict.fromkeys(
+            a.strip().lower() for a in (addresses or []) if a and a.strip()
+        ):
+            row = self._conn.execute(
+                "SELECT source FROM message_scope WHERE message_id=? AND address=?",
+                (message_id, address),
+            ).fetchone()
+            if row is not None and SOURCE_RANK.get(row[0], 0) >= rank:
+                continue  # already attributed by equal-or-stronger evidence
+            self._conn.execute(
+                "INSERT INTO message_scope (message_id, address, source, updated_ts) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(message_id, address) DO UPDATE SET "
+                "source=excluded.source, updated_ts=excluded.updated_ts",
+                (message_id, address, source, now),
+            )
+            written += 1
+        if written:
+            self._conn.commit()
+        return written
+
+    def message_scopes(self, message_id: str) -> dict[str, str]:
+        """``{address: source}`` for one message — ``{}`` when unattributed."""
+        assert self._conn is not None, "SyncStore not connected"
+        rows = self._conn.execute(
+            "SELECT address, source FROM message_scope WHERE message_id=? ORDER BY address",
+            (message_id,),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def all_message_scopes(self) -> dict[str, dict[str, str]]:
+        """``{message_id: {address: source}}`` for every attributed message.
+
+        One query for the whole table: the caller (``scopes.thread_scopes``) needs it per page
+        render, and the row count is bounded by the corpus (~hundreds), so this stays cheaper than
+        a per-thread query fan-out.
+        """
+        assert self._conn is not None, "SyncStore not connected"
+        out: dict[str, dict[str, str]] = {}
+        for message_id, address, source in self._conn.execute(
+            "SELECT message_id, address, source FROM message_scope ORDER BY message_id, address"
+        ):
+            out.setdefault(message_id, {})[address] = source
+        return out
+
+    def scope_address_counts(self) -> dict[str, int]:
+        """``{address: attributed_message_count}``, for the ``scopes status`` report + admin UI."""
+        assert self._conn is not None, "SyncStore not connected"
+        return {
+            r[0]: int(r[1])
+            for r in self._conn.execute(
+                "SELECT address, COUNT(*) FROM message_scope GROUP BY address ORDER BY COUNT(*) DESC"
+            )
+        }
+
+    def scope_source_counts(self) -> dict[str, int]:
+        """``{source: row_count}`` — how much of the attribution is FACT vs INFERENCE."""
+        assert self._conn is not None, "SyncStore not connected"
+        return {
+            r[0]: int(r[1])
+            for r in self._conn.execute(
+                "SELECT source, COUNT(*) FROM message_scope GROUP BY source"
+            )
+        }
 
 
 def run_sync(

@@ -26,6 +26,16 @@ pytest.importorskip("playwright.sync_api")
 
 from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
+from conftest import AuthedBrowser, e2e_headers, e2e_sign_in  # noqa: E402
+
+_TOKEN: dict[str, str] = {}   # filled by live_app, read lazily by AuthedBrowser
+
+def _get(url: str):
+    """Authenticated GET against the live server (the ADR-039 gate applies to /api too)."""
+    return urllib.request.urlopen(
+        urllib.request.Request(url, headers=e2e_headers(_TOKEN.get("v", ""))))
+
+
 uvicorn = pytest.importorskip("uvicorn")
 
 from email2data.crm import CrmStore  # noqa: E402
@@ -61,7 +71,7 @@ def _set_field(base: str, pid: str, field: str, value: str) -> None:
     urllib.request.urlopen(urllib.request.Request(
         f"{base}/api/projects/{pid}/field", method="POST",
         data=json.dumps({"field": field, "value": value}).encode(),
-        headers={"Content-Type": "application/json"}))
+        headers=e2e_headers(_TOKEN.get("v", ""), {"Content-Type": "application/json"})))
 
 
 def _reset_deadline(base: str, pid: str) -> None:
@@ -77,6 +87,7 @@ def live_app(tmp_path_factory):
     ws = Workspace(tmp_path_factory.mktemp("ws") / "w.db").connect()
     app = create_app({"team": ["Diogo"]}, workspace=ws, jobspecs={}, prepared=([], [], {}),
                      reply_pb="", crm_store=_seed_crm())
+    _TOKEN["v"] = e2e_sign_in(app)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -89,9 +100,10 @@ def live_app(tmp_path_factory):
         pytest.skip("uvicorn did not start in time")
     base = f"http://127.0.0.1:{port}"
     # Create one project through the real API so the Projetos list has a row to click.
-    req = urllib.request.Request(f"{base}/api/projects", method="POST",
-                                 data=json.dumps({"title": "Troféus Acme"}).encode(),
-                                 headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        f"{base}/api/projects", method="POST",
+        data=json.dumps({"title": "Troféus Acme"}).encode(),
+        headers=e2e_headers(_TOKEN.get("v", ""), {"Content-Type": "application/json"}))
     pid = json.loads(urllib.request.urlopen(req).read())["project_id"]
     yield base, pid
     server.should_exit = True
@@ -110,7 +122,7 @@ def browser():
                 b = None
         if b is None:
             pytest.skip("no Chrome/Chromium available for Playwright")
-        yield b
+        yield AuthedBrowser(b, lambda: _TOKEN.get("v", ""))
         b.close()
 
 
@@ -150,7 +162,7 @@ def test_fila_focus_writes_thread_param_and_mounts_dossier(live_app, browser):
     base, _pid = live_app
     page = browser.new_page()
     try:
-        page.goto(f"{base}/")
+        page.goto(f"{base}/fila")
         page.click(".row .rname")                       # anywhere on the row focuses + opens
         page.wait_for_function("location.search.includes('thread=')", timeout=5000)
         assert "thread=mid%3At1" in page.url
@@ -269,8 +281,8 @@ def test_prazo_is_a_real_datetime_picker_without_losing_a_non_iso_value(live_app
         assert prazo.get_attribute("type") == "datetime-local"
         assert prazo.input_value() == "2026-09-02T00:00"
         # ...and the widening is DISPLAY-only: an untouched field writes nothing back to the store
-        stored = json.loads(urllib.request.urlopen(
-            f"{base}/api/projects/{pid}").read())["job_fields"]["deadline"]["value"]
+        stored = json.loads(
+            _get(f"{base}/api/projects/{pid}").read())["job_fields"]["deadline"]["value"]
         assert stored == "2026-09-02", f"display widening leaked into the store: {stored!r}"
         # a free-text deadline (LLM/legacy) must stay visible rather than vanish into a picker
         _set_field(base, pid, "deadline", "meados de agosto")
@@ -323,16 +335,75 @@ def test_clicking_anywhere_on_a_date_field_opens_the_picker(live_app, browser):
 
 
 def test_fila_counterparty_filter_is_deep_linkable(live_app, browser):
-    """Loading /?counterparty=CLIENT applies the filter from the URL (the row survives); an unknown
-    counterparty filters everything out — proving the query param actually drives the view."""
+    """Loading /fila?counterparty=CLIENT applies the filter from the URL (the row survives); an unknown
+    counterparty filters everything out — proving the query param actually drives the view.
+
+    The path moved with ADR-044; the query contract did not. syncURL() rebuilds the address from
+    location.pathname, so every Fila deep link works unchanged under the new prefix."""
     base, _pid = live_app
     page = browser.new_page()
     try:
-        page.goto(f"{base}/?counterparty=CLIENT")
+        page.goto(f"{base}/fila?counterparty=CLIENT")
         page.wait_for_selector(".row", timeout=5000)
         assert page.locator(".row").count() == 1
-        page.goto(f"{base}/?counterparty=NOPE")
+        page.goto(f"{base}/fila?counterparty=NOPE")
         page.wait_for_function("document.querySelectorAll('.row').length === 0", timeout=5000)
         assert page.locator(".row").count() == 0
+    finally:
+        page.close()
+
+
+def test_the_mail_handoff_builds_a_real_mailto_and_never_stacks_re(live_app, browser):
+    """ADR-047: the `mailto:` hand-off, EXECUTED rather than grepped.
+
+    `test_fila.py` asserts the regex literal is shipped; only a browser can run it. The stacking case
+    is the one worth the browser: a reply to a reply must not become «Re: Re: Re: Orçamento», and the
+    near-misses matter as much as the hits — "Reunião de segunda" starts with "Re" and IS a fresh
+    subject, so it must still get a prefix.
+
+    Deliberately does NOT click the button: `location.href='mailto:'` hands control to the OS mail
+    client, which in CI is either absent or a dialog nothing can dismiss. The URL the click would
+    navigate to is built from the same shipped functions, which is the assertion that has content —
+    the click itself is one `location.href` assignment.
+    """
+    base, _pid = live_app
+    page = browser.new_page()
+    try:
+        page.goto(f"{base}/fila")
+        page.wait_for_selector(".row", timeout=5000)
+        subjects = page.evaluate("""() => {
+            const f = _replySubject;
+            return {
+                fresh:      f({subject: "Orçamento 50 placas"}),
+                already:    f({subject: "Re: Orçamento"}),
+                upper:      f({subject: "RE: Orçamento"}),
+                nospace:    f({subject: "re:Orçamento"}),
+                forwarded:  f({subject: "Fwd: Orçamento"}),
+                pt_forward: f({subject: "Enc: Orçamento"}),
+                near_miss:  f({subject: "Reunião de segunda"}),
+                no_colon:   f({subject: "Resposta ao pedido"}),
+                empty:      f({subject: ""}),
+            };
+        }""")
+        assert subjects["fresh"] == "Re: Orçamento 50 placas"
+        for key in ("already", "upper", "nospace", "forwarded", "pt_forward"):
+            assert not subjects[key].lower().startswith("re: re"), (key, subjects[key])
+            assert subjects[key].count(":") == 1, (key, subjects[key])
+        # "Re"/"Res" without a colon is a real subject, not a prefix — it must still be prefixed.
+        assert subjects["near_miss"] == "Re: Reunião de segunda"
+        assert subjects["no_colon"] == "Re: Resposta ao pedido"
+        assert subjects["empty"] == ""
+
+        # …and the URL the button navigates to carries all three parts, escaped as a component.
+        url = page.evaluate("""() => {
+            const r = view()[0];
+            r._draft = "Bom dia & obrigado #1";          // & and # would truncate a mis-escaped body
+            return 'mailto:' + encodeURIComponent(r.contact || '')
+                 + '?subject=' + encodeURIComponent(_replySubject(r))
+                 + '&body=' + encodeURIComponent(r._draft);
+        }""")
+        assert url.startswith("mailto:maria%40acme.pt?subject=Re%3A%20")
+        assert "%26" in url and "%23" in url, "& / # reached the URL unescaped — the body truncates"
+        assert url.count("&body=") == 1
     finally:
         page.close()

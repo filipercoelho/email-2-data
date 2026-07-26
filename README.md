@@ -33,6 +33,75 @@ The classifier brain is **editable config, not code**: [config/triage_playbook.m
 [config/gazetteer.csv](config/gazetteer.csv), [config/spec_playbook.md](config/spec_playbook.md),
 [config/reply_playbook.md](config/reply_playbook.md).
 
+## Signing in (ADR-039 · ADR-040 · ADR-041)
+
+The app is **default-deny**: every page and API route requires a session, and a signed-out visitor
+receives the login page and nothing else — no triage data is rendered, not even hidden.
+
+**Day to day, people are managed in the app** — **Administração → Pessoas** (admin-only) adds a
+person, promotes or demotes, deactivates a leaver, edits inbox grants, and mints an invite link you
+copy straight from the page. The CLI below is the bootstrap and the recovery path.
+
+```bash
+# first run, once — creates the first administrator (the /setup page 404s afterwards)
+docker compose exec email2data email2data auth setup --name Filipe
+
+# add the rest
+docker compose exec email2data email2data auth add --name Pedro --login \
+    --scopes pedro.ferreira@lindoservico.pt,orcamentos@lindoservico.pt
+docker compose exec email2data email2data auth add --name Rita --responsible Filipe   # no login
+docker compose exec email2data email2data auth invite --name Pedro   # single-use link, 72h
+docker compose exec email2data email2data auth reset  --name Pedro   # temporary password
+docker compose exec email2data email2data auth list
+```
+
+**People vs users.** Anyone in `people` can be assigned work. `--login` grants platform access;
+without it the person is still assignable but **must** name a `--responsible` user who is accountable
+for their queue — a database constraint, so work can never land in a queue nobody opens.
+
+**One roster (ADR-041).** The owner picker *is* `people` — every active person, nobody else.
+`settings.json team` and the legacy in-app roster are a **seed**, folded in once (as assignable-only,
+accountable to the first admin) and then never read again; remove someone by **deactivating** them in
+Administração, not by editing config.
+
+**Everyone owns their own account.** The header names who is signed in; **«A minha conta»** changes
+your password (the current one is required, and the other sessions end while yours survives), lists
+your open sessions, and ends the rest. `auth reset` hands out a **temporary** password — the app then
+holds every other page until that person replaces it.
+
+**Sessions are rows, not signed tokens.** Logout revokes server-side, so a copied cookie dies with
+it; `auth revoke --name X` ends every session that person has. There is no server secret to manage.
+
+**The install can never be left without an administrator.** Demoting, deactivating or removing the
+last active admin is refused, in the store — `/setup` 404s once any credential exists, so that state
+cannot be repaired from the app at all. You also cannot demote or deactivate *yourself*: ask another
+admin, or you would be locked out of the screen you would need to undo it.
+
+### Reaching it from another workstation
+
+Loopback stays the default. To expose it on the workshop LAN, generate a certificate and bind wide —
+both opt-in, and intended to be turned on together:
+
+```bash
+bin/make-cert.sh                       # self-signed, SANs for loopback + this host's LAN IP
+email2data serve --host 0.0.0.0 --port 8042 \
+    --tls-cert certs/server.crt --tls-key certs/server.key
+```
+
+A LAN bind **without** `--tls-*` warns loudly: the session cookie would travel in clear text. The
+self-signed certificate encrypts the transport but does not prove identity, so each workstation shows
+a one-time browser warning. **"Never public" is unchanged** — no port-forward, no inbound webhook.
+
+### Before any migration
+
+```bash
+./bin/backup-workspace.sh              # VACUUM INTO + verified restore of the precious DB
+```
+
+`workspace.db` runs in WAL mode, so a bare `cp` of the `.db` yields an **empty** database — the live
+rows are in the `-wal` sidecar. This script asks SQLite for a consistent copy and then re-opens it to
+prove the row counts match.
+
 ## Quick start
 
 ```bash

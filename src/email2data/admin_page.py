@@ -169,6 +169,7 @@ _BODY = """
   </div>
   <div id="_sync"></div>
   <div id="_accts"></div>
+  <div id="_people"></div>
   <div class="hint">
     As credenciais vivem no <b>.env</b> e são referidas só pelo <b>nome</b> da variável —
     esta página nunca lê, mostra nem guarda passwords.
@@ -244,6 +245,24 @@ _EXTRA_CSS = """
     border-radius:12px;padding:11px 14px;margin-top:12px;display:flex;align-items:center;gap:9px;
     flex-wrap:wrap;box-shadow:0 -2px 10px rgba(20,24,28,.07)}
   .savebar .smut{flex:1;min-width:180px}
+  /* people (ADR-041) */
+  .prow{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 0;border-bottom:1px solid var(--bd2)}
+  .prow:last-of-type{border-bottom:none}
+  .pnm{font-weight:650;font-size:13.5px;min-width:150px}
+  .prow.off .pnm{color:var(--mut2);text-decoration:line-through}
+  .pacts{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+  .pacts .act-btn{font-size:11.5px;padding:3px 9px}
+  .pscp{width:100%;font-size:11.5px;color:var(--mut2);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .pscp .fin{max-width:340px;font-size:11.5px;padding:3px 8px}
+  .pinv{margin-top:10px;border:1px solid var(--green-line);background:var(--green-bg);
+    border-radius:10px;padding:9px 11px;font-size:12px}
+  .pinv code{display:block;margin:5px 0;font-family:ui-monospace,monospace;font-size:11.5px;
+    word-break:break-all;color:var(--tx)}
+  .padd{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:11px}
+  .padd .fin{flex:0 1 190px}
+  .padd select{border:1px solid var(--bd);border-radius:7px;padding:5px 9px;font-size:12.5px;
+    color:var(--tx);background:var(--card);font-family:inherit}
+  .perr{margin-top:9px;font-size:12px;color:var(--red);line-height:1.5}
 """
 
 _LENS_JS = r"""
@@ -339,15 +358,13 @@ function renderSync(){
     + '</div></div>';
 }
 
-function startPoll(){ if(!_pollT) _pollT = setInterval(pollSync, 2000); }
+function startPoll(){ if(!_pollT) _pollT = everyMs(pollSync, 2000); }
 function stopPoll(){ if(_pollT){ clearInterval(_pollT); _pollT = null; } }
 
 async function pollSync(){
   try{
-    const r = await fetch('/api/sync/status', {cache:'no-store'});
-    if(!r.ok) return;
     const was = sync.running || _busy;
-    sync = normSync(await r.json());
+    sync = normSync(await getJSON('/api/sync/status'));
     if(_busy) sync.running = true;          /* our own POST is still in flight */
     renderSync();
     if(was && !sync.running && !_busy){ stopPoll(); toast(S.sincronizado); loadAccounts(); }
@@ -362,20 +379,17 @@ async function runSync(){
   const body = {do_fetch: true, do_triage: (_mode === 'full')};
   if(_scope) body.account_id = _scope;
   try{
-    const r = await fetch('/api/sync', {method:'POST', headers:{'Content-Type':'application/json'},
-                                        body: JSON.stringify(body)});
-    if(r.status === 409){ toast(S.syncEmCurso); return; }   /* someone else is syncing — keep polling */
-    const d = r.ok ? await r.json().catch(()=>({})) : {};
-    if(!r.ok){
-      sync = normSync({running:false, last:{ts:new Date().toISOString(), error:'HTTP ' + r.status}});
-      toast(S.syncFalhou); stopPoll(); return;
-    }
+    const d = await post('/api/sync', body);
     sync = normSync({running:false, last:{ts: new Date().toISOString(), counts: d,
                                           error: d.error || '', failures: d.account_failures || {}}});
     stopPoll(); toast(S.sincronizado); announce('sincronização concluída');
     await loadAccounts();
   }catch(e){
-    sync = normSync({running:false, last:{ts:new Date().toISOString(), error:'falhou'}});
+    /* 409 = someone else already holds the sync lock. Keep polling and leave the state alone —
+       recording it as a failed run would put a red "error" on a sync that is running fine. */
+    if(e && e.status === 409){ toast(S.syncEmCurso); return; }
+    sync = normSync({running:false, last:{ts:new Date().toISOString(),
+                                          error:(e && e.status) ? ('HTTP ' + e.status) : 'falhou'}});
     toast(S.syncFalhou); stopPoll();
   }finally{
     _busy = false; _startedAt = 0;
@@ -539,7 +553,7 @@ async function saveAccounts(){
     draft = null;
     await loadAccounts();
     toast('contas guardadas'); announce('contas guardadas');
-  }catch(e){ toast(S.revertido); }
+  }catch(e){ toast(S.falhou); }
   finally{ _busy = false; }
 }
 
@@ -575,9 +589,7 @@ function renderAccounts(){
 
 async function loadAccounts(){
   try{
-    const r = await fetch('/api/admin/accounts', {cache:'no-store'});
-    if(!r.ok) return;
-    const d = await r.json();
+    const d = await getJSON('/api/admin/accounts');
     if(Array.isArray(d.accounts)) accounts = d.accounts;
     if(d.sync && !_busy && !sync.running) sync = normSync(d.sync);
     if(!draft) renderAccounts();   /* never clobber an open editor mid-typing */
@@ -585,9 +597,180 @@ async function loadAccounts(){
   }catch(e){ /* offline — keep showing what we have */ }
 }
 
+/* ── pessoas (ADR-041) ──────────────────────────────────────────────────────
+   The roster, editable. Everything here used to be hand-written SQL against the PRECIOUS store —
+   the one holding human decisions, with no rebuild path.
+
+   Two rules this section keeps. (1) A refusal is SHOWN: every rule lives server-side, and the reason
+   it gives is rendered verbatim (failMsg) rather than flattened to «falhou» — «Rita já existe» and
+   «essa caixa não é desta instalação» are the difference between fixing it and guessing. (2) Nothing
+   is optimistic: the server's fresh roster replaces the local one on every write, so the screen can
+   never show a change the database refused. */
+
+let people = [];
+let knownScopes = [];
+let pErr = '';                    /* the last server refusal, rendered in place */
+let pInvite = null;               /* {name, url} — a freshly minted invite, shown to be copied */
+
+function roleLabel(p){
+  if(!p.active) return 'inativo';
+  if(p.is_admin) return 'administrador';
+  return p.can_login ? 'utilizador' : 'sem acesso';
+}
+
+function personRow(p){
+  const mine = p.person_id === ME;
+  const badges = [];
+  if(!p.active) badges.push('<span class="ab bad">inativo</span>');
+  else if(p.is_admin) badges.push('<span class="ab ok">admin</span>');
+  if(p.can_login && p.active && !p.has_credential) badges.push('<span class="chip">convite pendente</span>');
+  if(p.must_change) badges.push('<span class="chip">tem de mudar a palavra-passe</span>');
+  /* Stated, not implied. Someone who can sign in but has no address cannot use «Esqueceste-te da
+     palavra-passe?» at all (ADR-042) — and the way you find that out otherwise is by being locked
+     out. A quiet blank field would leave the gap invisible on exactly the screen that can close it. */
+  if(p.can_login && p.active && !p.email) badges.push('<span class="chip">sem email — não pode recuperar</span>');
+  if(!p.can_login && p.responsible) badges.push('<span class="chip">responsável: ' + esc(p.responsible) + '</span>');
+  if(p.sessions) badges.push('<span class="chip"><b>' + esc(p.sessions) + '</b> sessão(ões)</span>');
+  const acts = [];
+  if(p.active && p.can_login && !mine) acts.push(btn(p.person_id, p.is_admin ? 'demote' : 'promote',
+                                                     p.is_admin ? 'Despromover' : 'Promover a admin'));
+  if(p.active && p.can_login) acts.push(btn(p.person_id, 'invite', 'Convite'));
+  /* Not on your own row. The server refuses all three (you would be locked out of the very screen
+     you would need to undo it), and offering a button that always fails is the ADR-040 defect —
+     the door locked and still shown — reappearing one screen over. */
+  if(!mine){
+    acts.push(btn(p.person_id, p.active ? 'off' : 'on', p.active ? 'Desativar' : 'Reativar'));
+    acts.push(btn(p.person_id, 'rm', 'Remover', 'danger'));
+  }else{
+    acts.push('<span class="auser">és tu — outro administrador trata do resto</span>');
+  }
+  /* Scopes are shown for everyone who can sign in — including when empty, which is a fact worth
+     stating rather than an empty row that reads as "not loaded". */
+  const scp = p.can_login
+    ? '<div class="pscp">Caixas:'
+      + '<input class="fin" data-scp="' + esc(p.person_id) + '" value="' + esc((p.scopes || []).join(', ')) + '"'
+      + ' placeholder="' + esc(knownScopes.join(', ')) + '">'
+      + btn(p.person_id, 'scopes', 'Guardar caixas') + '</div>'
+    : '';
+  /* Only for people who can sign in: an address exists here to receive a reset link, and someone
+     who cannot sign in has nothing to reset. Shown even when empty — see the badge above. */
+  const eml = p.can_login
+    ? '<div class="pscp">Email:'
+      + '<input class="fin" type="email" data-eml="' + esc(p.person_id) + '" value="' + esc(p.email || '') + '"'
+      + ' placeholder="nome@lindoservico.pt" autocomplete="off">'
+      + btn(p.person_id, 'email', 'Guardar email') + '</div>'
+    : '';
+  return '<div class="prow' + (p.active ? '' : ' off') + '">'
+       + '<span class="pnm">' + esc(p.name) + '</span>'
+       + '<span class="auser">' + esc(roleLabel(p)) + '</span>'
+       + badges.join(' ')
+       + '<span class="pacts">' + acts.join('') + '</span>'
+       + eml + scp + '</div>';
+}
+
+function btn(id, act, label, cls){
+  return '<button class="act-btn' + (cls ? ' ' + cls : '') + '" data-pact="' + esc(act)
+       + '" data-pid="' + esc(id) + '">' + esc(label) + '</button>';
+}
+
+function renderPeople(){
+  const el = $('#_people'); if(!el) return;
+  const active = people.filter(p => p.active).length;
+  el.innerHTML =
+      '<div class="asec"><div class="ahead">Pessoas '
+    + '<span class="sh">' + esc(active) + ' ativa(s) de ' + esc(people.length) + '</span></div>'
+    + '<div class="acard">'
+    + (people.length ? people.map(personRow).join('')
+                     : '<div class="smut">Ninguém no registo.</div>')
+    + '<div class="padd">'
+    + '<input class="fin" id="_pnm" placeholder="Nome">'
+    + '<select id="_pacc">'
+    + '<option value="login">Utilizador (entra na plataforma)</option>'
+    + '<option value="admin">Administrador</option>'
+    + '<option value="assign">Só atribuível (não entra)</option>'
+    + '</select>'
+    + '<input class="fin" id="_presp" placeholder="Responsável (se não entra)">'
+    + '<button class="act-btn accept" data-pact="add">+ Adicionar pessoa</button>'
+    + '</div>'
+    + (pErr ? '<div class="perr">' + esc(pErr) + '</div>' : '')
+    + (pInvite ? '<div class="pinv">Convite para <b>' + esc(pInvite.name) + '</b> — uso único, '
+                 + esc(pInvite.expires_hours) + 'h. Abre-o no endereço onde a app está a servir:'
+                 + '<code>' + esc(pInvite.url) + '</code>'
+                 + '<button class="act-btn" data-pact="copy">Copiar</button></div>' : '')
+    + '<div class="smut" style="margin-top:10px">Desativar preserva o histórico de quem decidiu o quê; '
+    + 'remover só é possível para quem nunca ficou com nada atribuído.</div>'
+    + '</div></div>';
+}
+
+async function loadPeople(){
+  try{
+    const d = await getJSON('/api/admin/people');
+    if(Array.isArray(d.people)) people = d.people;
+    if(Array.isArray(d.known_scopes)) knownScopes = d.known_scopes;
+    renderPeople();
+  }catch(e){ /* the shell already raised the curtain on 401/403 */ }
+}
+
+/* One writer for every roster change: run it, adopt the server's roster, show its reason if it
+   refused. No branch here writes to `people` on its own. */
+async function peopleWrite(run, done){
+  if(_busy) return;
+  _busy = true; pErr = '';
+  try{
+    const d = await run();
+    if(d && Array.isArray(d.people)) people = d.people;
+    if(done) done(d);
+    renderPeople();
+    announce(done ? '' : 'registo atualizado');
+  }catch(e){
+    pErr = failMsg(e, 'não foi possível guardar');
+    renderPeople();
+  }finally{ _busy = false; }
+}
+
+function addPerson(){
+  const name = ($('#_pnm') || {}).value || '';
+  const access = ($('#_pacc') || {}).value || 'login';
+  const responsible = ($('#_presp') || {}).value || '';
+  pInvite = null;
+  peopleWrite(() => post('/api/admin/people', {name: name, access: access, responsible: responsible}));
+}
+
+function removePerson(pid){
+  const p = people.find(x => x.person_id === pid);
+  if(!confirm('Remover ' + ((p && p.name) || 'esta pessoa') + ' do registo?')) return;
+  pInvite = null;
+  peopleWrite(() => del('/api/admin/people/' + encodeURIComponent(pid)));
+}
+
+function inviteFor(pid){
+  peopleWrite(() => post('/api/admin/people/' + encodeURIComponent(pid) + '/convite', {}),
+              d => { pInvite = d; });
+}
+
+function saveScopes(pid){
+  const el = document.querySelector('[data-scp="' + pid + '"]');
+  const wanted = (el ? el.value : '').split(',').map(s => s.trim()).filter(Boolean);
+  pInvite = null;
+  peopleWrite(() => post('/api/admin/people/' + encodeURIComponent(pid), {scopes: wanted}));
+}
+
+function saveEmail(pid){
+  const el = document.querySelector('[data-eml="' + pid + '"]');
+  pInvite = null;
+  /* Sent verbatim, including ''. Clearing is a real intent — "no address on file" — not a no-op,
+     and the store validates the shape so a typo is refused here rather than mailed into the void. */
+  peopleWrite(() => post('/api/admin/people/' + encodeURIComponent(pid), {email: el ? el.value : ''}));
+}
+
+function setPerson(pid, patch){
+  pInvite = null;
+  peopleWrite(() => post('/api/admin/people/' + encodeURIComponent(pid), patch));
+}
+
 /* ── lens contract ─────────────────────────────────────────────────────────── */
 
-function render(){ renderSync(); renderAccounts(); }
+function render(){ renderSync(); renderAccounts(); renderPeople(); loadPeople(); }
 
 function onKey(e){ /* no page-level shortcuts: this page is a form, typing must stay literal */ }
 
@@ -597,12 +780,15 @@ function paletteItems(q){
     {kind:'ação', label:'Sincronizar agora (só buscar)', run:()=>{ _mode='fetch'; renderSync(); runSync(); }},
     {kind:'ação', label:'Buscar + classificar', run:()=>{ _mode='full'; renderSync(); runSync(); }},
     {kind:'ação', label:'Editar contas', run:openEditor},
-    {kind:'ação', label:'Fila', run:()=>{ location.href='/'; }},
+    {kind:'ação', label:'Início', run:()=>{ location.href='/'; }},
+    {kind:'ação', label:'Fila', run:()=>{ location.href='/fila'; }},
     {kind:'ação', label:'Contrapartes', run:()=>{ location.href='/contrapartes'; }},
     {kind:'ação', label:'Projetos', run:()=>{ location.href='/projetos'; }},
     {kind:'ação', label:'Para ti', run:()=>{ location.href='/para-ti'; }},
     {kind:'ação', label:'Capturas', run:()=>{ location.href='/capturas'; }},
   ];
+  people.forEach(p => base.push({kind:'pessoa', label:p.name, sub:roleLabel(p),
+    run:()=>{ const el = document.querySelector('[data-scp="' + p.person_id + '"]'); if(el) el.focus(); }}));
   accounts.forEach(a => base.push({kind:'conta', label:a.id || a.username,
     sub:(a.mailboxes || []).length + ' caixas',
     run:()=>{ _scope = a.id; _mode = 'fetch'; renderSync(); }}));
@@ -643,8 +829,30 @@ $('#_accts').addEventListener('click', e => {
   else if(act === 'save') saveAccounts();
 });
 
+$('#_people').addEventListener('click', e => {
+  const b = e.target.closest('[data-pact]'); if(!b) return;
+  const act = b.dataset.pact, pid = b.dataset.pid;
+  if(act === 'add') addPerson();
+  else if(act === 'rm') removePerson(pid);
+  else if(act === 'invite') inviteFor(pid);
+  else if(act === 'scopes') saveScopes(pid);
+  else if(act === 'email') saveEmail(pid);
+  else if(act === 'promote') setPerson(pid, {is_admin: true});
+  else if(act === 'demote') setPerson(pid, {is_admin: false});
+  else if(act === 'off') setPerson(pid, {active: false});
+  else if(act === 'on') setPerson(pid, {active: true});
+  else if(act === 'copy' && pInvite){
+    /* The whole point of minting it here: the token never reaches a terminal, shell history, or the
+       chat someone would otherwise paste it into. */
+    const url = location.origin + pInvite.url;
+    if(navigator.clipboard) navigator.clipboard.writeText(url).then(
+      () => toast('convite copiado'), () => toast('copia à mão'));
+    else toast('copia à mão');
+  }
+});
+
 /* Tick the elapsed counter while a sync runs (cheap: one text node, no re-render). */
-setInterval(() => { const el = $('#_elapsed'); if(el) el.textContent = elapsedLabel(); }, 1000);
+everyMs(() => { const el = $('#_elapsed'); if(el) el.textContent = elapsedLabel(); }, 1000);
 /* If a sync was already running when the page loaded (startup thread, another tab), follow it. */
 if(sync.running){ _startedAt = Date.now(); startPoll(); }
 """
@@ -652,7 +860,8 @@ if(sync.running){ _startedAt = Date.now(); startPoll(); }
 
 def build_html(accounts: list[dict[str, Any]],
                sync: dict[str, Any] | None = None,
-               nav_counts: dict[str, int] | None = None) -> str:
+               nav_counts: dict[str, int] | None = None,
+               person: dict[str, Any] | None = None) -> str:
     """Render the Administração page (/admin).
 
     ``accounts`` — the account rows from ``GET /api/admin/accounts``. They are re-projected through
@@ -664,8 +873,13 @@ def build_html(accounts: list[dict[str, Any]],
         "Administração", "admin", _BODY,
         embeds={"accounts": [_account_view(a) for a in (accounts or [])],
                 "sync": _sync_view(sync),
-                "count_labels": _COUNT_LABELS},
+                "count_labels": _COUNT_LABELS,
+                # Whose screen this is (ADR-041). Embedded rather than fetched, so the roster never
+                # renders — even for one frame — offering me the buttons the server refuses on my
+                # own row. An id, nothing else: it is already in every other page's account menu.
+                "me": str((person or {}).get("person_id", "") or "")},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
         extra_css=_EXTRA_CSS,
+        person=person,
     )

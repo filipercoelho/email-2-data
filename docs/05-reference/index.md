@@ -10,10 +10,13 @@ invalidates them.
 | [data-stores.md](data-stores.md) | `out/` files and the three SQLite stores, their recoverability tiers, migration discipline, dangling refs, and the Project lifecycle. |
 | [cockpit-design.md](cockpit-design.md) | The cockpit / triage-delivery UI spec (Fila, Para Ti, Projetos, Contrapartes) — layout, trust grammar, motion, a11y. |
 | [fila-mesa-design.md](fila-mesa-design.md) | The Fila «Mesa com Foco» redesign reference ([ADR-033](../03-decisions/adr-033-fila-mesa-com-foco.md)) — regions, command strip, counterparty tabs, vistas, row anatomy, dossier, vertical conversation timeline, momentum definition, keyboard map, contextual-R mapping, `/api/fila` data-contract additions, PT-PT strings. |
+| [attachment-funnel.md](attachment-funnel.md) | The thread attachment funnel ([ADR-046](../03-decisions/adr-046-the-attachment-funnel-bands-files-by-what-they-are-for.md)) — the `attachments` block on `/api/thread`, the item shape, the three-band rule and its calibrated constants, the sha256 dedup key, and the index-stability invariant that keeps every 📎 link pointing at its own bytes. |
+| [reply-signature.md](reply-signature.md) | The per-person reply signature ([ADR-047](../03-decisions/adr-047-the-signature-belongs-to-the-person-not-the-playbook.md)) — the closed placeholder vocabulary, the empty-line rule, where the block is applied (and where it deliberately is not), the `mailto:` hand-off from the email detail panel, and the v12 `people` columns. |
 | [intake-bot-contract.md](intake-bot-contract.md) | The Telegram intake surface — commands, accepted message kinds, the reply sequence (incl. the mandatory voice transcription report), per-kind errors, and the pick-list button format. |
 | [client-email-composer.md](client-email-composer.md) | The Projetos client-email composer — the 8-purpose registry + input kinds, editable templates/reasons, the `/draft[/polish]` route shapes, the `_FACT_RE` verbatim-number guard (with its FP/FN boundaries), the PT/EN/FR/ES output language, and the `POST /api/translate` reading aid. |
 
 See also the editable runtime config (not code, not docs): `config/triage_playbook.md`,
 `config/gazetteer.csv`, `config/spec_playbook.md`, `config/reply_playbook.md`,
 `config/client_email_*_template.md`, `config/client_email_reject_reasons.md`,
-`config/client_email_polish_playbook.md`, `config/translation_playbook.md`.
+`config/client_email_polish_playbook.md`, `config/translation_playbook.md`,
+`config/signature_template.md`.

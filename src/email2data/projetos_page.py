@@ -354,12 +354,12 @@ function _pidFromURL(){
 async function loadDetail(pid, push){
   if(push===undefined) push=true;
   try{
-    const d=await (await fetch('/api/projects/'+encodeURIComponent(pid))).json();
-    if(d&&d.error){ toast(S.revertido); return; }   // unknown id (e.g. stale link) → stay on list
+    const d=await getJSON('/api/projects/'+encodeURIComponent(pid));
+    if(d&&d.error){ toast(S.falhou); return; }   // unknown id (e.g. stale link) → stay on list
     selected=d;
     if(push){ try{history.pushState(null,'','/projetos/'+encodeURIComponent(pid));}catch(_){} }
     renderDetail();
-  }catch(e){toast(S.revertido);}
+  }catch(e){toast(S.falhou);}
 }
 /* Return to the list. Pushes /projetos so Back from the list leaves the lens cleanly. */
 function closeDetail(push){
@@ -442,7 +442,7 @@ let draft = null;
 async function loadDraft(){
   const box=$('#_ask'); if(!box||!selected) return;
   try{
-    const d=await (await fetch('/api/projects/'+selected.project_id+'/draft')).json();
+    const d=await getJSON('/api/projects/'+selected.project_id+'/draft');
     const asks=d.askables||[];
     const reasons=d.reject_reasons||[];
     draft={to:d.to||'', subject:d.subject||'', askables:asks,
@@ -615,12 +615,10 @@ async function polishDraft(){
   draft.aiBusy=true; draft.ai=null; renderComposer();
   announce('a melhorar o email com IA');
   try{
-    const r=await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/draft/polish',
-      {method:'POST',headers:{'Content-Type':'application/json'},
-       body:JSON.stringify(Object.assign(draftPayload(),{tier:aiTier, lang:draft.lang}))});
-    const d=await r.json().catch(()=>({}));
-    draft.ai = r.ok ? d : {error:d.error||('HTTP '+r.status)};
-  }catch(e){ draft.ai={error:'sem resposta do servidor'}; }
+    draft.ai=await post('/api/projects/'+encodeURIComponent(selected.project_id)+'/draft/polish',
+      Object.assign(draftPayload(),{tier:aiTier, lang:draft.lang}));
+  }catch(e){ draft.ai={error:(e&&e.status===0)?'sem resposta do servidor'
+                                             :('HTTP '+((e&&e.status)||'?'))}; }
   finally{
     draft.aiBusy=false; renderComposer();
     const a=draft.ai;
@@ -650,7 +648,7 @@ async function loadDescription(){
   const box=$('#_desc'); if(!box||!selected) return;
   box.innerHTML='<div class="hint2">a preparar descritivo…</div>';
   try{
-    const d=await (await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/description')).json();
+    const d=await getJSON('/api/projects/'+encodeURIComponent(selected.project_id)+'/description');
     descr={body:d.body||'', gaps:d.gaps||[], unconfirmed:d.unconfirmed||[],
            complete:!!d.complete, nFacts:d.n_facts||0, ai:null, aiBusy:false};
   }catch(e){ box.innerHTML='<div class="hint2">falhou a preparação do descritivo</div>'; return; }
@@ -715,11 +713,10 @@ async function polishDescription(){
   descr.aiBusy=true; descr.ai=null; renderDescription();
   announce('a melhorar o descritivo com IA');
   try{
-    const r=await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/description/polish',
-      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tier:aiTier})});
-    const d=await r.json().catch(()=>({}));
-    descr.ai = r.ok ? d : {error:d.error||('HTTP '+r.status)};
-  }catch(e){ descr.ai={error:'sem resposta do servidor'}; }
+    descr.ai=await post('/api/projects/'+encodeURIComponent(selected.project_id)+'/description/polish',
+      {tier:aiTier});
+  }catch(e){ descr.ai={error:(e&&e.status===0)?'sem resposta do servidor'
+                                             :('HTTP '+((e&&e.status)||'?'))}; }
   finally{
     descr.aiBusy=false; renderDescription();
     const a=descr.ai;
@@ -745,7 +742,7 @@ async function resyncDraft(){
   try{
     const r=await post('/api/projects/'+selected.project_id+'/draft', draftPayload());
     draft.body=r.body; draft.facts=r.facts||[]; renderComposer();
-  }catch(e){ toast(S.revertido); }
+  }catch(e){ toast(S.falhou); }
 }
 
 /* Rebuild only the draft body + the protected-values chip IN PLACE (no re-render), so the
@@ -821,7 +818,7 @@ function ownerPicker(){
 async function setOwners(owners){
   try{ selected=await post('/api/projects/'+selected.project_id+'/owners',{owners});
     const bar=$('#_ownersbar'); if(bar) bar.outerHTML=ownersBarHTML(); }
-  catch(e){ toast(S.revertido); }
+  catch(e){ toast(S.falhou); }
 }
 async function toggleOwner(name){
   const ow=new Set(selected.owners||[]);
@@ -831,7 +828,7 @@ async function toggleOwner(name){
 async function addRosterOwner(){
   const nm=prompt('Novo dono (nome):'); if(!nm||!nm.trim()) return;
   try{ const r=await post('/api/roster',{name:nm.trim()}); roster=r.roster||roster; await toggleOwner(nm.trim()); }
-  catch(e){ toast(S.revertido); }
+  catch(e){ toast(S.falhou); }
 }
 
 function closeoutBannerHTML(){
@@ -857,13 +854,13 @@ async function confirmCloseout(){
   try{ selected=await post('/api/projects/'+selected.project_id+'/stage',
         {stage:_pendingStage, close_party:_coParty, close_reason:(($('#_coreason')||{}).value||'').trim()});
     renderDetail(); toast('atualizado'); }
-  catch(e){ toast(S.revertido); }
+  catch(e){ toast(S.falhou); }
 }
 
 async function loadParticipants(){
   const box=$('#_participants'); if(!box||!selected) return;
   try{
-    const d=await (await fetch('/api/projects/'+encodeURIComponent(selected.project_id)+'/participants')).json();
+    const d=await getJSON('/api/projects/'+encodeURIComponent(selected.project_id)+'/participants');
     const ps=d.participants||[];
     box.innerHTML=ps.length?('<span class="plbl">Contribuíram:</span>'
       +ps.map(p=>'<span class="pcontrib" title="'+p.contributions+' contribuição(ões)'+(p.channels&&p.channels.length?' · '+esc(p.channels.join(', ')):'')+'">@'+esc(p.name)+' <b>'+p.contributions+'</b></span>').join('')):'';
@@ -976,7 +973,7 @@ async function loadTimeline(){
   const box=$('#_timeline'); if(!box||!selected) return;
   const pid=selected.project_id, seq=++_tlSeq;
   try{
-    const d=await (await fetch('/api/projects/'+encodeURIComponent(pid)+'/timeline')).json();
+    const d=await getJSON('/api/projects/'+encodeURIComponent(pid)+'/timeline');
     if(seq!==_tlSeq) return;                       // a newer load superseded this one
     box.innerHTML=timelineHTML(d.timeline||[]);
   }catch(e){ box.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao carregar histórico</div>'; }
@@ -1062,15 +1059,16 @@ async function loadSource(){
   }
   if(_srcCache[pid]){box.innerHTML=_srcCache[pid];msgWireQuoteToggles(box);return;}
   try{
-    const all=[];
+    const all=[]; const attBlocks=[];
     for(const root of roots){
-      const d=await (await fetch('/api/thread/'+encodeURIComponent(root))).json();
+      const d=await getJSON('/api/thread/'+encodeURIComponent(root));
       if(d&&d.messages) all.push(...d.messages);
+      if(d&&d.attachments) attBlocks.push(d.attachments);
     }
     // provenance: {field_addr: message_id} — shows which message supplied each spec field
     const prov=selected.provenance||{};
     const html=all.length
-      ? msgThreadHTML(all, {provenance: prov})
+      ? msgThreadHTML(all, {provenance: prov, attachments: attMerge(attBlocks)})
       : '<div class="hint2">sem mensagens neste projeto</div>';
     _srcCache[pid]=html;
     const b2=$('#_origem'); if(b2){b2.innerHTML=html; msgWireQuoteToggles(b2);}
@@ -1115,16 +1113,7 @@ async function reextract(){
   if(box) box.innerHTML='<div class="rexres"><div class="rexsub">a re-ler os emails e os registos com o LLM…</div></div>';
   announce('re-extração iniciada');
   try{
-    const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/reextract',
-      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tier:reTier})});
-    if(r.status===409){ if(box) box.innerHTML='<div class="rexres bad"><div class="rexh">sync em curso</div>'
-        +'<div class="rexsub">espera que a sincronização termine e tenta outra vez.</div></div>';
-      toast(S.syncEmCurso); return; }
-    if(!r.ok){ const e=await r.json().catch(()=>({}));
-      if(box) box.innerHTML='<div class="rexres bad"><div class="rexh">falhou</div><div class="rexsub">'
-        +esc(e.error||('HTTP '+r.status))+'</div></div>';
-      toast(S.revertido); return; }
-    const d=await r.json();
+    const d=await post('/api/projects/'+encodeURIComponent(pid)+'/reextract',{tier:reTier});
     if(d.project) selected=d.project;
     delete _srcCache[pid];          // provenance moved → the cached thread render is stale
     renderDetail();
@@ -1133,10 +1122,16 @@ async function reextract(){
     toast(d.ok?'re-extração concluída':'re-extração com falhas');
     announce(d.ok?'re-extração concluída':'re-extração com falhas');
   }catch(err){
+    /* 409 = a sync holds the lock. Not a failure, and telling someone their re-extraction failed
+       when it merely has to wait sends them to re-run an LLM job that would have worked. */
+    const conflict=(err&&err.status===409);
     const b2=$('#_rexres');
-    if(b2) b2.innerHTML='<div class="rexres bad"><div class="rexh">falhou</div>'
-      +'<div class="rexsub">sem resposta do servidor</div></div>';
-    toast(S.revertido);
+    if(b2) b2.innerHTML='<div class="rexres bad"><div class="rexh">'
+      +(conflict?'sync em curso':'falhou')+'</div><div class="rexsub">'
+      +(conflict?'espera que a sincronização termine e tenta outra vez.'
+               :esc((err&&err.status===0)?'sem resposta do servidor':('HTTP '+((err&&err.status)||'?'))))
+      +'</div></div>';
+    toast(conflict?S.syncEmCurso:S.falhou);
   }finally{
     reBusy=false;
     const b3=$('#_rexbtn'); if(b3){b3.disabled=false;b3.textContent='Reprocessar tudo com IA';}
@@ -1158,7 +1153,8 @@ function onKey(e){
 function paletteItems(q){
   q=(q||'').toLowerCase().trim();
   const base=[
-    {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Início',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Fila',run:()=>{location.href='/fila';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
@@ -1175,8 +1171,8 @@ function paletteItems(q){
 function promptNew(){
   const t=prompt('Título do projeto:'); if(!t||!t.trim()) return;
   post('/api/projects',{title:t.trim()}).then(r=>{
-    return fetch('/api/projects').then(res=>res.json()).then(list=>{projects=list;renderList();toast('criado: '+t);});
-  }).catch(()=>toast(S.revertido));
+    return getJSON('/api/projects').then(list=>{projects=list;renderList();toast('criado: '+t);});
+  }).catch(()=>toast(S.falhou));
 }
 
 /* ── list selection ───────────────────────────────────────────────────── */
@@ -1219,7 +1215,7 @@ $('#_detail').addEventListener('change', async e=>{
   try{
     const d=await post('/api/projects/'+selected.project_id+'/field',{field:addr,value});
     selected=d; markRow(addr,value); refreshSummary();
-  }catch(err){ toast(S.revertido); }
+  }catch(err){ toast(S.falhou); }
 });
 
 /* ── date fields: the whole box opens the picker, not just the glyph ─────
@@ -1275,8 +1271,8 @@ $('#_detail').addEventListener('click', async e=>{
     // CANCELLED/LOST open an inline close-out form (party + reason) instead of posting immediately.
     if(CLOSED_STAGES.has(stage) && selected.project.stage!==stage){ openCloseout(stage); e.stopPropagation(); return; }
     try{await post('/api/projects/'+selected.project_id+'/stage',{stage});
-      selected=await (await fetch('/api/projects/'+selected.project_id)).json(); renderDetail();}
-    catch(err){toast(S.revertido);} return; }
+      selected=await getJSON('/api/projects/'+selected.project_id); renderDetail();}
+    catch(err){toast(S.falhou);} return; }
   /* owners (multi) */
   if(e.target.closest('#_ownadd')){ ownerPicker(); e.stopPropagation(); return; }
   const orm=e.target.closest('[data-own-rm]');
@@ -1291,13 +1287,13 @@ $('#_detail').addEventListener('click', async e=>{
     const ref=prompt('Cola o thread_root ou message_id do email a ligar:'); if(!ref||!ref.trim()) return;
     try{ selected=await post('/api/projects/'+selected.project_id+'/attach',{ref:ref.trim()});
       delete _srcCache[selected.project_id]; renderDetail(); toast('email ligado'); }
-    catch(err){ toast(S.revertido); } return; }
+    catch(err){ toast(S.falhou); } return; }
   if(e.target.closest('#_additem')){ try{
     selected=await post('/api/projects/'+selected.project_id+'/item/add',{}); renderDetail();}
-    catch(err){toast(S.revertido);} return; }
+    catch(err){toast(S.falhou);} return; }
   const rm=e.target.closest('.item-rm');
   if(rm){ try{ selected=await post('/api/projects/'+selected.project_id+'/item/remove',{index:parseInt(rm.dataset.idx,10)}); renderDetail();}
-    catch(err){toast(S.revertido);} return; }
+    catch(err){toast(S.falhou);} return; }
   /* ── composer actions ─────────────────────────────────────────────── */
   if(e.target.closest('#_addq')&&draft){
     const q=prompt('Pergunta para o cliente:'); if(!q||!q.trim()) return;
@@ -1308,7 +1304,7 @@ $('#_detail').addEventListener('click', async e=>{
     draft.dirty=false;
     try{ const r=await post('/api/projects/'+selected.project_id+'/draft', draftPayload());
       draft.body=r.body; draft.facts=r.facts||[]; renderComposer(); }
-    catch(err){ toast(S.revertido); } return; }
+    catch(err){ toast(S.falhou); } return; }
   /* AI polish (ADR-027) — the ONLY path that triggers the model for this email. */
   if(e.target.closest('#_aibtn')&&draft){ polishDraft(); return; }
   if(e.target.closest('#_aiuse')&&draft){ useAIDraft(); return; }
@@ -1332,8 +1328,8 @@ $('#_detail').addEventListener('click', async e=>{
     catch(err){ toast('copia manual: '+txt.slice(0,40)+'…'); } return; }
   if(e.target.closest('#_exportbtn')){ try{
     const r=await post('/api/projects/'+selected.project_id+'/export',{adapter:'json'});
-    toast(r.ok?'exportado: '+(r.external_id||'ok'):S.revertido);}
-    catch(err){toast(S.revertido);} return; }
+    toast(r.ok?'exportado: '+(r.external_id||'ok'):S.falhou);}
+    catch(err){toast(S.falhou);} return; }
 });
 
 /* ── ADR-015 capture/tabs: a SEPARATE delegated listener so the existing handler is untouched.
@@ -1357,13 +1353,13 @@ $('#_detail').addEventListener('click', async e=>{
     try{ await post('/api/projects/'+selected.project_id+'/event',
         {kind:capKind, text:text, channel:capChan, asserted_by:who, acquired_at:when});
       const t=$('#_captext'); if(t) t.value=''; toast('registado'); showTab('timeline'); }
-    catch(err){ toast(S.revertido); } return; }
+    catch(err){ toast(S.falhou); } return; }
   if(e.target.closest('#_cfadd')){
     const name=(($('#_cfname')||{}).value||'').trim(), val=(($('#_cfval')||{}).value||'').trim();
     if(!name||!val){ toast('nome e valor'); return; }
     try{ selected=await post('/api/projects/'+selected.project_id+'/custom-field',{name:name, value:val});
       renderDetail(); toast('campo adicionado'); }
-    catch(err){ toast(S.revertido); } return; }
+    catch(err){ toast(S.falhou); } return; }
 });
 
 /* owner picker menu (shared #_menu): toggle a roster name, or add a brand-new owner */
@@ -1396,10 +1392,12 @@ window.addEventListener('popstate',()=>{
 
 def build_html(projects: list[dict[str, Any]],
                nav_counts: dict[str, int] | None = None,
-               roster: list[str] | None = None) -> str:
+               roster: list[str] | None = None,
+               person: dict[str, Any] | None = None) -> str:
     return cockpit_ui.page(
         "Projetos", "projetos", _BODY,
         embeds={"projects": projects, "fields": _FIELDS, "roster": list(roster or [])},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
+        person=person,
     )

@@ -53,3 +53,60 @@ def test_any_known_domain_vetoes_offline_ignore():
         c = _Client(_VERDICT)
         r = cascade.triage(BULK, "pb", _Store(hint=hint), c, SETTINGS)
         assert r.decided_by.startswith("tier1") and c.calls == 1, f"hint={hint}"
+
+
+# ── build_store: a missing gazetteer CSV must never be silent (see test_store.py) ──
+
+
+def _base(tmp_path):
+    """A minimal project layout: build_store derives config/ and out/ from the settings path."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "out").mkdir()
+    sp = tmp_path / "config" / "settings.json"
+    sp.write_text(json.dumps({"paths": {"out_dir": "out", "corpus_dir": "corpus",
+                                        "captures_dir": "captures"}}), encoding="utf-8")
+    return {"paths": {"out_dir": "out", "corpus_dir": "corpus", "captures_dir": "captures"},
+            "__settings_path__": str(sp)}
+
+
+def test_gazetteer_csv_points_at_the_editable_source_of_truth(tmp_path):
+    s = _base(tmp_path)
+    assert cascade.gazetteer_csv(s) == tmp_path / "config" / "gazetteer.csv"
+
+
+def test_build_store_warns_instead_of_silently_serving_frozen_priors(tmp_path, capsys):
+    """The live defect this fixes: knowledge.db kept serving 15 rows for three days after
+    config/gazetteer.csv went missing, with no warning, no error and no log line. Seed once, delete
+    the CSV, rebuild — the second build must say so."""
+    s = _base(tmp_path)
+    gaz = cascade.gazetteer_csv(s)
+    gaz.write_text("domain,counterparty,note\ncliente.pt,CLIENT,a real client\n", encoding="utf-8")
+    store = cascade.build_store(s)
+    assert store.lookup("cliente.pt") == "CLIENT"
+    store.close()
+    capsys.readouterr()
+
+    gaz.unlink()                       # the CSV vanishes; the table does not
+    store = cascade.build_store(s)
+    err = capsys.readouterr().err
+    assert "MISSING" in err and "frozen" in err
+    assert store.lookup("cliente.pt") == "CLIENT"   # still vetoes an offline IGNORE, still uneditable
+    store.close()
+
+
+def test_build_store_is_quiet_on_a_first_run_with_no_gazetteer_yet(tmp_path, capsys):
+    store = cascade.build_store(_base(tmp_path))
+    assert capsys.readouterr().err == ""
+    assert store.count() == 0
+    store.close()
+
+
+def test_open_store_does_not_seed(tmp_path):
+    """`gazetteer status` must report the table as it STANDS, not as the CSV would leave it —
+    otherwise opening the status page would repair the drift it is meant to report."""
+    s = _base(tmp_path)
+    cascade.gazetteer_csv(s).write_text(
+        "domain,counterparty,note\ncliente.pt,CLIENT,x\n", encoding="utf-8")
+    store = cascade.open_store(s)
+    assert store.count() == 0          # the CSV was NOT loaded
+    store.close()

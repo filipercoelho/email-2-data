@@ -59,3 +59,16 @@ res/screenshots/
 
 # Python build artifacts
 *.egg-info/
+
+# Verified snapshots of the precious stores (bin/backup-workspace.sh).
+# Personal data — never committed, even if a future snapshot adds non-.db files.
+backups/
+
+# Self-signed TLS material (bin/make-cert.sh). A private key must never be committed.
+certs/
+
+# Browser-automation artifacts (Playwright MCP) and ad-hoc UI screenshots. These are snapshots of
+# the RUNNING app, so they carry real client names, addresses and subject lines — the same personal
+# data as out/. The repo is public; a screenshot leaks exactly what results.jsonl is ignored to protect.
+.playwright-mcp/
+/*.png

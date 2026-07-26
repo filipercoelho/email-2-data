@@ -7,8 +7,9 @@ goes through ``canonical_id_from_raw`` so the value in ``corpus/`` filenames, ``
 
 from __future__ import annotations
 
-import email
 import hashlib
+
+from .headers import parse_message, repair_8bit
 
 
 def canonical_id(message_id: str | None, raw: bytes) -> str:
@@ -17,17 +18,25 @@ def canonical_id(message_id: str | None, raw: bytes) -> str:
     Prefer the normalized RFC822 Message-ID (``mid:...``); fall back to a content hash
     (``sha256:...``) when the header is absent. Normalization (strip angle brackets/whitespace,
     lowercase) makes the id robust to how a human re-types it into labels.csv.
+
+    ``message_id`` is coerced and 8-bit-repaired before normalizing: a Message-ID carrying raw
+    non-ASCII bytes arrives from the default parser as an ``email.header.Header`` (no ``.strip()``
+    -> AttributeError) and from :func:`headers.parse_message` as surrogate escapes (which no store
+    can encode). Neither may take down a whole fetch over one out-of-spec header.
     """
     if message_id:
-        norm = message_id.strip().strip("<>").strip().lower()
+        norm = repair_8bit(str(message_id)).strip().strip("<>").strip().lower()
         if norm:
             return "mid:" + norm
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def canonical_id_from_raw(raw: bytes) -> str:
-    """Parse the Message-ID out of raw bytes and return the canonical id."""
-    msg = email.message_from_bytes(raw)
+    """Parse the Message-ID out of raw bytes and return the canonical id.
+
+    Uses the same parser as ``envelope.parse_eml`` so both derivations of the id see the same
+    header bytes — the divergence this module exists to prevent."""
+    msg = parse_message(raw)
     return canonical_id(msg.get("Message-ID"), raw)
 
 

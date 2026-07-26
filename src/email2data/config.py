@@ -80,6 +80,21 @@ def claude_api_key(settings: dict[str, Any]) -> str:
     return resolve_secret(settings["llm"]["api_key_env"])
 
 
+def mail_password(settings: dict[str, Any]) -> str:
+    """Password for the outbound transactional-mail account (ADR-042).
+
+    Same ``*_env`` indirection as every other secret: ``settings.json`` names the variable, ``.env``
+    holds the value, and the value never appears in a file that git can see. The sending account is
+    intentionally NOT one of ``imap.accounts[]`` -- it is write-only, never fetched, never triaged --
+    so it gets its own key rather than reusing ``account_password``.
+    """
+    cfg = (settings or {}).get("mail") or {}
+    env_name = cfg.get("password_env")
+    if not env_name:
+        raise ConfigError("mail is configured but 'mail.password_env' is missing")
+    return resolve_secret(env_name)
+
+
 def _base_dir(settings_path: str | Path) -> Path:
     # settings live at <root>/config/settings.json -> root is parents[1]
     p = Path(settings_path).resolve()

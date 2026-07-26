@@ -22,13 +22,23 @@ from .store import KnowledgeStore
 
 
 
-def build_store(settings: dict[str, Any]) -> KnowledgeStore:
+def gazetteer_csv(settings: dict[str, Any]) -> Path:
+    """The editable source of truth for the gazetteer (ADR-005). Gitignored — it names real clients."""
+    return Path(settings["__settings_path__"]).parents[1] / "config" / "gazetteer.csv"
+
+
+def open_store(settings: dict[str, Any]) -> KnowledgeStore:
+    """Open knowledge.db **without** seeding — for tools that must read the table exactly as it
+    stands (``email2data gazetteer``), rather than as the CSV would leave it."""
     p = paths(settings, settings["__settings_path__"])
-    base = Path(settings["__settings_path__"]).parents[1]
-    store = KnowledgeStore(p["out_dir"] / "knowledge.db").connect()
-    gaz = base / "config" / "gazetteer.csv"
-    if gaz.exists():
-        store.seed_gazetteer(gaz)
+    return KnowledgeStore(p["out_dir"] / "knowledge.db").connect()
+
+
+def build_store(settings: dict[str, Any]) -> KnowledgeStore:
+    store = open_store(settings)
+    # seed_or_warn, not `if gaz.exists()`: a missing CSV over a non-empty table means the priors are
+    # frozen and uneditable, and that must never be silent again — see store.seed_or_warn.
+    store.seed_or_warn(gazetteer_csv(settings))
     return store
 
 

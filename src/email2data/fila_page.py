@@ -20,6 +20,10 @@ from . import cockpit_ui, labels as _labels
 _LENS_JS = r"""
 /* ── Fila lens state ────────────────────────────────────────────────── */
 let rows = ROWS.slice();
+/* Why an empty queue is empty (ADR-045): no grants, or genuinely nothing left. Read with a
+   typeof guard like SYNCED_AT/NEEDS_REVIEW, so an older embed payload cannot ReferenceError
+   the whole lens. */
+const _noScopes = (typeof NO_SCOPES !== 'undefined') && !!NO_SCOPES;
 /* Focus is CONTENT-KEYED (ADR-033 P1, prerequisite for the live poll): `focusRoot` names the
    conversation; `focus` is the derived index into view() for rendering/data-i. A re-render or a
    queue reorder re-derives the index from the root, so the caret can never silently re-point at a
@@ -33,7 +37,7 @@ let filters = {};   /* active filters — keys: counterparty, purpose, band, own
 let _prevRisk = null, urlThread = null;
 /* 'ativos' (default) or 'tratados' — the decided ledger (rows fetched lazily from
    /api/fila?include=resolved). A decision must be reviewable after it is made, not vanish. */
-let mode = 'ativos', resolvedRows = null;
+let mode = 'ativos', resolvedRows = null, resolvedErr = null;
 /* Counterparty front (ADR-033): 'all' (Hoje) | 'CLIENT' | 'SUPPLIER' | 'LEAD'. A tab is a subset of
    the one queue in the one order — never a second data structure. */
 let tab = 'all';
@@ -355,16 +359,30 @@ function render(){
     zero.classList.toggle('hidden',v.length>0);
     if(!v.length){
       const noRes=hasFilters()&&(mode==='tratados'?(resolvedRows||[]):rows).length>0;
-      zero.innerHTML=mode==='tratados'&&!noRes
+      zero.innerHTML=mode==='tratados'&&resolvedErr
+        /* The list never loaded. «Nada tratado ainda» would be an assertion about a server we
+           could not reach — the empty screen is our failure, not the ledger's content. */
+        ?'Não foi possível carregar os tratados<span class="s">'+esc(resolvedErr)
+          +' · o registo continua lá — recarrega para tentar outra vez</span>'
+        :(mode==='tratados'&&!noRes
         ?'Nada tratado ainda<span class="s">as decisões que marcares como tratadas ficam registadas aqui</span>'
         :(noRes
           ?'Sem resultados<span class="s">nenhuma thread corresponde aos filtros activos</span>'
-          :(tab==='LEAD'
-            ?'Sem leads novos<span class="s">bom sinal — este separador acende quando chegar um</span>'
-            :'✓ Tudo tratado<span class="s">nada está a cair · 0 a responder</span>'));
+          :(_noScopes
+            /* ADR-045. An empty queue has two very different causes and they must never render the
+               same. «Tudo tratado» over a queue the reader was simply never granted is the ADR-040
+               dishonest-refusal defect reborn one layer down: the app stating, on no evidence, that
+               there is nothing to do — and the person acts on it by walking away from waiting work.
+               A missing GRANT is a fact the app knows; it says it. */
+            ?'Sem caixas atribuídas<span class="s">não tens nenhuma caixa de correio atribuída, por isso esta fila está vazia — pede a um administrador que te atribua uma</span>'
+            :(tab==='LEAD'
+              ?'Sem leads novos<span class="s">bom sinal — este separador acende quando chegar um</span>'
+              :'✓ Tudo tratado<span class="s">nada está a cair · 0 a responder</span>'))));
     }
   }
-  announce(mode==='tratados'?(v.length+' tratados'):(v.length?S.threads(v.length)+' por tratar':'Tudo tratado'));
+  announce(mode==='tratados'?(v.length+' tratados')
+    :(v.length?S.threads(v.length)+' por tratar'
+      :(_noScopes?'Sem caixas atribuídas':'Tudo tratado')));
 
   /* Honest vista banner: the € lens is explicitly AI-estimated, never presented as fact. */
   const vb=$('#_vbanner');
@@ -509,17 +527,20 @@ function focusedRow(){ const v=view(); return v[focus]||null; }
 async function ensureThread(r){
   if(!r) return;
   const c0=_threadCache[r.thread_root];
-  if(c0){ r._threadMsgs=c0.messages; r._facts=c0.facts; r._decisions=c0.decisions; r._ledgerProj=c0.proj; return; }
+  if(c0){ r._threadMsgs=c0.messages; r._facts=c0.facts; r._decisions=c0.decisions; r._ledgerProj=c0.proj;
+          r._att=c0.att||null; return; }
   if(r._threadBusy) return;
   r._threadBusy=true; r._threadErr=null; renderDossier();
   try{
-    const d=await (await fetch('/api/thread/'+encodeURIComponent(r.thread_root))).json();
+    const d=await getJSON('/api/thread/'+encodeURIComponent(r.thread_root));
     if(d.error){ r._threadErr=d.error; }
     else{
       _threadCache[r.thread_root]={messages:d.messages, facts:d.facts||[],
-                                   decisions:d.decisions||[], proj:d.ledger_project||null};
+                                   decisions:d.decisions||[], proj:d.ledger_project||null,
+                                   att:d.attachments||null};
       r._threadMsgs=d.messages; r._facts=d.facts||[];
       r._decisions=d.decisions||[]; r._ledgerProj=d.ledger_project||null;
+      r._att=d.attachments||null;
     }
   }catch(e){ r._threadErr='falhou ao carregar'; }
   r._threadBusy=false; renderDossier();
@@ -692,7 +713,7 @@ function handle(i){
       rows.splice(Math.min(at,rows.length),0,r);
       if(resolvedRows){const ri=resolvedRows.indexOf(r); if(ri>=0) resolvedRows.splice(ri,1);}
       focusRoot=r.thread_root;
-      render();post('/api/thread/handled',{thread_root:r.thread_root,handled:false}).catch(()=>toast(S.revertido));}});
+      render();post('/api/thread/handled',{thread_root:r.thread_root,handled:false}).catch(()=>toast(S.undoFalhou));}});
     announce(S.tratado); render();
     post('/api/thread/handled',{thread_root:r.thread_root,handled:true}).catch(()=>{
       rows.splice(Math.min(at,rows.length),0,r);
@@ -714,10 +735,17 @@ async function setMode(m){
   if(m==='tratados'&&resolvedRows===null){
     const list=$('#_list'); if(list) list.innerHTML='<div class="row"><span class="tsum">a carregar tratados…</span></div>';
     try{
-      const d=await (await fetch('/api/fila?include=resolved')).json();
+      const d=await getJSON('/api/fila?include=resolved');
       resolvedRows=(d.rows||[]).filter(r=>((r.clock||{}).state==='HANDLED'));
       resolvedRows.sort((a,b)=>cmpOrderKey((b.order_keys||{}).recent,(a.order_keys||{}).recent));
-    }catch(e){ resolvedRows=[]; toast(S.falhou); }
+      resolvedErr=null;
+    }catch(e){
+      /* Do NOT set resolvedRows=[]. null means "not loaded"; [] means "loaded, and there is
+         nothing" — and the zero-state reads the difference to decide between «Nada tratado ainda»
+         and an honest failure. Collapsing them is how a failed request became a factual claim. */
+      resolvedRows=null; resolvedErr=(e&&e.status===0)?'sem resposta do servidor':'falhou';
+      toast(S.falhou);
+    }
   }
   render();
 }
@@ -738,9 +766,13 @@ async function reopenThread(i){
 async function refreshActiveRows(){
   /* the reopened thread must reappear in the active queue with a server-computed clock */
   try{
-    const d=await (await fetch('/api/fila')).json();
+    const d=await getJSON('/api/fila');
     rows=(d.rows||[]); sortRows(); if(mode==='ativos') render();
-  }catch(e){}
+  }catch(e){
+    /* Keep the rows we have. The old code let a 401 body through `d.rows||[]`, blanking the queue
+       and rendering «✓ Tudo tratado · 0 a responder» — the app stating, on no evidence, that there
+       is nothing left to do. Better a queue a few seconds stale than a confident lie. */
+  }
 }
 
 /* ── owners (multi) — picked from the roster; "+ novo dono" adds to it ─── */
@@ -832,6 +864,7 @@ function _threadHTML(r){
     :(r._draft!=null
       ?'<div class="draftbox"><textarea readonly rows="9" aria-label="Rascunho de resposta">'+esc(r._draft)+'</textarea>'
        +'<div class="dfoot"><button class="act-btn" data-act="copydraft">Copiar</button>'
+       +'<button class="act-btn open" data-act="opendraft" title="'+esc(_mailToTitle(r))+'">✉ Abrir no mail</button>'
        +'<span class="tsum">rascunho'+(r._draftKind?' · modelo: '+esc(r._draftKind):'')+' — revê antes de enviar · a app nunca envia</span></div></div>'
       :'');
   /* The summary line keeps the CHRONOLOGICAL array — its date range must read "first → last". */
@@ -864,7 +897,10 @@ function _threadHTML(r){
     flow+='<div class="dt-msg dir-'+dir+'"><span class="dt-dot"></span>'+msgHTML(m)+'</div>';
   });
   flow+='</div>';
-  return '<div class="texp">'+head+draftBox+flow+'</div>';
+  /* The funnel sits ABOVE the timeline: it answers "what did they send us?" for the whole thread,
+     which is the question that brings someone here. The per-message 📎 chips stay where they are —
+     they answer the different question "what came with THIS message" (ADR-046). */
+  return '<div class="texp">'+head+draftBox+attFunnelHTML(r._att)+flow+'</div>';
 }
 
 /* ── command bus ────────────────────────────────────────────────────── */
@@ -881,6 +917,7 @@ function dispatch(action,i){
   else if(action==='openproj')openProject(i);
   else if(action==='draft')draftReply(i);
   else if(action==='copydraft')copyDraft(i);
+  else if(action==='opendraft')openDraftInMail(i);
 }
 
 /* Focusing IS opening: the dossier mounts the focused conversation (one render path). */
@@ -922,7 +959,7 @@ async function snoozeThread(i,k){
   rows.splice(at,1); focusRoot=nxt?nxt.thread_root:null;
   undo.push({label:'adiada',revert:()=>{
     rows.splice(Math.min(at,rows.length),0,r); focusRoot=r.thread_root; render();
-    post('/api/thread/snooze',{thread_root:r.thread_root,until:null}).catch(()=>toast(S.revertido));
+    post('/api/thread/snooze',{thread_root:r.thread_root,until:null}).catch(()=>toast(S.undoFalhou));
   }});
   announce('adiada'); render();
   toast('adiada até '+until.slice(0,10)+' — acorda antes se responderem · Z desfaz');
@@ -964,6 +1001,35 @@ function copyDraft(i){
   (navigator.clipboard?navigator.clipboard.writeText(r._draft):Promise.reject())
     .then(()=>toast('rascunho copiado'))
     .catch(()=>toast(S.falhou));
+}
+
+/* ── hand the draft to the person's own mail client (ADR-047) ────────────
+   The app never sends, and this does not change that: `mailto:` opens the DEFAULT client with the
+   fields pre-filled and stops there — the human still writes, edits and presses send. It replaces
+   "copy, switch app, find the thread, paste, retype the address and the subject", which is where a
+   drafted reply used to go to die.
+
+   `Re:` is added only when the subject does not already carry one (in either language), so a reply
+   to a reply does not become «Re: Re: Re: Orçamento». */
+function _replySubject(r){
+  const s=(r.subject||'').trim();
+  if(!s) return '';
+  return /^\s*(re|rv|res|fw|fwd|enc)\s*:/i.test(s)?s:('Re: '+s);
+}
+function _mailToTitle(r){
+  return r.contact?('abrir no cliente de email · para '+r.contact)
+                   :'abrir no cliente de email · sem endereço conhecido — escreve-o tu';
+}
+function openDraftInMail(i){
+  const r=view()[i]; if(!r||r._draft==null) return;
+  /* encodeURIComponent, not encodeURI: a subject with & or # would otherwise truncate the body, and
+     a truncated draft that LOOKS complete in the mail client is the failure mode worth paying one
+     extra call to avoid. */
+  const url='mailto:'+encodeURIComponent(r.contact||'')
+    +'?subject='+encodeURIComponent(_replySubject(r))
+    +'&body='+encodeURIComponent(r._draft);
+  location.href=url;
+  toast(r.contact?('a abrir o mail para '+r.contact):'a abrir o mail — falta o endereço');
 }
 
 /* project: jump into the existing one, or create from this thread and go straight to it */
@@ -1098,9 +1164,7 @@ async function refresh(opts){
   if(menu&&!menu.classList.contains('hidden')) return;   /* never swap under an open picker */
   _refreshing=true;
   try{
-    const resp=await fetch('/api/fila',{cache:'no-store'});
-    if(!resp.ok) return;
-    const d=await resp.json();
+    const d=await getJSON('/api/fila');
     _syncedAt=d.synced_at||_syncedAt; paintFreshness();
     if(typeof setNavCounts==='function') setNavCounts(d.nav_counts);
     _needsReview=d.needs_review||0; paintRever();
@@ -1118,7 +1182,7 @@ async function refresh(opts){
   }catch(e){ /* offline / server restarting — keep showing what we have, retry next tick */ }
   finally{ _refreshing=false; }
 }
-setInterval(()=>{ if(!document.hidden) refresh(); },REFRESH_MS);
+everyMs(()=>{ if(!document.hidden) refresh(); },REFRESH_MS);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refresh(); });
 _lastSig=_sig(rows);
 
@@ -1133,6 +1197,7 @@ function paletteItems(q){
     {kind:'ação',label:S.actUndo,run:doUndo},
     {kind:'ação',label:S.actDensity,run:toggleDensity},
     {kind:'ação',label:S.actInbox,run:()=>{location.href='/inbox';}},
+    {kind:'ação',label:'Início',run:()=>{location.href='/';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
@@ -1662,7 +1727,11 @@ _EXTRA_CSS = """
   .draftbox{margin-top:8px;flex-basis:100%}
   .draftbox textarea{width:100%;border:1px solid var(--bd);border-radius:9px;padding:9px 11px;
     font:12.5px/1.5 inherit;color:var(--tx);background:var(--surface2);resize:vertical}
-  .draftbox .dfoot{display:flex;align-items:center;gap:9px;margin-top:5px}
+  .draftbox .dfoot{display:flex;align-items:center;gap:9px;margin-top:5px;flex-wrap:wrap}
+  /* «Abrir no mail» is the ACT (it leaves the app carrying the draft); «Copiar» is the fallback for
+     a machine with no mail client configured. The accent says which one to reach for. */
+  .draftbox .act-btn.open{border-color:var(--ac-line);color:var(--ac);background:var(--ac-soft)}
+  .draftbox .act-btn.open:hover{filter:brightness(1.05)}
   .rmain[data-act]{cursor:pointer}
   .menu .mhdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);padding:5px 11px 3px}
   .menu .mi.reset{color:var(--mut);border-top:1px solid var(--bd2);margin-top:3px}
@@ -1671,7 +1740,12 @@ _EXTRA_CSS = """
 
 def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
                     *, now_iso: str = "", synced_at: str = "", needs_review: int = 0,
-                    nav_counts: dict[str, int] | None = None) -> str:
+                    nav_counts: dict[str, int] | None = None,
+                    no_scopes: bool = False,
+                    person: dict[str, Any] | None = None) -> str:
+    """``no_scopes`` marks "this queue is empty because nothing is granted, not because it is done"
+    (ADR-045) — the two states are indistinguishable from the rows alone, and only one of them is
+    good news."""
     return cockpit_ui.page(
         "Fila",
         "fila",
@@ -1681,8 +1755,11 @@ def build_fila_html(rows: list[dict[str, Any]], team: list[str] | None = None,
                 "synced_at": synced_at,
                 # NEEDS_REVIEW count (ADR-033 P2): the «rever N» chip's initial value.
                 "needs_review": int(needs_review),
+                # Why the queue is empty, when it is (ADR-045).
+                "no_scopes": bool(no_scopes),
                 "labels": _labels.fila_labels()},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
         extra_css=_EXTRA_CSS,
+        person=person,
     )

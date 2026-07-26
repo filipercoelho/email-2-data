@@ -27,6 +27,16 @@ uvicorn = pytest.importorskip("uvicorn")
 
 from email2data.crm import CrmStore  # noqa: E402
 from email2data.webapp import create_app  # noqa: E402
+
+from conftest import AuthedBrowser, e2e_headers, e2e_sign_in  # noqa: E402
+
+_TOKEN: dict[str, str] = {}   # filled by the live_app fixtures
+
+
+def _get(url: str):
+    """Authenticated GET against the live server (the ADR-039 gate applies to /api too)."""
+    return urllib.request.urlopen(
+        urllib.request.Request(url, headers=e2e_headers(_TOKEN.get("v", ""))))
 from email2data.workspace import Workspace  # noqa: E402
 
 
@@ -110,6 +120,7 @@ def live_app(tmp_path):
     app = create_app({"team": ["Pedro"]}, workspace=ws,
                      jobspecs={"t1": _spec_with_three_items("t1")},
                      prepared=([], [], {}), reply_pb="", crm_store=crm, corpus_index=corpus)
+    _TOKEN["v"] = e2e_sign_in(app)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -137,7 +148,7 @@ def browser():
                 b = None
         if b is None:
             pytest.skip("no Chrome/Chromium available for Playwright")
-        yield b
+        yield AuthedBrowser(b, lambda: _TOKEN.get("v", ""))
         b.close()
 
 
@@ -163,7 +174,7 @@ def _resolve(base: str, thread_root: str, title: str) -> None:
     urllib.request.urlopen(urllib.request.Request(
         f"{base}/api/projects", method="POST",
         data=json.dumps({"title": title, "from_message": thread_root}).encode(),
-        headers={"Content-Type": "application/json"}))
+        headers=e2e_headers(_TOKEN.get("v", ""), {"Content-Type": "application/json"})))
 
 
 def _subjects(page) -> list[str]:
@@ -374,7 +385,7 @@ def test_reclassifying_from_the_card_persists(live_app, browser):
         page.wait_for_selector("#_menu:not(.hidden)")
         page.locator('#_menu .mi[data-val="SUPPLIER"]').click()
         page.wait_for_timeout(600)
-        saved = json.loads(urllib.request.urlopen(f"{live_app}/api/reclassifications").read())
+        saved = json.loads(_get(f"{live_app}/api/reclassifications").read())
         assert any(any(c["field"] == "counterparty" and c["human"] == "SUPPLIER" for c in v)
                    for v in saved.values()), f"correction not persisted: {saved}"
         assert not errors, f"JS errors: {errors}"
@@ -389,7 +400,7 @@ def test_marking_handled_from_the_card_removes_it_from_the_fila(live_app, browse
         page.locator('.gate [data-act="handled"]').first.click()
         page.wait_for_function(f"document.querySelectorAll('.gate').length === {before - 1}",
                                timeout=5000)
-        rows = json.loads(urllib.request.urlopen(f"{live_app}/api/fila").read())["rows"]
+        rows = json.loads(_get(f"{live_app}/api/fila").read())["rows"]
         assert len(rows) == before - 1, "thread was not marked handled server-side"
         assert not errors, f"JS errors: {errors}"
     finally:
@@ -406,7 +417,7 @@ def test_attachments_are_openable_from_the_expanded_thread(live_app, browser):
         assert att.count() >= 1, "attachment not rendered in the detail"
         href = att.first.get_attribute("href")
         assert href.startswith("/api/attachment/")
-        got = urllib.request.urlopen(live_app + href)
+        got = _get(live_app + href)
         assert got.status == 200 and got.read(), "attachment link does not actually serve bytes"
         assert not errors, f"JS errors: {errors}"
     finally:
@@ -473,6 +484,7 @@ def live_app_mixed(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = create_app({"team": ["Pedro"]}, workspace=ws, jobspecs={}, prepared=([], [], {}),
                      reply_pb="", crm_store=crm)
+    _TOKEN["v"] = e2e_sign_in(app)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)

@@ -38,7 +38,7 @@ payable bill), `FOLLOW_UP` (an active chase on something already sent), `OWN_REJ
 `PUBLICITY`, `INTERNAL_OPS`, `OTHER`.
 
 **`direction`** = `inbound`, `internal` (our domain → our domain), `outbound` (Sent folder) —
-all three are in the `DIRECTION` constant (`schema.py:42`), pinned by
+all three are in the `DIRECTION` constant (`schema.py:48`), pinned by
 `tests/test_signals.py::test_schema_direction_constant_covers_every_emitted_value`.
 
 **`SPEECH_ACT`** (ADR-036, orthogonal to purpose) = `ASK` (requests an action/answer) · `OBLIGATION`

@@ -18,7 +18,9 @@ IMAP (read-only)                                  ADR-002
    │  fetch.py        EXAMINE + BODY.PEEK, UID-watermark incremental   ADR-009
    ▼
 corpus/*.eml
+   │  headers.py      header bytes → text (RFC 2047 + raw 8-bit)          ADR-043
    │  envelope.py     raw MIME/charset → normalized fields
+   │  attachments.py  parts → banded, hash-deduped file list            ADR-046
    ▼
 normalized message
    │  signals.py      Tier-0 header facts: direction, bulk, is_forward  ADR-004
@@ -35,6 +37,7 @@ out/crm.db
    │  jobspec.py      JobSpec (14 vars + Gate-1 readiness)
    │  specdraft.py    Phase-B tiered spec draft (LEAD/PO only)
    │  replydraft.py   Phase-C clarifying reply (never sends)
+   │  signature.py    per-person closing appended to a reply draft (deterministic)  ADR-047
    │  clientdraft.py  Phase-C client-email composer (deterministic, 8 purposes, PT/EN/FR/ES)  ADR-013/-031/-032
    │  translate.py    Phase-C translate-received-email-to-English reading aid (display-only)  ADR-032
    ▼
@@ -50,7 +53,9 @@ webapp.py   FastAPI workspace UI on 127.0.0.1:8042 (live) + static report.html
 | --- | --- | --- |
 | `fetch.py` | I/O | read-only IMAP → `corpus/*.eml`; per-mailbox UID watermark |
 | `sync.py` | glue | UID-cursor store (`out/sync.db`) + `run_sync` (fetch-new → triage-new) |
+| `headers.py` | parse | header value → text: `parse_message` (the parser that keeps 8-bit bytes), RFC 2047 encoded-words, raw 8-bit repair. No surrogate leaves it — ADR-043 |
 | `envelope.py` | parse | raw `.eml` → normalized fields (robust MIME/charset) |
+| `attachments.py` | present | a thread's parts → one **deduped, banded** file list: FICHEIROS / IMAGENS / ASSINATURAS, each an INFERENCE carrying its own `band_evidence`. Dedup is sha256 of the decoded bytes, never the filename. Walks parts under the exact predicate `attachment_part` re-walks, so banding is additive and no 📎 link is repointed — ADR-046 |
 | `signals.py` | Tier-0 | header facts: direction, bulk/automated, looks-forwarded |
 | `extract.py` | Tier-0 | deterministic values: nif/iban authoritative + amount/date/doc candidates |
 | `store.py` | knowledge | gazetteer: email-or-domain → counterparty hint (SQLite, hand-curated) |
@@ -63,7 +68,14 @@ webapp.py   FastAPI workspace UI on 127.0.0.1:8042 (live) + static report.html
 | `replydraft.py` | Phase C | clarifying reply grounded in confirmed-vs-missing fields (never sends) |
 | `translate.py` | Phase C | on-demand translate-a-received-email-to-English reading aid (`POST /api/translate`, in-memory cache); display-only, never sends/stores — ADR-032 |
 | `clientdraft.py` | Phase C | deterministic client-email composer: 8 purposes (ask · reject · quote · follow-up · approval · payment · deadline · ready), each splicing its input into an editable per-purpose template (no LLM, never sends) — ADR-013; optional checked polish extended with a verbatim number guard (`extract_values`/`missing_values`) — ADR-027/-031 ([reference](../05-reference/client-email-composer.md)) |
-| `workspace.py` | write | human decisions (SQLite) overlaying job specs; survive re-runs |
+| `workspace.py` | write | human decisions (SQLite) overlaying job specs; survive re-runs — **and `people`**, the one assignable-identity namespace + its lifecycle (promote/deactivate/remove, the never-zero-admins invariant) — ADR-039/-041 |
+| `scopes.py` | Phase A (multi-user) | which of *our* inboxes a message reached (`fetch`/`header` FACT, `participant` INFERENCE, else `sem-atribuicao`); `visible()` is consumed by `webapp._visible_roots` since ADR-045 (Phase D) — one choke point in `_fila_rows` plus route-level guards for bodies/relations/attachments/projects — ADR-038/-045 |
+| `auth.py` | Phase B (multi-user) | credentials + sessions + invites in a separate `auth.db`; stdlib scrypt, sessions are ROWS (opaque token, SHA-256 at rest), no server secret — ADR-039 |
+| `auth_page.py` | Phase B (multi-user) | the signed-out screens only (login · first-run setup · invite redemption · **password recovery**). Signed-in surfaces use the cockpit shell — ADR-039/-042 |
+| `signature.py` | Phase C | the closing of a reply draft, as a property of the **signed-in person** rather than of `reply_playbook.md`: a closed placeholder vocabulary (`{nome}` `{cargo}` `{telefone}` `{email}`) resolved only from that person's own `people` row, an all-empty line dropped rather than left dangling, and **strip-then-append** so a model-written or template-carried sign-off is replaced instead of stacked. Deterministic — the model never touches the block. An empty render strips nothing. Applied AFTER the reply memo (which is keyed on the spec, so a signed cache entry would leak the previous reader's name) — ADR-047 |
+| `mailer.py` | Phase B (multi-user) | **the only outbound mail path in the app** — one message (a password-reset link), one template, no caller-supplied body, recipients restricted to a `people` address. Stdlib `smtplib` over implicit TLS; a single `_send` seam so the suite never opens a socket. Imports no `imaplib` and issues no `APPEND`, pinned by a source-level test — ADR-042 sits *beside* ADR-002, not against it |
+| `cockpit_ui.py` | UI kit | the shared shell every lens renders through: nav + identity control (`page(person=…)`, `person=None` is default-deny), the single `fetchJSON` network seam, `forbidden_page()`, `account_page()` — ADR-034/-040/-041 |
+| `home_page.py` | UI (landing) | **Início at `/`** — four big buttons and no rows: the three counterparty fronts (→ `/fila?tab=…`) + Para ti, over exactly two highlights (the demand split · the longest-stalled thread *we owe*). Pure presentation over `cockpit.home_summary`; renders from embedded data with **no fetch on load** — ADR-044 |
 | `project.py` | entity | cross-thread Projects: many threads → one canonical spec + lifecycle + provenance-rich append-only field/event timeline + contradiction detection (ADR-015) |
 | `export.py` | offload | shell-only export to JSON (dry-run) or materials-costing API |
 | `webapp.py` | UI | FastAPI workspace (localhost; never sends; copy/paste) |
@@ -81,10 +93,15 @@ free path can never silently bin a client.
 
 ## Web surface
 
-`webapp.py` serves a **live** workspace (Fila / Para Ti / Projetos / Contrapartes) on
+`webapp.py` serves a **live** workspace (Início / Fila / Para Ti / Projetos / Contrapartes) on
 `127.0.0.1:8042`; it runs an incremental `sync` on boot and on **Sincronizar**. Project actions
 hit the API, so they are inert in the static `out/report.html`. UI/UX spec:
 [../05-reference/cockpit-design.md](../05-reference/cockpit-design.md).
+
+**`/` is Início, not the Fila** ([ADR-044](../03-decisions/adr-044-inicio-the-landing-page-is-a-decision-not-a-cockpit.md)).
+The queue lives at **`/fila`** and is otherwise unchanged — every query-string deep link still works,
+because `syncURL()` rebuilds the address from `location.pathname`. `/` does not redirect: a redirect
+would put the cockpit back on the landing URL, which is the thing the ADR removed.
 
 Every view is **deep-linkable** ([ADR-014](../03-decisions/adr-014-restful-deep-linkable-cockpit-urls.md)):
 a detail resource carries its id in the **path** — `/projetos/<pid>` and `/contrapartes/<key>`

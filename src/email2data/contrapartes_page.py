@@ -55,7 +55,8 @@ function onKey(e){
 function paletteItems(q){
   q=(q||'').toLowerCase().trim();
   const items=[
-    {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Início',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Fila',run:()=>{location.href='/fila';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
     {kind:'ação',label:S.actSync,run:syncNow},
@@ -74,12 +75,14 @@ $('#_list').addEventListener('click', e=>{
 
 
 def build_list_html(clusters: list[dict[str, Any]],
-                    nav_counts: dict[str, int] | None = None) -> str:
+                    nav_counts: dict[str, int] | None = None,
+                    person: dict[str, Any] | None = None) -> str:
     return cockpit_ui.page(
         "Contrapartes", "contrapartes", _LIST_BODY,
         embeds={"clusters": clusters},
         lens_js=_LIST_JS,
         nav_counts=nav_counts,
+        person=person,
     )
 
 
@@ -269,7 +272,8 @@ function onKey(e){}
 function paletteItems(q){
   const items=[
     {kind:'ação',label:'← Contrapartes',run:()=>{location.href='/contrapartes';}},
-    {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Início',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Fila',run:()=>{location.href='/fila';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
@@ -284,7 +288,8 @@ def build_detail_html(cluster: dict[str, Any], timeline: list[dict[str, Any]],
                       projects: list[dict[str, Any]], fila_rows: list[dict[str, Any]],
                       *, stats: dict[str, Any] | None = None,
                       gates: list[dict[str, Any]] | None = None,
-                      nav_counts: dict[str, int] | None = None) -> str:
+                      nav_counts: dict[str, int] | None = None,
+                      person: dict[str, Any] | None = None) -> str:
     return cockpit_ui.page(
         cluster.get("display_name") or cluster.get("key", "Contraparte"),
         "contrapartes", _DETAIL_BODY,
@@ -293,4 +298,5 @@ def build_detail_html(cluster: dict[str, Any], timeline: list[dict[str, Any]],
                 "stats": stats or {}, "gates": gates or []},
         lens_js=_DETAIL_JS,
         nav_counts=nav_counts,
+        person=person,
     )

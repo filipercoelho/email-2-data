@@ -343,7 +343,8 @@ TEMPLATE = r"""<!doctype html>
 <body>
 <header>
   <div class="htop"><h1 id="title">email-2-data · workspace</h1><span class="sub" id="sub"></span>
-    <a class="nlink" href="/">Fila</a>
+    <a class="nlink" href="/">Início</a>
+    <a class="nlink" href="/fila">Fila</a>
     <a class="nlink" href="/contrapartes">Contrapartes</a>
     <a class="nlink" href="/projetos">Projetos</a>
     <a class="nlink" href="/para-ti">Para ti</a>

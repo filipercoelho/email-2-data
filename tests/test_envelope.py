@@ -258,3 +258,54 @@ def test_real_corten_email_drops_the_283mp_png_and_keeps_the_svg():
     media = attachment_media(raw)
     assert [im["filename"] for im in media["images"]] == []              # not sent to Vertex
     assert "portico.svg" in [t["filename"] for t in media["texts"]]      # geometry still reaches the model
+
+
+# ── Raw 8-bit headers (ADR-043) ──────────────────────────────────────────────
+
+RAW_8BIT_EML = (
+    b"Subject: Pedido de or\xc3\xa7amento \xe2\x80\x93 cenografia\r\n"
+    b"From: Hugo \xc3\x81lvares <hugo@example.pt>\r\n"
+    b"To: or\xc3\xa7amentos@lindoservico.pt\r\n"
+    b"Date: Wed, 27 May 2026 09:00:00 +0100\r\n"
+    b"Message-ID: <r8@example.pt>\r\n"
+    b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+    b"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBom dia.\r\n"
+    b"--B\r\nContent-Type: application/pdf\r\n"
+    b'Content-Disposition: attachment; filename="Imita\xc3\xa7\xc3\xa3o.pdf"\r\n\r\n%PDF-\r\n'
+    b"--B--\r\n"
+)
+
+
+def test_raw_8bit_headers_decode_across_the_whole_envelope():
+    """A sender that skips RFC 2047 used to lose one character per byte, everywhere at once:
+    subject, display name, address and attachment filename all rendered as U+FFFD runs."""
+    env = parse_eml(RAW_8BIT_EML)
+    assert env["subject"] == "Pedido de orçamento – cenografia"
+    assert env["from"] == {"name": "Hugo Álvares", "email": "hugo@example.pt"}
+    assert env["to"] == [{"name": "", "email": "orçamentos@lindoservico.pt"}]
+    assert env["attachments"][0]["filename"] == "Imitação.pdf"
+    assert attachment_part(RAW_8BIT_EML, 0)[0] == "Imitação.pdf"
+
+
+def test_envelope_is_storable_no_replacement_chars_no_surrogates():
+    """Both failure shapes at once: U+FFFD is lossy in the UI, a surrogate raises in sqlite3/json."""
+    import json
+
+    blob = json.dumps(parse_eml(RAW_8BIT_EML), ensure_ascii=False)
+    assert "�" not in blob
+    blob.encode("utf-8")   # a stray surrogate would raise UnicodeEncodeError here
+
+
+def test_malformed_encoded_word_does_not_abort_the_parse():
+    """`decode_header` raises HeaderParseError on this subject — the email must still parse."""
+    raw = b"Subject: =?utf-8?b?a?=\r\nFrom: a@b.pt\r\nMessage-ID: <m@b.pt>\r\n\r\nbody\r\n"
+    assert parse_eml(raw)["subject"] == "=?utf-8?b?a?="
+
+
+CENOGRAFIA_EML = Path(__file__).resolve().parents[1] / "corpus" / "5d9b256a51beedc08fdea7e58ea967e1.eml"
+
+
+@pytest.mark.skipif(not CENOGRAFIA_EML.exists(), reason="corpus/ is gitignored — real-mail check is local-only")
+def test_real_raw_8bit_subject_from_corpus():
+    env = parse_eml(CENOGRAFIA_EML.read_bytes())
+    assert env["subject"] == 'Pedido de orçamento – construção de cenografia "Imitação dos Pássaros"'

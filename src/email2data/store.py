@@ -114,6 +114,73 @@ class KnowledgeStore:
         self._conn.commit()
         return len(rows)
 
+    def count(self) -> int:
+        """Rows currently in the gazetteer table."""
+        assert self._conn is not None, "call connect() first"
+        return int(self._conn.execute("SELECT count(*) FROM gazetteer").fetchone()[0])
+
+    def counts_by_counterparty(self) -> dict[str, int]:
+        """Row counts per counterparty — the *shape* of the curated knowledge with no key revealed
+        (the keys are real client/supplier domains; personal data does not belong in a status line)."""
+        assert self._conn is not None, "call connect() first"
+        return dict(
+            self._conn.execute(
+                "SELECT counterparty, count(*) FROM gazetteer GROUP BY counterparty "
+                "ORDER BY counterparty"
+            )
+        )
+
+    def seed_or_warn(self, csv_path: str | Path) -> Optional[int]:
+        """Seed from the CSV when it is there — and when it is NOT, say so out loud.
+
+        The CSV is the source of truth, which makes a missing CSV over a **non-empty** table the one
+        genuinely dangerous state: the table goes on serving whatever it was last seeded with, so the
+        priors still fire — including the ADR-005 veto that stops an offline IGNORE — while nobody can
+        read or edit them. That is a frozen snapshot masquerading as a curated list, and it used to be
+        entirely silent (`if gaz.exists()` with no else). A missing CSV over an *empty* table is just a
+        fresh install and stays quiet. Returns rows loaded, or None when there was no CSV.
+        """
+        assert self._conn is not None, "call connect() first"
+        path = Path(csv_path)
+        if path.exists():
+            return self.seed_gazetteer(path)
+        n = self.count()
+        if n:
+            _warn(
+                f"gazetteer: {path} is MISSING but {n} row(s) are still live in "
+                f"{self.db_path.name} — those priors are frozen at their last seed and cannot be "
+                "edited. Recover the source of truth with `email2data gazetteer export`."
+            )
+        return None
+
+    def export_gazetteer(self, csv_path: str | Path) -> int:
+        """Write the live table back out as a seedable CSV — the inverse of ``seed_gazetteer``.
+
+        This exists because the CSV is gitignored (it names real clients), so it is the one store
+        input with no second copy anywhere: lose it and the priors survive only inside
+        ``knowledge.db``, unreadable and uneditable. Round-tripping them back out recovers the source
+        of truth without anyone retyping real client names from memory. Returns rows written.
+        """
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT key, counterparty, note FROM gazetteer ORDER BY counterparty, key"
+        ).fetchall()
+        path = Path(csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(
+                "# Hand-curated key -> counterparty prior (ADR-005): a HINT attached to the LLM call and\n"
+                "# the veto that stops an offline IGNORE — never a verdict. The body always overrides.\n"
+                "# THIS FILE IS THE SOURCE OF TRUTH: triage/sync REPLACE the table from it, so a key\n"
+                "# deleted here is deleted from out/knowledge.db on the next run.\n"
+                "# Gitignored on purpose (it names real clients/suppliers). Regenerate it from the live\n"
+                "# table with `email2data gazetteer export --force`.\n"
+            )
+            w = csv.writer(fh, lineterminator="\n")
+            w.writerow(["domain", "counterparty", "note"])
+            w.writerows(rows)
+        return len(rows)
+
     def lookup(self, identifier: str) -> Optional[str]:
         """Resolve a sender (email or domain) to a counterparty hint, most-specific first:
         exact email → exact domain → registrable parent domain. None if unknown."""

@@ -136,7 +136,12 @@ Top→bottom:
    «pronto a orçamentar»** (`projects.coverage/estimable`, denormalized v3 columns) · spec-conflict
    alert when `merge_job_fields` reports a contradiction.
 7. **Staged draft** (dashed card, only when a draft exists/was requested): template name, body,
-   `[Copiar C]`, footer «rascunho — revê antes de enviar · a app nunca envia».
+   `[Copiar]` + `[✉ Abrir no mail]`, footer «rascunho — revê antes de enviar · a app nunca envia».
+   **«Abrir no mail»** hands `to` + `Re: <assunto>` + body to the OS default client via `mailto:`
+   (which opens a composer and cannot send); «Copiar» stays as the fallback where no client is
+   registered. The body arrives already closed with the reader's **own signature** — see
+   [reply-signature.md](reply-signature.md) and
+   [ADR-047](../03-decisions/adr-047-the-signature-belongs-to-the-person-not-the-playbook.md).
 8. **Conversa** — vertical timeline + messages (§7).
 
 The message renderer is the **existing** `msgHTML`/`_threadCache` kit — the dossier is a new *mount

@@ -15,6 +15,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from email2data import captures_page, webapp  # noqa: E402
+from conftest import signed_in_client
 
 SETTINGS = {"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash"}}
 
@@ -26,7 +27,7 @@ def _setup(tmp_path):
     pid = proj.create("Estante Sousa", stage="LEAD")
     app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={}, reply_pb="pb",
                             prepared=([], [], {}), captures_dir=tmp_path)
-    return TestClient(app), ws, cap, proj, pid
+    return signed_in_client(TestClient(app), ws), ws, cap, proj, pid
 
 
 def test_capturas_page_serves_and_ships_the_lens_contract(tmp_path):

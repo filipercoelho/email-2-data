@@ -26,5 +26,12 @@ future uncertainty without ever short-circuiting the body-decides rule.
 - `cascade.py:70` — `if signals.ignorable_offline and hint is None:` → only mail with **no**
   gazetteer knowledge can be binned offline.
 - Adding a gazetteer row makes the system escalate *more* carefully, never bin *more*.
+- **The CSV must be present, or we say so** (added 2026-07-26). `seed_gazetteer` *replaces* the
+  table, so the CSV owns the priors — which means a missing CSV leaves them alive inside
+  `knowledge.db` but invisible and uneditable, still vetoing offline IGNOREs on a list nobody can
+  read. That happened for three days. `build_store` now calls `store.seed_or_warn`, which warns when
+  the CSV is absent over a non-empty table, and `email2data gazetteer export` round-trips the table
+  back into a seedable CSV. Knowledge that compounds must also stay *curatable*. See
+  [data-stores.md](../05-reference/data-stores.md#the-gazetteer-is-managed-again--csv-restored--the-silent-case-made-loud-fixed-2026-07-26).
 - Trace: `src/email2data/store.py` (gazetteer KnowledgeStore), `cascade.py:62-70`.
   Source: [VISION.md](../../VISION.md) tenet 5 ("knowledge compounds").

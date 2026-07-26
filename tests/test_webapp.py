@@ -14,6 +14,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from email2data import webapp  # noqa: E402
+from conftest import TEST_ADMIN, signed_in_client
 
 JOB = js.build_jobspec(
     {"message_id": "m1", "subject": "Pedido troféus", "counterparty": "CLIENT",
@@ -28,7 +29,7 @@ SETTINGS = {"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash"}}
 def _client(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb", prepared=([EMAIL], [], {}))
-    return TestClient(app)
+    return signed_in_client(TestClient(app), ws)
 
 
 def test_index_renders_the_live_report(tmp_path):
@@ -70,7 +71,7 @@ def test_sync_endpoint_refreshes_render_state(tmp_path, monkeypatch):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(settings, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
                             prepared=([EMAIL], [], {}))
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app), ws)
     assert "Novo lead" not in c.get("/inbox").text          # not yet present
     r = c.post("/api/sync", json={})
     assert r.status_code == 200 and r.json()["triaged_new"] == 1
@@ -116,7 +117,11 @@ def test_reply_route_uses_replydraft(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp.classifier, "make_client", lambda s: object())
     monkeypatch.setattr(webapp.replydraft, "draft_reply", lambda *a, **k: "RASCUNHO GERADO")
     r = _client(tmp_path).post("/api/reply", json={"message_id": "m1"})
-    assert r.status_code == 200 and r.json()["reply"] == "RASCUNHO GERADO"
+    assert r.status_code == 200
+    # The model's text opens the reply; the signature of the signed-in person closes it (ADR-047).
+    # Asserting equality here would pin the closing to this route, where it does not belong.
+    assert r.json()["reply"].startswith("RASCUNHO GERADO")
+    assert r.json()["reply"].rstrip().endswith(TEST_ADMIN + "\nLindo Serviço")
 
 
 def test_reply_stream_route_streams_chunks(tmp_path, monkeypatch):
@@ -129,7 +134,11 @@ def test_reply_stream_route_streams_chunks(tmp_path, monkeypatch):
     r = c.post("/api/reply/stream", json={"message_id": "m1"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/plain")
-    assert r.text == "Olá, obrigado pelo pedido."          # chunks reassembled in order
+    # Chunks reassembled in order, then closed with the signature (ADR-047). The tail is held back
+    # until the generator ends so a model-written sign-off can still be stripped — a stream cannot
+    # retract what it has already sent, which is the whole reason that hold exists.
+    assert r.text.startswith("Olá, obrigado pelo pedido.")
+    assert r.text.rstrip().endswith(TEST_ADMIN + "\nLindo Serviço")
     assert c.post("/api/reply/stream", json={"message_id": "zzz"}).status_code == 404
 
 
@@ -261,7 +270,7 @@ def test_description_polish_route_checks_and_returns_both_texts(tmp_path, monkey
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(settings, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
                             prepared=([EMAIL], [], {}))
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app), ws)
     pid = c.post("/api/projects", json={"title": "Troféus", "from_message": "m1"}).json()["project_id"]
     for addr, val in [("item#0", "troféu"), ("material#0", "acrílico"), ("thickness#0", "3mm"),
                       ("dimensions#0", "L 300 x A 200 mm"), ("colour_finish#0", "gravação")]:
@@ -317,7 +326,7 @@ def test_attachment_endpoint_serves_and_404s(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
                             prepared=([EMAIL], [], {}), corpus_index={"m1": eml})
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app), ws)
     r = c.get("/api/attachment/m1/0")
     assert r.status_code == 200 and b"PDFBYTES" in r.content
     assert "spec.pdf" in r.headers["content-disposition"] and "inline" in r.headers["content-disposition"]
@@ -352,7 +361,7 @@ def test_projects_work_with_a_real_crm_store(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": j1, "m2": j2}, reply_pb="pb",
                             prepared=([], [], {}), crm_store=crm)
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app), ws)
 
     r = c.post("/api/projects", json={"title": "Troféus", "from_message": "m1"})
     assert r.status_code == 200
@@ -401,7 +410,7 @@ def test_project_view_flags_dangling_threads(tmp_path):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"live": JOB}, reply_pb="pb",
                             prepared=([], [], {}), crm_store=crm)
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app), ws)
     pid = c.post("/api/projects", json={"title": "X"}).json()["project_id"]
     c.post(f"/api/projects/{pid}/attach", json={"ref": "live"})
     c.post(f"/api/projects/{pid}/attach", json={"ref": "ghost-root"})   # not in CRM
@@ -576,7 +585,7 @@ def test_from_settings_builds_on_fresh_out_dir(tmp_path):
     settings = {**SETTINGS, "__settings_path__": str(cfg_dir / "settings.json"),
                 "sync": {"on_startup": False}}
     app = webapp.from_settings(settings)          # must not raise on empty out/
-    c = TestClient(app)
+    c = signed_in_client(TestClient(app))
     assert c.get("/inbox").status_code == 200      # renders an empty-but-valid report
 
 
@@ -594,9 +603,46 @@ def test_reply_is_memoized_across_calls(tmp_path, monkeypatch):
     c = _client(tmp_path)
     r1 = c.post("/api/reply", json={"message_id": "m1"})
     r2 = c.post("/api/reply", json={"message_id": "m1"})
-    assert r1.json()["reply"] == "DRAFT 1" and r2.json()["reply"] == "DRAFT 1"
+    assert r1.json()["reply"].startswith("DRAFT 1") and r2.json()["reply"].startswith("DRAFT 1")
+    assert r1.json()["reply"] == r2.json()["reply"]
     assert r2.json().get("cached") is True
     assert calls["n"] == 1                       # model called exactly once despite two requests
+
+
+def test_the_reply_memo_holds_the_UNSIGNED_body_so_it_cannot_leak_a_signature(tmp_path, monkeypatch):
+    """ADR-047: the cache key is the SPEC, which says nothing about who is signed in.
+
+    Signing before caching would mean the second person to open the same thread reads a draft closed
+    with the first person's name, function and phone number — a client email sent in the wrong name,
+    served from a memo that looks like a pure optimisation. Two people, one unchanged spec, one model
+    call: each must get their own closing.
+    """
+    from conftest import sign_in
+    calls = {"n": 0}
+    monkeypatch.setattr(webapp.classifier, "make_client", lambda s: object())
+
+    def fake_draft(*a, **k):
+        calls["n"] += 1
+        return "CORPO DO RASCUNHO"
+    monkeypatch.setattr(webapp.replydraft, "draft_reply", fake_draft)
+
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
+                            prepared=([EMAIL], [], {}))
+    first = signed_in_client(TestClient(app), ws)
+    ws.set_person_profile(ws.person(TEST_ADMIN)["person_id"], signature="Abraço,\n{nome}")
+    r1 = first.post("/api/reply", json={"message_id": "m1"}).json()["reply"]
+
+    second = TestClient(app)
+    other = sign_in(second, ws, name="Outra Pessoa", is_admin=True)
+    ws.set_person_profile(other["person_id"], signature="Cumprimentos,\n{nome} · {cargo}",
+                          job_title="Comercial")
+    r2 = second.post("/api/reply", json={"message_id": "m1"})
+
+    assert calls["n"] == 1, "the memo stopped working — the model was called twice"
+    assert r2.json()["cached"] is True
+    assert r1 == "CORPO DO RASCUNHO\n\nAbraço,\nTeste Admin"
+    assert r2.json()["reply"] == "CORPO DO RASCUNHO\n\nCumprimentos,\nOutra Pessoa · Comercial"
 
 
 def test_reply_cache_busts_when_spec_changes(tmp_path, monkeypatch):
@@ -642,11 +688,13 @@ def test_reply_stream_is_memoized_and_cross_route(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp.replydraft, "draft_reply", fake_draft)
 
     c = _client(tmp_path)
-    assert c.post("/api/reply/stream", json={"message_id": "m1"}).text == "STREAMED DRAFT"
+    r1 = c.post("/api/reply/stream", json={"message_id": "m1"})
+    assert r1.text.startswith("STREAMED DRAFT")
     r2 = c.post("/api/reply/stream", json={"message_id": "m1"})           # replay from cache
-    assert r2.text == "STREAMED DRAFT" and calls["stream"] == 1           # generator NOT re-run
+    assert r2.text == r1.text and calls["stream"] == 1                    # generator NOT re-run
     r3 = c.post("/api/reply", json={"message_id": "m1"})                  # cross-route: served cached
-    assert r3.json() == {"reply": "STREAMED DRAFT", "cached": True} and calls["draft"] == 0
+    assert r3.json() == {"reply": r1.text, "cached": True} and calls["draft"] == 0
+    assert TEST_ADMIN in r1.text
 
 
 def test_project_cancel_records_party_reason_and_clears_on_reopen(tmp_path):
@@ -695,6 +743,59 @@ def test_roster_add_remove_and_served_to_fila(tmp_path):
     assert "Sofia" not in c.get("/api/roster").json()["roster"]
 
 
+def test_a_name_added_to_the_roster_is_a_real_person(tmp_path):
+    """ADR-041/W8: one roster. Before this the picker held free text, so a name could be assignable
+    and not be a person — you could give Rita work and could not grant her anything."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
+                            prepared=([EMAIL], [], {}))
+    c = signed_in_client(TestClient(app), ws)
+    c.post("/api/roster", json={"name": "Sofia"})
+    sofia = ws.person("Sofia")
+    assert sofia is not None and sofia["can_login"] is False
+    # …and accountable to whoever added her, not to nobody.
+    assert ws.person_by_id(sofia["responsible_id"])["name"] == TEST_ADMIN
+
+
+def test_the_picker_cannot_be_used_to_deactivate_someone_who_signs_in(tmp_path):
+    """/api/roster/remove is open to every member. Post-W8 it acts on people, so without this guard a
+    picker affordance would have become a way to switch off a colleague's — or an admin's — access."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
+                            prepared=([EMAIL], [], {}))
+    c = signed_in_client(TestClient(app), ws)
+    r = c.post("/api/roster/remove", json={"name": TEST_ADMIN})
+    assert r.status_code == 400 and "Administração" in r.json()["error"]
+    assert ws.person(TEST_ADMIN)["active"] is True
+    assert TEST_ADMIN in c.get("/api/roster").json()["protected"]
+
+
+def test_retiring_an_assignable_owner_keeps_their_past_assignments(tmp_path):
+    """Deactivation, not deletion: the thread Sofia owns still says Sofia."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
+                            prepared=([EMAIL], [], {}))
+    c = signed_in_client(TestClient(app), ws)
+    c.post("/api/roster", json={"name": "Sofia"})
+    ws.set_thread_owner("t1", "Sofia")
+    c.post("/api/roster/remove", json={"name": "Sofia"})
+    assert "Sofia" not in c.get("/api/roster").json()["roster"]
+    assert ws.thread_owners()["t1"] == ["Sofia"]
+    assert ws.person("Sofia") is not None
+
+
+def test_deactivating_someone_in_administracao_drops_them_from_the_picker(tmp_path):
+    """The other half of «one roster»: the two surfaces cannot disagree about who exists."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={"m1": JOB}, reply_pb="pb",
+                            prepared=([EMAIL], [], {}))
+    c = signed_in_client(TestClient(app), ws)
+    diogo = ws.create_person("Diogo", can_login=True)
+    assert "Diogo" in c.get("/api/fila").json()["team"]
+    c.post(f"/api/admin/people/{diogo['person_id']}", json={"active": False})
+    assert "Diogo" not in c.get("/api/fila").json()["team"]
+
+
 def test_project_participants_rolls_up_asserted_by(tmp_path):
     """Multi-participant surfacing (ADR-015): the people who fed the project (via the capture ledger's
     asserted_by) are rolled up into a per-person contributor list."""
@@ -728,7 +829,7 @@ def test_projetos_page_ships_owners_cancel_and_participants(tmp_path):
 def test_fila_page_ships_multi_owner_picker(tmp_path):
     """Phase C: the Fila owner control is now a multi-select picker writing the owners list, with an
     in-app '+ novo dono' that adds to the roster."""
-    html = _client(tmp_path).get("/").text
+    html = _client(tmp_path).get("/fila").text
     assert "function setThreadOwners(" in html and "function toggleThreadOwner(" in html
     assert "function ownerLabel(" in html and "function addFilaOwner(" in html
     assert "+ novo dono" in html and "/api/roster" in html
@@ -778,7 +879,7 @@ def _admin_app(tmp_path, settings=None, **kw):
     ws = Workspace(tmp_path / "w.db").connect()
     app = webapp.create_app(s, workspace=ws, jobspecs=kw.pop("jobspecs", {"m1": JOB}),
                             reply_pb="pb", prepared=([EMAIL], [], {}), **kw)
-    return TestClient(app), s
+    return signed_in_client(TestClient(app), ws), s
 
 
 def test_admin_accounts_never_leaks_a_password(tmp_path, monkeypatch):

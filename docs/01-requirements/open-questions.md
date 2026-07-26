@@ -42,8 +42,21 @@
       success looks like): **~100% recall on client job requests / POs**, **≈0
       real-clients-binned**, and tokens-per-email trending down at constant-or-better accuracy.
 
+- [x] **IMAP port** → FACT, **confirmed 2026-07-26 against the live account** (was the last open
+      question here; it had stayed ⬜ long after we started fetching mail daily). **`993` over
+      SSL**, host `mail.lindoservico.pt`. Evidence, in order of strength: (1) the live
+      `config/settings.json` has `imap.port: 993`, `use_ssl: true`, and `fetch.py:86-88` opens
+      `imaplib.IMAP4_SSL(host, port)` with `993` as the default — so a successful fetch *is* a
+      successful 993/SSL login; (2) `out/sync.db` `fetch_cursor` holds server-issued
+      **UIDVALIDITY** values per mailbox (e.g. `orcamentos/INBOX` → `1653756219`, `last_uid`
+      `9743`) stamped `2026-07-26T02:00:19+00:00` — a UIDVALIDITY can only come back from the
+      server's `EXAMINE` response, so those rows are proof of a completed session, not of a
+      config file; (3) **948** attributed messages in `sync.message_scope` across **10**
+      addresses and **553** `.eml` files in `corpus/`. Trace: `src/email2data/fetch.py`,
+      `config/settings.json`, `out/sync.db`.
+
 ## Genuinely open (confirm before relying on)
 
-- [ ] **IMAP port** — `config/settings.example.json` defaults to `993/SSL` but notes "verify
-      the IMAP port with the provider before first run." UNKNOWN until confirmed against the
-      live mail.pt account; do not assume.
+*None.* Every question seeded at scaffold adoption is now answered above. Add new ones here
+rather than leaving a resolved one marked open — a stale ⬜ next to something we do daily is
+how this file stops being trusted.

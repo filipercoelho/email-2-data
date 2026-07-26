@@ -145,6 +145,54 @@ def test_cursors_and_errors_render_per_account():
     assert "Cursores de leitura" in html
 
 
+# ── the «Pessoas» panel (ADR-041) ────────────────────────────────────────────
+
+
+def test_the_people_panel_ships_with_its_api_and_its_container():
+    html = admin_page.build_html([ACCOUNT])
+    assert 'id="_people"' in html and "function renderPeople(" in html
+    for marker in ("/api/admin/people", "function loadPeople(", "function addPerson(",
+                   "function inviteFor(", "function saveScopes("):
+        assert marker in html, marker
+
+
+def test_the_people_panel_never_optimistically_shows_a_refused_change():
+    """Every write adopts the SERVER's roster. A panel that mutated its own copy first would show a
+    promotion the store refused — and the store is where the last-admin invariant lives."""
+    html = admin_page.build_html([ACCOUNT])
+    writer = html[html.index("async function peopleWrite("):]
+    writer = writer[:writer.index("function addPerson(")]
+    assert "d.people" in writer and "people = d.people" in writer
+    assert "failMsg(e" in writer, "a refusal must be shown with the reason the server gave"
+
+
+def test_the_panel_offers_nobody_a_button_that_always_fails_on_their_own_row():
+    """Found by looking at the rendered page, not by a green test: my own row carried «Despromover»,
+    «Desativar» and «Remover», and the server refuses all three by design. That is exactly the defect
+    ADR-040 was written about — the door is locked and still shown — reappearing one screen over."""
+    html = admin_page.build_html([ACCOUNT])
+    row = html[html.index("function personRow("):html.index("function btn(")]
+    assert "p.person_id === ME" in row or "p.person_id !== ME" in row, (
+        "the row cannot tell whose it is, so it cannot stop offering you the buttons you will be "
+        "refused")
+    assert "const ME =" in html, "the page is never told which person is looking at it"
+    assert "és tu" in html                      # …and says why the buttons are absent
+
+
+def test_the_people_panel_states_the_difference_between_deactivating_and_removing():
+    """The two are not interchangeable: one preserves who decided what, the other erases it. If the
+    page does not say so, the destructive one is the one that looks tidier."""
+    html = admin_page.build_html([ACCOUNT])
+    assert "Desativar" in html and "Remover" in html
+    assert "preserva o histórico" in html
+
+
+def test_the_invite_link_is_offered_for_copying_not_printed_to_a_terminal():
+    html = admin_page.build_html([ACCOUNT])
+    assert "/convite" in html and "navigator.clipboard" in html
+    assert "uso único" in html
+
+
 def test_malformed_input_does_not_explode():
     # Empty/None/garbage: a missing account list, a non-dict account, a bare-string error, a bad
     # port — the page must still render rather than 500 the whole /admin route.
@@ -153,3 +201,14 @@ def test_malformed_input_does_not_explode():
     assert '"port": null' in html
     assert "boom" in html
     assert admin_page.build_html([], {}) .count("const ACCOUNTS = []") == 1
+
+
+def test_the_people_card_offers_an_email_field_and_flags_who_cannot_recover():
+    """ADR-042: someone who can sign in but has no address cannot use «Esqueceste-te da
+    palavra-passe?» at all, and the way that is normally discovered is by being locked out. The
+    panel that can fix it is the panel that must say it."""
+    html = admin_page.build_html([], person={"person_id": "PER-1", "name": "Filipe",
+                                             "is_admin": True})
+    for marker in ("data-eml=", "function saveEmail(", "Guardar email",
+                   "sem email — não pode recuperar", "act === 'email'"):
+        assert marker in html, f"missing {marker!r}"

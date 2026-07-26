@@ -452,6 +452,86 @@ def sort_key(clock: dict[str, Any], counterparty: str) -> tuple[int, int, float]
             clock["age_hours"])
 
 
+# ── demand (ADR-044) ────────────────────────────────────────────────────────────────────────────
+#
+# "Demand" is the one number the whole app leads with: what actually needs a human right now, as
+# opposed to how much mail exists. It was written three times independently — the nav badge in
+# webapp._nav_counts, and `respondCount`/`chaseCount` in the Fila's JS — which is three chances for
+# the Início headline, the Fila front card and the nav badge to disagree about the same queue in the
+# same viewport. They are defined ONCE here, in the module that already owns the state constants, and
+# `test_home_page.py` pins the Python against the JS definitions so a change to one has to change
+# the other.
+#
+# Both predicates take a ROW (as built by build_fila), not a clock, so a caller cannot accidentally
+# pass the wrong half of the row.
+
+def owes_reply(row: dict[str, Any]) -> bool:
+    """The ball is ours AND the clock has already turned: WE_OWE at red or amber.
+
+    Green is deliberately excluded — a thread we received twenty minutes ago is not yet a demand,
+    and counting it would make «N esperam resposta» tick up for merely receiving mail."""
+    clock = row.get("clock") or {}
+    return clock.get("state") == WE_OWE and clock.get("band") in ("red", "amber")
+
+
+def awaits_chase(row: dict[str, Any]) -> bool:
+    """Their move, but overdue enough that a nudge is ours to make: AWAITING at amber."""
+    clock = row.get("clock") or {}
+    return clock.get("state") == AWAITING and clock.get("band") == "amber"
+
+
+def respond_demand(rows: Iterable[dict[str, Any]]) -> int:
+    """How many threads are waiting on a reply from us — the app's headline number."""
+    return sum(1 for r in rows if owes_reply(r))
+
+
+def chase_demand(rows: Iterable[dict[str, Any]]) -> int:
+    """How many threads are overdue on their side, i.e. ours to chase."""
+    return sum(1 for r in rows if awaits_chase(r))
+
+
+def oldest_owed_hours(rows: Iterable[dict[str, Any]]) -> Optional[float]:
+    """Age, in hours, of the LONGEST-STALLED thread we owe a reply on — or None when we owe none.
+
+    Scoped to ``owes_reply`` on purpose. The worst-aged row overall is usually something nobody is
+    waiting on (an old FYI), so reporting that as «a mais antiga» would put a frightening number on
+    the home page that no action would ever reduce."""
+    ages = [float((r.get("clock") or {}).get("age_hours") or 0.0) for r in rows if owes_reply(r)]
+    return max(ages) if ages else None
+
+
+def humanize_age(age_h: float) -> str:
+    """Public spelling of the clock's age wording, so the home page cannot invent a second one."""
+    return _humanize_age(age_h)
+
+
+def home_summary(rows: Iterable[dict[str, Any]],
+                 fronts: Iterable[str] = ("CLIENT", "SUPPLIER", "LEAD")) -> dict[str, Any]:
+    """The whole Início page's numbers, derived once (ADR-044).
+
+    Returns ``{"all": <block>, "CLIENT": <block>, …}`` where each block is
+    ``{"total", "respond", "chase", "oldest_h", "oldest_label"}`` — scoped to that counterparty and
+    computed from the same ``rows`` the Fila renders, so a card can never contradict the queue it
+    opens. ``"all"`` is every active row, which is what the Fila calls «Hoje».
+
+    Each front tells its OWN truth (ADR-034): the block for CLIENT counts only CLIENT rows,
+    regardless of which front a reader is looking at."""
+    rows = list(rows)
+
+    def block(subset: list[dict[str, Any]]) -> dict[str, Any]:
+        oldest = oldest_owed_hours(subset)
+        return {"total": len(subset),
+                "respond": respond_demand(subset),
+                "chase": chase_demand(subset),
+                "oldest_h": oldest,
+                "oldest_label": humanize_age(oldest) if oldest is not None else ""}
+
+    out = {"all": block(rows)}
+    for key in fronts:
+        out[key] = block([r for r in rows if (r.get("counterparty") or "") == key])
+    return out
+
+
 def recency_key(s: ThreadSummary) -> float:
     """Seconds-since-epoch of the thread's LAST activity, any direction (used for ORDER BY DESC).
 

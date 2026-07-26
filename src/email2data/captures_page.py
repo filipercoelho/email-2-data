@@ -206,7 +206,7 @@ async function applyCap(i){
   try{
     await post('/api/captures/'+encodeURIComponent(c.capture_id)+'/apply', {project_id: pid, kind: kind});
     gone.add(c.capture_id); render(); bumpNav(); toast('aplicado'); announce('captura aplicada');
-  }catch(e){ toast(S.revertido); }
+  }catch(e){ toast(S.falhou); }
   finally{ _busy.delete(c.capture_id); }
 }
 async function discardCap(i){
@@ -216,7 +216,7 @@ async function discardCap(i){
   try{
     await post('/api/captures/'+encodeURIComponent(c.capture_id)+'/discard', {});
     gone.add(c.capture_id); render(); bumpNav(); toast('descartado'); announce('captura descartada');
-  }catch(e){ toast(S.revertido); }
+  }catch(e){ toast(S.falhou); }
   finally{ _busy.delete(c.capture_id); }
 }
 
@@ -231,7 +231,8 @@ function onKey(e){
 function paletteItems(q){
   q = (q||'').toLowerCase().trim();
   const base = [
-    {kind:'ação', label:'Fila', run:()=>{ location.href='/'; }},
+    {kind:'ação', label:'Início', run:()=>{ location.href='/'; }},
+    {kind:'ação', label:'Fila', run:()=>{ location.href='/fila'; }},
     {kind:'ação', label:'Contrapartes', run:()=>{ location.href='/contrapartes'; }},
     {kind:'ação', label:'Projetos', run:()=>{ location.href='/projetos'; }},
     {kind:'ação', label:'Para ti', run:()=>{ location.href='/para-ti'; }},
@@ -260,7 +261,7 @@ async function confirmField(card, row){
     row.classList.add('saved');
     const b = row.querySelector('.capfok'); if(b){ b.textContent = '✓ guardado'; b.disabled = true; }
     toast('campo guardado em '+pid); announce('campo confirmado');
-  }catch(e){ toast(S.revertido); }
+  }catch(e){ toast(S.falhou); }
 }
 
 /* Persist project/kind picks AND field-value edits onto the capture so a re-render restores them. */
@@ -293,7 +294,8 @@ $('#_list').addEventListener('click', e=>{
 
 
 def build_html(captures: list[dict[str, Any]], projects: list[dict[str, Any]],
-               nav_counts: dict[str, int] | None = None) -> str:
+               nav_counts: dict[str, int] | None = None,
+               person: dict[str, Any] | None = None) -> str:
     """Render the Caixa de Capturas queue. ``captures`` are pending rows from ``CaptureStore``;
     ``projects`` are the active projects (terminal stages filtered out) for the pick-list."""
     labels = {k: _KIND_LABEL.get(k, k) for k in EVENT_KINDS}
@@ -303,4 +305,5 @@ def build_html(captures: list[dict[str, Any]], projects: list[dict[str, Any]],
                 "field_labels": _FIELD_LABELS},
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
+        person=person,
     )

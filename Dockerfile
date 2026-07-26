@@ -23,11 +23,15 @@ RUN pip install --no-cache-dir ".[web,vertex]"
 # to non-root for a server deploy, add a USER with a UID matching the host volume owner AND point the
 # Vertex ADC mount at that user's HOME (compose maps to /root/.config/gcloud, which only fits root).
 
+COPY bin/healthcheck.py /app/bin/healthcheck.py
+
 EXPOSE 8042
 # Liveness: a crash-looping boot (e.g. a missing/empty volume) never answers /healthz, so the
 # container is reported unhealthy instead of silently restart-looping. Uses python (no curl in slim).
+# Scheme-agnostic: bin/healthcheck.py tries HTTPS then HTTP, so turning on opt-in TLS does not mark
+# the container unhealthy — which would also stop intake-bot (it depends_on: email2data healthy).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8042/healthz', timeout=2).status==200 else 1)"
+    CMD ["python", "/app/bin/healthcheck.py"]
 
 # Bind 0.0.0.0 so the host can reach it through the published port; compose maps it to 127.0.0.1 only.
 CMD ["email2data", "serve", "--port", "8042", "--host", "0.0.0.0"]

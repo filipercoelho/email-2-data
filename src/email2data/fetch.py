@@ -172,6 +172,7 @@ def _fetch_mailbox(
     *,
     cursor: tuple[int, int] | None = None,
     full: bool = False,
+    scope_sink: list[str] | None = None,
 ) -> tuple[list[Path], int | None, int]:
     """Fetch from one already-authenticated IMAP connection.
 
@@ -244,7 +245,13 @@ def _fetch_mailbox(
         # would otherwise make the INBOX and Sent copies hash differently — two files, and the Sent
         # override never fires. Hashing pre-injection keeps ONE file per email regardless of folder/
         # order; for Message-ID-bearing mail (the norm) the id is unaffected either way.
-        dest = corpus_dir / safe_filename(canonical_id_from_raw(raw))
+        canonical = canonical_id_from_raw(raw)
+        dest = corpus_dir / safe_filename(canonical)
+        # ADR-038 tier-1 attribution: report every message SEEN here, not only newly-written ones.
+        # A message already cached via another account must still gain a row for this mailbox, or a
+        # thread shared between two inboxes would be visible to only one of their readers.
+        if scope_sink is not None:
+            scope_sink.append(canonical)
         if inject:
             raw = _source_header(mailbox) + raw  # but CACHE the copy with the source header for direction
         if dest.exists():
@@ -275,6 +282,9 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
     max_messages = int(settings.get("fetch", {}).get("max_messages", 200))
     mailboxes = _account_mailboxes(settings, account)
     account_id = account["id"]
+    # ADR-038: the scope token is the ADDRESS, not the account id -- margarida.reis@ and friends are
+    # real inboxes with no fetch account, and keying on the address grants them uniformly.
+    account_address = str(account.get("username") or "").strip().lower()
 
     conn = None
     written: list[Path] = []
@@ -283,10 +293,22 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
         for mailbox in mailboxes:
             try:
                 cursor = sync.get_cursor(account_id, mailbox) if sync is not None else None
+                seen_ids: list[str] = []
                 paths_w, uidvalidity, max_uid = _fetch_mailbox(
                     conn, mailbox, corpus_dir, audit_log, account_id, since_days, max_messages,
-                    cursor=cursor, full=full)
+                    cursor=cursor, full=full, scope_sink=seen_ids)
                 written.extend(paths_w)
+                # ADR-038 tier-1 (FACT): the account we authenticated as IS where this mail landed --
+                # the strongest evidence available, and the only tier for mail whose delivery headers
+                # the server never wrote. Best-effort by design: attribution must never be able to
+                # fail a read-only fetch, so a store error is audited and swallowed.
+                if sync is not None and seen_ids and account_address:
+                    try:
+                        for mid in dict.fromkeys(seen_ids):
+                            sync.set_message_scopes(mid, [account_address], "fetch")
+                    except Exception as exc:  # noqa: BLE001 -- never fail a fetch over attribution
+                        audit.log(audit_log, "scope_record_failed", account_id,
+                                  {"mailbox": mailbox, "error": type(exc).__name__})
                 # Persist only when we actually saw mail AND know the epoch — an empty poll must not
                 # clobber a good watermark, and a missing UIDVALIDITY can't anchor one.
                 if sync is not None and uidvalidity is not None and max_uid > 0:

@@ -252,7 +252,7 @@ function detailHTML(item){
   if(!d) return '<div class="gdetail"><span class="gload">a carregar a conversa…</span></div>';
   const msgs=d.messages||[];
   const body=msgs.length
-    ? msgThreadHTML(msgs, {provenance:(d.spec&&d.spec.provenance)||{}})
+    ? msgThreadHTML(msgs, {provenance:(d.spec&&d.spec.provenance)||{}, attachments:d.attachments})
     : '<span class="gload">sem mensagens guardadas para esta thread</span>';
   return '<div class="gdetail">'+body+specHTML(d.spec)+'</div>';
 }
@@ -261,8 +261,7 @@ async function loadDetail(item){
   const root=item.thread_root;
   if(!root || _detail[root] || _detailErr[root]) return;
   try{
-    const r=await fetch('/api/thread/'+encodeURIComponent(root));
-    const d=await r.json();
+    const d=await getJSON('/api/thread/'+encodeURIComponent(root));
     if(d.error) _detailErr[root]=d.error;
     else _detail[root]={messages:d.messages||[], spec:d.spec||null};
   }catch(e){ _detailErr[root]='falhou ao carregar a conversa'; }
@@ -600,9 +599,7 @@ async function refresh(opts){
   if(_refreshing) return;
   _refreshing = true;
   try{
-    const r = await fetch('/api/para-ti', {cache:'no-store'});
-    if(!r.ok) return;
-    const d = await r.json();
+    const d = await getJSON('/api/para-ti');
     const next = d.items || [];
     _syncedAt = d.synced_at || _syncedAt;
     setNavCounts(d.nav_counts);
@@ -629,17 +626,18 @@ async function refresh(opts){
 }
 
 // Poll only while the tab is actually being looked at; catch up the moment it regains focus.
-setInterval(()=>{ if(!document.hidden) refresh(); }, REFRESH_MS);
+everyMs(()=>{ if(!document.hidden) refresh(); }, REFRESH_MS);
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) refresh(); });
 _lastSig = _sig(items);
 applyURL();
 refresh({quiet:true});
-setInterval(()=>paintFreshness(false), 60000);
+everyMs(()=>paintFreshness(false), 60000);
 
 function paletteItems(q){
   q=(q||'').toLowerCase().trim();
   const base=[
-    {kind:'ação',label:'Fila',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Início',run:()=>{location.href='/';}},
+    {kind:'ação',label:'Fila',run:()=>{location.href='/fila';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
     {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
@@ -696,7 +694,8 @@ $('#_menu').addEventListener('click', e=>{
 
 def build_html(items: list[dict[str, Any]],
                nav_counts: dict[str, int] | None = None,
-               roster: list[str] | None = None) -> str:
+               roster: list[str] | None = None,
+               person: dict[str, Any] | None = None) -> str:
     return cockpit_ui.page(
         "Para ti", "para-ti", _BODY,
         embeds={"items": items,
@@ -711,4 +710,5 @@ def build_html(items: list[dict[str, Any]],
         lens_js=_LENS_JS,
         nav_counts=nav_counts,
         extra_css=_EXTRA_CSS,
+        person=person,
     )
