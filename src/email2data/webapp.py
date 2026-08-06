@@ -19,7 +19,7 @@ import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 from . import (accounts as _accounts, admin_page, capture_resolve, captures, captures_page,
@@ -155,6 +155,41 @@ def _load_jobspecs(out_dir: Path) -> dict[str, Any]:
     return m
 
 
+def _load_sidecars(out_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The two ADR-054 sidecars: ``(evidence by message_id, narratives by thread_root)``.
+
+    Both loaders are deliberately TOLERANT where ``_load_jobspecs`` above is not. This runs inside
+    ``create_app``, i.e. before the lifespan — an unhandled ``JSONDecodeError`` here does not degrade
+    a feature, it makes the app unconstructable, so ``/healthz`` never answers and the container
+    crash-loops. These two files are written by LLM passes and carry free text; they are the last
+    files that should be able to do that.
+    """
+    from .locate import load_evidence
+    from .narrate import load_narratives
+    return load_evidence(out_dir), load_narratives(out_dir)
+
+
+def _thread_decision_lines(states: dict[str, Any]) -> Callable[[str], list[str]]:
+    """``thread_root -> the human decisions on it, as short PT lines`` for the narrative prompt.
+
+    Module-level and closed over a plain dict so the narrative pass never touches a store, and so
+    this is testable without standing up an app. Only decisions that are TRUE of the thread as a
+    whole go in — a per-message reclassification carries no message_id and no timestamp in the
+    ledger, so feeding it here would give the model "corrigido counterparty → CLIENT" with no way to
+    place it in the conversation, and a chronicler that cannot place an event will invent a place
+    for it.
+    """
+    def _for(root: str) -> list[str]:
+        st = states.get(root) or {}
+        out: list[str] = []
+        if st.get("owners"):
+            out.append(f"dono da conversa: {', '.join(st['owners'])}")
+        if st.get("handled"):
+            out.append(f"marcada como tratada em {(st.get('handled_ts') or '')[:10]}")
+        return out
+    return _for
+
+
 # ── periodic sync (ADR-023) ──────────────────────────────────────────────────────────────────────
 # Module-level so the schedule is testable without standing up a whole app: the loop takes the
 # already-locked ``run_sync`` as a parameter rather than closing over it.
@@ -192,11 +227,15 @@ def periodic_sync_loop(run_sync, interval_s: float, stop: threading.Event, log=p
 
 def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply_pb=None,
                prepared=None, crm_store=None, corpus_index=None, capture_store=None,
-               captures_dir=None, auth_store=None):
+               captures_dir=None, auth_store=None, evidence=None, narratives=None):
     """Injectable factory. Defaults wire to the real files; tests pass prepared/jobspecs/workspace.
 
     ``crm_store`` is an open ``CrmStore`` instance; when omitted the factory opens ``out/crm.db``
     if it exists, or leaves relation queries unavailable (503) if it doesn't.
+
+    ``evidence`` / ``narratives`` are the ADR-054 sidecars (``out/evidence.jsonl`` keyed by
+    message_id, ``out/narratives.jsonl`` keyed by thread_root); when omitted they are read from
+    ``out/`` and both degrade to ``{}`` — absent evidence renders exactly as it did before Phase 4.
     """
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -221,6 +260,12 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     else:
         _auth = _authmod.AuthStore(":memory:").connect()
     jspecs = jobspecs if jobspecs is not None else _load_jobspecs(_outdir())
+    # ADR-054 sidecars. Injectable for tests like `jobspecs`, but NOT folded into `_injected` below:
+    # having evidence must not switch off the startup sync, and an app given only evidence is still a
+    # real app. Read here and rebound in `_rebuild_state`, the same two touch points jobspecs needs —
+    # miss the rebind and the store is correct on disk and frozen at boot in the running app.
+    _evid, _narr = ((evidence or {}), (narratives or {})) if (evidence is not None or narratives is not None) \
+        else (_load_sidecars(_outdir()) if settings.get("__settings_path__") else ({}, {}))
     rpb = (reply_pb if reply_pb is not None
            else replydraft.load_playbook(Path(settings["__settings_path__"]).parents[1] / "config" / "reply_playbook.md"))
     emails, contacts, cost = prepared if prepared is not None else report.prepare(settings)
@@ -266,19 +311,38 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
     else:
         _crmdb = None
 
-    # Lazy corpus index (message_id -> .eml path) for serving attachment BYTES on demand (no parsing).
+    # Corpus index (message_id -> .eml path) for serving attachment BYTES on demand (no parsing).
+    # ADR-053: filename is safe_filename(mid), so a lookup is normally an O(1) compute + stat rather
+    # than the O(N) glob+parse the old cold-index path did (measured 9 s on a 1094-file corpus). The
+    # dict stays as a small cache for injected fixtures + successful computes + the one-time fallback
+    # scan that covers the ~1-in-1000 legacy case where an .eml's derived canonical id no longer
+    # matches its filename. `scanned` is a one-way latch so a miss never re-scans on the next click.
     _idx: dict[str, Path] = dict(corpus_index) if corpus_index else {}
-    _idx_state = {"built": corpus_index is not None}
+    _idx_state = {"scanned": corpus_index is not None}
 
     def _file_for(mid: str):
-        if not _idx_state["built"] and settings.get("__settings_path__"):
-            from .envelope import parse_eml
-            for f in paths(settings, settings["__settings_path__"])["corpus_dir"].glob("*.eml"):
-                try:
-                    _idx.setdefault(parse_eml(f.read_bytes())["message_id"], f)
-                except Exception:  # noqa: BLE001
-                    pass
-            _idx_state["built"] = True
+        hit = _idx.get(mid)
+        if hit is not None:
+            return hit
+        # If a fixture injected corpus_index, don't touch disk (the injection is authoritative).
+        # Same latch guards the one-time fallback scan below on real deployments.
+        if _idx_state["scanned"] or not settings.get("__settings_path__"):
+            return None
+        from .identity import safe_filename
+        corpus_dir = paths(settings, settings["__settings_path__"])["corpus_dir"]
+        cand = corpus_dir / safe_filename(mid)
+        if cand.exists():
+            _idx[mid] = cand
+            return cand
+        # Pathological: the .eml lives under a different derived name (e.g. an older canonical_id
+        # form). One-time full scan; latch it so an unknown mid never re-scans.
+        from .envelope import parse_eml
+        for f in corpus_dir.glob("*.eml"):
+            try:
+                _idx.setdefault(parse_eml(f.read_bytes())["message_id"], f)
+            except Exception:  # noqa: BLE001
+                pass
+        _idx_state["scanned"] = True
         return _idx.get(mid)
 
     _keys = {k for k, _, _, _, _ in js.FIELDS}
@@ -315,11 +379,19 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return (mid, hashlib.sha256(prompt.encode("utf-8")).hexdigest())
 
     def _rebuild_state() -> None:
-        nonlocal emails, contacts, cost, jspecs, _crmdb
+        nonlocal emails, contacts, cost, jspecs, _crmdb, _evid, _narr
         emails, contacts, cost = report.prepare(settings)
         jspecs = _load_jobspecs(_outdir())
-        _idx.clear()
-        _idx_state["built"] = False
+        # ADR-054: the locate/narrate passes just rewrote these files (see _run_sync). Without this
+        # rebind the sidecars would be correct on disk and frozen at boot in the running app — the
+        # exact failure mode the jobspecs precedent names, and invisible to every grep.
+        if settings.get("__settings_path__"):
+            _evid, _narr = _load_sidecars(_outdir())
+        # ADR-053: DO NOT clear _idx. Corpus files are content-addressed via safe_filename(mid), so
+        # a cached entry can never be stale — a mid uniquely determines a filename. New files land
+        # at their own computed path and are indexed lazily on first access. The old clear() threw
+        # away a warm index and rearmed the 9-second click, once every 15 minutes on the periodic
+        # sync alone.
         # run_sync rebuilt crm.db (a new inode) — reopen so the Fila reads fresh relations, not the
         # now-unlinked file the previous connection still points at.
         if settings.get("__settings_path__"):
@@ -356,7 +428,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         mode the Admin panel defaults to — which is why the jobspec rebuild below is gated on
         ``do_triage`` too: it drafts specs through the LLM, so running it unconditionally would have
         billed tokens on exactly the run that promised not to."""
-        from . import specbuild
+        from . import locate, narrate, specbuild
         from . import sync as _syncmod
         if not _sync_lock.acquire(blocking=False):
             return {"running": True}
@@ -374,6 +446,24 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                         settings, draft=True, incremental=True, log=lambda m: print(f"  {m}"))
                 except Exception as exc:  # noqa: BLE001 — never let a spec-build error fail the sync
                     print(f"  jobspec rebuild skipped — {type(exc).__name__}: {exc}")
+                # ADR-054 — the evidence and narrative passes. Both incremental, both gated on
+                # do_triage for the same reason the spec build is: they spend LLM tokens, so running
+                # them on the "pull mail, spend zero Tier-1 tokens" run would bill exactly the sync
+                # that promised not to. Wrapped SEPARATELY, so a locate failure cannot cost the
+                # narrative and neither can cost the sync. Both are top-level calls placed AFTER
+                # rebuild_jobspecs and never inside it — test_specbuild.py spies os.replace
+                # process-wide and asserts exactly one atomic write per jobspec rebuild.
+                try:
+                    counts["evidence"] = locate.rebuild_evidence(
+                        settings, incremental=True, log=lambda m: print(f"  {m}"))
+                except Exception as exc:  # noqa: BLE001 — never let the locate pass fail the sync
+                    print(f"  locate pass skipped — {type(exc).__name__}: {exc}")
+                try:
+                    counts["narratives"] = narrate.rebuild_narratives(
+                        settings, incremental=True, log=lambda m: print(f"  {m}"),
+                        decisions_for=_thread_decision_lines(ws.thread_states()))
+                except Exception as exc:  # noqa: BLE001 — never let the narrative pass fail the sync
+                    print(f"  narrate pass skipped — {type(exc).__name__}: {exc}")
             _rebuild_state()
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             _sync["last_counts"] = counts
@@ -582,7 +672,17 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             from urllib.parse import quote
             # safe="" so the whole path is encoded: quote()'s default leaves "/" bare, which is fine
             # for a plain path but truncates one carrying reserved characters.
-            return RedirectResponse(f"/login?next={quote(path, safe='')}", status_code=303)
+            #
+            # The QUERY rides along, not just the path. `build_login_html` already promises that
+            # "next_url round-trips where the visitor was heading so a bookmarked deep link survives
+            # a login" -- and it could not, because this line sent only request.url.path. A signed-out
+            # click on /fila?thread=<root> came back as /login?next=%2Ffila and landed the person on
+            # an unfiltered queue, which reads as "the link is broken" rather than "you were logged
+            # out". _safe_next still re-validates the whole string server-side before any redirect,
+            # and the guard is unchanged by the addition: the value still has to start with a single
+            # "/", which a path+query always does.
+            nxt = path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/login?next={quote(nxt, safe='')}", status_code=303)
         # Authenticated -- now authorized? (ADR-040). 403, never a 303 to /login: bouncing a signed-in
         # person to a login page they would pass instantly is a loop that reads as a broken app, and
         # it misnames the problem ("who are you?" when the answer is "not enough").
@@ -1252,7 +1352,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         so the UI can render them with a subtle visual distinction.
         """
         from . import attachments as _att
-        from .envelope import clean_email_body as _clean_body
+        from .envelope import clean_email_body_parts as _clean_body_parts
         from .envelope import extract_embedded_messages as _extract_embedded
         from .envelope import parse_eml as _parse_eml
         from .signals import OUR_DOMAIN
@@ -1294,8 +1394,13 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                     _raw = Path(f).read_bytes()
                     env = _parse_eml(_raw)
                     body = env.get("body_text") or ""
+                    # body_clean stays EXACTLY what it was; the signature rides alongside it in its
+                    # own field so the client can collapse it without any of the three regressions
+                    # folding it inline would cause (see msgHTML). fila-evidence §Phase 2.
+                    _clean, _sig = _clean_body_parts(body)
                     msg["body"] = body[:3000]
-                    msg["body_clean"] = _clean_body(body)[:3000]
+                    msg["body_clean"] = _clean[:3000]
+                    msg["body_sig"] = _sig[:1500]
                     msg["body_truncated"] = len(body) > 3000
                     # ADR-046: the same parts _attachments() yields, in the same index order that
                     # attachment_part re-walks, plus the band + content hash. Additive metadata —
@@ -1368,6 +1473,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 time_m = _re.search(r"(\d{1,2}:\d{2})", em["date_raw"])
                 iso_date = (f"{anchor_date}T{time_m.group(1)}"
                             if anchor_date and time_m else em["date_raw"])
+                _em_clean, _em_sig = _clean_body_parts(em["body"])
                 embedded_msgs.append({
                     "message_id": f"embedded:{em['from_email']}:{em['date_raw'][:16]}",
                     "subject": em.get("subject") or "",
@@ -1376,7 +1482,8 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                     "direction": direction,
                     "counterparty": "",
                     "body": em["body"][:3000],
-                    "body_clean": _clean_body(em["body"])[:3000],
+                    "body_clean": _em_clean[:3000],
+                    "body_sig": _em_sig[:1500],
                     "to": em.get("to_emails") or [],
                     "has_attachment": False,
                     "attachments": [],
@@ -1474,14 +1581,25 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
                 continue
             if not isinstance(parsed, dict):
                 continue
+            _ev = (_evid.get(row.get("message_id") or "") or {}).get("quotes") or {}
             for key in ("money", "deadline", "product_or_service", "action_requested",
                         "client_name", "nif", "iban"):
                 val = parsed.get(key)
                 if val:
-                    facts.append({"key": key, "value": val,
-                                  "message_id": row.get("message_id") or "",
-                                  "date": (row.get("date") or "")[:10],
-                                  "fact": key in ("nif", "iban")})
+                    entry = {"key": key, "value": val,
+                             "message_id": row.get("message_id") or "",
+                             "date": (row.get("date") or "")[:10],
+                             "fact": key in ("nif", "iban")}
+                    # ADR-054 Phase 4: the justifying sentence rides INSIDE the fact entry rather
+                    # than as a sibling key, and that is load-bearing rather than tidy. `facts` is
+                    # already carried through all three client places (the thread cache's write and
+                    # its read, plus refresh()'s hand-written carry list); a new top-level key would
+                    # render on first expand and vanish on the next poll — the defect that left Para
+                    # Ti's attachment funnel unrendered for weeks. Absent for most keys, by design.
+                    q = _ev.get(key)
+                    if q:
+                        entry["quote"] = q
+                    facts.append(entry)
         recl = ws.get_reclassifications()
         decisions: list[dict[str, Any]] = []
         for row in interactions:
@@ -1509,10 +1627,24 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         # Deduped by content hash across the WHOLE thread and sorted into three bands. Built from
         # ``thread_parts``, which was collected from every interaction above — before the message
         # dedup — so a file carried only by a suppressed Trash copy still appears here.
-        att_items = _att.fold_thread(thread_parts)
+        #
+        # ADR-048: recurring branding art is then omitted entirely. Read per request rather than
+        # cached — it is one indexed query over a table of a few hundred rows, and a cache here
+        # would go stale against `Sync now` rebuilding crm.db underneath it. A missing or pre-v6
+        # crm.db yields an empty set, so the funnel degrades to plain ADR-046 behaviour.
+        _branding = _att.branding_shas(_crmdb.asset_spread()) if _crmdb is not None else set()
+        att_items = _att.fold_thread(thread_parts, branding=_branding)
+        # ADR-054 Phase 5 — «Evolução da conversa». `null` when this thread has no narrative, which
+        # is the established honest-absence convention here (see the spec block above): a thread
+        # with one message never gets one, and an empty list would read as "we looked and there was
+        # no story" rather than "we never asked".
+        _nrow = _narr.get(thread_root) or {}
+        narrative = None
+        if _nrow.get("steps"):
+            narrative = {"steps": _nrow["steps"], "state": _nrow.get("state")}
         return JSONResponse({"thread_root": thread_root, "messages": all_msgs, "spec": spec_block,
                              "facts": facts, "decisions": decisions,
-                             "ledger_project": proj_block,
+                             "ledger_project": proj_block, "narrative": narrative,
                              "attachments": {"items": att_items,
                                              "counts": _att.band_counts(att_items),
                                              "bands": list(_att.BANDS)}})
@@ -1811,6 +1943,46 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         if pstore.get(pid) is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return JSONResponse({"timeline": pstore.timeline(pid)})
+
+    @app.get("/api/projects/{pid}/captures")
+    def project_capture_files(pid: str):
+        """The project's intake-capture media, as an ADR-046 funnel block (ADR-052).
+
+        "All the files of this project" means email **and** intake — a drawing photographed on the
+        shop floor is a project file by every measure a human uses. The payload is deliberately the
+        same shape ``/api/thread`` returns for ``attachments``, so the client folds both through the
+        one ``attMerge`` and the same file arriving by both routes is ONE row.
+
+        **Why this may be a server-side collection when the email half deliberately is not** (ADR-052
+        §Scoping): ``_may_open_project`` is ANY-thread, so a server-built list of a project's *email*
+        attachments would hand a member filenames from mail they were never granted. Captures carry
+        no per-thread scope at all — they are project knowledge, and the timeline endpoint beside
+        this one has served their thumbnails to exactly this audience since ADR-019. So this adds no
+        reachable byte: the same middleware rule that gates ``/api/projects/{pid}`` gates this by
+        construction (``_project_id_in_path``), which is why it is not a route that has to remember
+        a decorator.
+
+        Reads and hashes the bytes on every call — see ``capture_media_items``. Never cached: the
+        sole-copy store is the truth, and a stale list of a *precious* store is worse than a slow one.
+        """
+        from . import attachments as _att
+        if pstore.get(pid) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # Which captures were applied to this project: the ledger cites them as `capture:<cid>`
+        # (ADR-020/-022 §7 freeze that value space), so this is a read of existing provenance, not a
+        # new join. dict.fromkeys keeps first-seen order and drops the repeats a multi-field apply
+        # would produce.
+        cids = list(dict.fromkeys(
+            cid for row in pstore.timeline(pid)
+            if (cid := captures.capture_id_from_ref(row.get("source_mid") or ""))))
+        caps = [c for c in (cstore.get(cid) for cid in cids) if c is not None]
+        # Resolve the media root only when there is something to read. 10 of the 13 live projects
+        # have no capture at all, and this endpoint is called on every project open — it must not
+        # touch the filesystem, or fail on an install whose captures_dir is unresolvable, to answer
+        # "none". The client merges this block unconditionally: an error here blanks the file list.
+        items = _att.capture_media_items(caps, media_root=_capturesdir()) if caps else []
+        return JSONResponse({"items": items, "counts": _att.band_counts(items),
+                             "bands": list(_att.BANDS), "n_captures": len(caps)})
 
     @app.post("/api/projects/{pid}/item/add")
     async def project_item_add(pid: str):
@@ -2688,21 +2860,26 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         """
         return bool(person) and not person.get("is_admin") and not (person.get("scopes") or [])
 
-    def _needs_review_count(*, person: dict[str, Any] | None) -> int:
-        """Verdicts the cascade could not decide (tier-1 failure → NEEDS_REVIEW, ADR-016) — the
-        «rever N» strip chip finally gives them a surface.
+    def _needs_review_count(*, person: dict[str, Any] | None,
+                            frows: list[dict[str, Any]] | None = None) -> int:
+        """What «Rever classificação N» on the Fila rail promises — and it is counted from the
+        **same builder that renders the destination**, so the chip cannot promise a number the click
+        does not deliver.
 
-        Scoped like every other count (ADR-045): unscoped, it reads the whole corpus and puts
-        «rever 12» in front of a reader whose queue holds three of them — and clicking through
-        would show a shorter list than the chip promised.
+        It used to count NEEDS_REVIEW-priority interactions (tier-1 failure, ADR-016) while the
+        group it links to — Para ti's «Classificações a rever» — lists rows under the confidence
+        floor. Two different populations, and measurably disjoint: 2 NEEDS_REVIEW rows at 0.95
+        confidence plus 1 HIGH row at 0.20 gave a chip of 2 pointing at a group of 1, sharing no
+        member. The docstring here already named that failure ("clicking through would show a
+        shorter list than the chip promised") and closed only its scoping half; this closes the
+        other. NEEDS_REVIEW remains a priority value in the data — it just no longer has a rail
+        chip claiming to be something else.
+
+        Scoping is inherited rather than re-derived: ``frows`` is the caller's already-visible queue
+        (ADR-045), so this cannot drift from it the way a second corpus read did.
         """
-        if _crmdb is None:
-            return 0
-        allowed = _visible_roots(person)
-        return sum(1 for it in _crmdb.all_interactions()
-                   if (it.get("priority") or "") == "NEEDS_REVIEW"
-                   and (allowed is None
-                        or (it.get("thread_root") or it.get("message_id") or "") in allowed))
+        rows = _fila_rows(person=person) if frows is None else frows
+        return len(para_ti.low_confidence_items(rows))
 
     # -------------------------------------------------------------------------
     # Shared cluster builder (C1a/C1b) — assembled per-request; cheap (in-memory).
@@ -2836,7 +3013,7 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
             # The freshness stamp (ADR-033 P0): same source as /api/para-ti's synced_at, so the
             # hero page can say how old the mail behind its clocks actually is.
             synced_at=_sync["last_ts"] or "",
-            needs_review=_needs_review_count(person=person),
+            needs_review=_needs_review_count(person=person, frows=frows),
             no_scopes=_has_no_grants(person),
             nav_counts=_nav_counts(frows=frows, person=person), person=person),
             # Rebuilt per request; the only stale path is an HTTP cache in front of us (ADR-023).
@@ -2858,7 +3035,9 @@ def create_app(settings: dict[str, Any], *, workspace=None, jobspecs=None, reply
         return JSONResponse({"rows": frows, "team": _roster(),
                              "synced_at": _sync["last_ts"], "syncing": _sync["running"],
                              "nav_counts": _nav_counts(frows=active, person=person),
-                             "needs_review": _needs_review_count(person=person)},
+                             # `active`, not `frows` — same reason nav_counts uses it: asking for the
+                             # Tratados ledger must not inflate a chip about the ACTIVE queue.
+                             "needs_review": _needs_review_count(person=person, frows=active)},
                             headers={"Cache-Control": "no-store"})
 
     @app.post("/api/thread/handled")

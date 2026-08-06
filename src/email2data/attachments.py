@@ -46,8 +46,39 @@ The 250 px floor is a measured operating point, not a round number. Dropping it 
 rescue two ~230 px product photos but leak seven Lindo Serviço signature cards (205x278, 181x228)
 into the visible band — a worse trade. Those two photos stay one click away, not gone.
 
+Recurring branding art is omitted entirely (ADR-048)
+----------------------------------------------------
+The three bands above are decided from **one part in isolation**, and that is why the limitation
+below survived: nothing about a single 1280x1280 PNG says "Facebook icon". A fourth signal, measured
+across the *corpus* rather than within one part, does separate them cleanly — **how many unrelated
+threads the same bytes ride into**. Branding travels with every signature; a drawing lives in one
+conversation. Measured over the 825-message corpus (544 threads):
+
+  * the Facebook, Instagram and LinkedIn icons appear in **41 threads** each, the Lindo Serviço
+    wordmark in 41, a small wordmark in 38, spacer gifs in 8–32, an animated footer in 5;
+  * every image confirmed by eye to be real content sits at **1–2 threads** — the annotated CAD
+    drawing (431x361, 5 messages of *one* thread), a client press-kit slide (1140x566), a cotton-bag
+    product photo (262x294, 2 threads), the duck cut drawing.
+
+So content tops out at 2 threads and branding starts at 5: :data:`BRANDING_MIN_THREADS` sits in that
+measured gap. Items over it are **omitted from the funnel payload**, which is a deliberate narrowing
+of ADR-046's "nothing is ever dropped" — see ADR-048 for the decision and
+``email2data assets status`` for the audit trail that replaces the click-through. Note that
+message-count prevalence does **not** work here and was tried first: the CAD drawing and the
+press-kit slide each appear in 5 messages, exactly like the animated footer.
+
+The register is **band-blind** on purpose — an eligible part is any ``cid:``-referenced image from
+:data:`email2data.signals.OUR_DOMAIN`, in ``IMAGENS`` or ``ASSINATURAS`` alike. Dropping half of a
+proven logo's copies while leaving the other half behind a count would be incoherent. It is built by
+:func:`email2data.crm.build_crm` into ``crm.db`` (regenerable) and read per render; when that table
+is absent or stale the set is **empty and nothing is dropped**, so the failure direction is "shows
+too much", never "hides silently".
+
 Known limitation: high-resolution logos land in IMAGENS, and that is deliberate
 --------------------------------------------------------------------------------
+This is what ADR-048 above now fixes for *recurring* art; it remains true for a logo seen in one or
+two threads, which still lands in IMAGENS.
+
 Looking at the rendered funnel showed Instagram/Facebook/LinkedIn icons (4322x4320, 1920x1919,
 1280x1280) sitting in the visible band — pixel-huge, so the "big" arm promotes them. Three ways to
 demote them were measured, and **all three would have buried real content**:
@@ -63,10 +94,12 @@ demote them were measured, and **all three would have buried real content**:
     supplier's whole product catalogue is link-wrapped (``1_gtr_macondo_..._295x195x2.jpg`` and
     16 siblings, 700x~500). This would drop the photographs a quote is built from.
 
-So no demotion arm ships. A leaked logo costs a glance; a buried drawing costs a quote, and the
-band exists to stop the second. The leak is bounded instead by :func:`fold_thread`'s sort — items
-run largest-first inside a band, and flat logo art is small, so it lands at the bottom. **Do not
-"fix" this with a density test without re-running the duck.**
+So no *per-part* demotion arm ships. A leaked logo costs a glance; a buried drawing costs a quote,
+and the band exists to stop the second. The residual leak is bounded by :func:`fold_thread`'s sort —
+items run largest-first inside a band, and flat logo art is small, so it lands at the bottom. **Do
+not "fix" this with a density test without re-running the duck.** The cross-thread register above is
+allowed to demote precisely because it is not a per-part guess: it is arithmetic over observed
+recurrence, and the duck appears in one thread.
 
 Dedup
 -----
@@ -75,6 +108,27 @@ The key is the **sha256 of the decoded bytes, never the filename**. Measured on 
 name while differing in bytes (a real thread carries ``composition.pdf`` twice, at 154 KB and
 152 KB). Hashing catches strictly more duplicates and never merges two different documents into
 one row — a filename key does both jobs worse.
+
+A second source: intake capture media (ADR-052)
+-----------------------------------------------
+Everything above is about MIME. A project's files do not all arrive by mail — a drawing photographed
+on the shop floor and sent through the ADR-019 Telegram intake is a project file by every measure a
+human uses, and until ADR-052 it could only ever be seen as an 84 px thumbnail on the timeline, and
+only ever the *first* one per capture.
+
+:func:`capture_media_items` folds those into the SAME item shape, and — the load-bearing part — it
+**hashes the bytes**, so a capture joins the content dedup above rather than sitting beside it. The
+same photo mailed and then re-sent through Telegram is one file with ``n_copies: 2``, not two rows
+that look like two files. Without a hash they could only have been given ``src``-derived ids, which
+is a stable handle and nothing more: two identical drawings would still read as two drawings.
+
+They are **not** laundered into looking like email attachments. Every capture item carries
+``source: "capture"``, its own ``band_evidence`` naming the channel, and a ``src`` of
+``{capture_id, index}`` instead of ``{message_id, index}`` — so the byte link goes to
+``/api/captures/{cid}/media/{i}`` and the provenance line says who registered it, not who sent it.
+They land in ``FICHEIROS`` rather than in a fourth band, deliberately: a fourth band would have to
+hold a file that is *both* mailed and captured, which is one file, and the three bands are a measured
+calibration this has no evidence to extend.
 
 Index stability (the thing not to get wrong)
 --------------------------------------------
@@ -91,11 +145,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Collection, Mapping
 from email.message import Message
+from pathlib import Path
 from typing import Any, Iterable
 
 from .envelope import _image_size
 from .headers import decode_value, parse_message
+from .signals import OUR_DOMAIN
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +168,13 @@ BIG_PIXELS = 250_000      # total px
 BIG_BYTES = 200_000       # encoded size
 POSTCARD_MAX_ASPECT = 2.0   # widest real-content image measured: 1.79
 POSTCARD_MIN_SIDE = 250     # px on the short side
+
+# ── The branding register (ADR-048) ──────────────────────────────────────────────────────────
+# How many DISTINCT threads the same bytes must ride into before they are branding rather than
+# content. Measured on the corpus: content tops out at 2 threads, branding starts at 5 — see the
+# module docstring. This is the one number to re-measure before changing, and the direction of a
+# wrong guess is asymmetric: too low buries a drawing, too high shows an extra logo.
+BRANDING_MIN_THREADS = 3
 
 # Previews are size-gated: an <img> is only worth lazy-loading when the bytes are small enough
 # that a dozen of them do not cost a thread-open. ~70% of previewable images sit under this.
@@ -285,7 +349,42 @@ def message_parts(raw: bytes, *, want_pdf_pages: bool = True) -> list[dict[str, 
     return out
 
 
-def fold_thread(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def is_own_domain(email: str) -> bool:
+    """Is this address one of ours? The register only observes mail Lindo itself sent (ADR-048)."""
+    domain = (email or "").strip().lower().rsplit("@", 1)[-1] if "@" in (email or "") else ""
+    return bool(domain) and (domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN))
+
+
+def register_candidates(raw: bytes, *, sender: str) -> list[dict[str, Any]]:
+    """The parts of one message eligible for the ADR-048 branding register.
+
+    Eligible = sent from our own domain **and** a ``cid:``-referenced image, i.e. anything the band
+    rule did not file as ``FICHEIROS``. Band-blind beyond that (see the module docstring): a proven
+    logo must not be half-dropped and half-collapsed. A part with no bytes is skipped — it has no
+    content hash, so it cannot be recognised again anyway.
+
+    Returns ``[]`` for mail from anyone else, which is what keeps this decision scoped to art *we*
+    attach. Never raises: :func:`message_parts` already swallows a bad message.
+    """
+    if not is_own_domain(sender):
+        return []
+    return [p for p in message_parts(raw, want_pdf_pages=False)
+            if p["sha"] and p["band"] != BAND_FILES and p["type"].startswith("image/")]
+
+
+def branding_shas(spread: Mapping[str, int], *,
+                  min_threads: int = BRANDING_MIN_THREADS) -> set[str]:
+    """``{sha}`` for the hashes recurring across enough unrelated threads to be branding.
+
+    ``spread`` is ``{sha: n_distinct_threads}``. Pure arithmetic over observed recurrence — the
+    whole point of ADR-048 is that this is not a per-image guess. An empty ``spread`` (no register
+    built yet) yields an empty set, so nothing is dropped.
+    """
+    return {sha for sha, n in spread.items() if n >= min_threads}
+
+
+def fold_thread(messages: Iterable[dict[str, Any]], *,
+                branding: Collection[str] = ()) -> list[dict[str, Any]]:
     """Deduplicate a thread's parts by content hash into the funnel's item list.
 
     ``messages`` is an iterable of ``{"message_id", "date", "from_email", "parts"}`` in the order
@@ -298,14 +397,28 @@ def fold_thread(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Parts with no bytes (``sha == ""``) cannot be hashed and are never merged; each is kept as its
     own item. Losing a zero-byte attachment silently would be the same defect as a false IGNORE.
+
+    ``branding`` is the ADR-048 set of content hashes proven to be recurring signature/branding art
+    (:func:`branding_shas`). Those are **omitted from the result entirely** — no item, no count, no
+    click-through; ``email2data assets status`` is where a misfire is audited instead. Dropping here
+    rather than in :func:`message_parts` is load-bearing: the per-message 📎 chips are positional
+    against ``/api/attachment/{message_id}/{index}``, so a part removed before that counter would
+    repoint every remaining link at the wrong file. Default is empty — drop nothing.
+
+    Matching is on the **full hash**, not the truncated ``id``, and regardless of who sent the copy
+    in hand: the hash identifies the artefact, and a supplier forwarding our logo back is still
+    forwarding our logo.
     """
     items: dict[str, dict[str, Any]] = {}
     unhashable: list[dict[str, Any]] = []
+    dropped = set(branding)
     for msg in messages:
         mid = msg.get("message_id") or ""
         date = msg.get("date") or ""
         sender = msg.get("from_email") or ""
         for part in msg.get("parts") or []:
+            if part["sha"] and part["sha"] in dropped:
+                continue
             item = {
                 # A zero-byte part (a read-receipt stub, or a message/rfc822 sub-part, which
                 # ``get_payload(decode=True)`` yields nothing for) has no content hash. It still
@@ -347,6 +460,80 @@ def fold_thread(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     # inside a band — the biggest file is nearly always the one being asked about.
     order = {BAND_FILES: 0, BAND_INLINE: 1, BAND_SIGNATURE: 2}
     out.sort(key=lambda i: (order.get(i["band"], 9), -i["size"], i["name"].lower()))
+    return out
+
+
+def capture_media_items(captures: Iterable[Mapping[str, Any]], *,
+                        media_root: Path) -> list[dict[str, Any]]:
+    """The intake-capture half of a project's file list, in :func:`fold_thread` item shape (ADR-052).
+
+    ``captures`` is an iterable of capture rows (``CaptureStore.get``/``_row`` output, so
+    ``media_paths`` is already a decoded list). ``media_root`` is the sole-copy ``captures_dir``
+    (ADR-020); every path is resolved under it and anything escaping is refused, the same guard
+    ``GET /api/captures/{cid}/media/{index}`` applies to the bytes.
+
+    **Every** index is enumerated, not just ``0``: a capture carrying a photo *and* a PDF used to hide
+    the PDF, because the timeline renderer only ever asked for ``media/0``.
+
+    The bytes are **read and hashed** here. That is the whole point — an item with a sha256 joins the
+    ADR-046 content dedup, so the same drawing mailed and then re-sent through Telegram folds into one
+    row instead of reading as two files. It costs one full read per media file per call; measured on
+    the live install that is 3 captures, and the revisit trigger is in ADR-052.
+
+    A media file that is **missing or unreadable** is still listed, with ``missing: True``, size 0 and
+    a plain-language evidence line. ADR-020 says this store is the sole copy, so a gap in it is an
+    incident to see, never a row to quietly skip — the same reasoning as the zero-byte parts above.
+    """
+    import mimetypes
+
+    out: list[dict[str, Any]] = []
+    root = Path(media_root).resolve()
+    for cap in captures or []:
+        cid = str(cap.get("capture_id") or "")
+        channel = str(cap.get("channel") or "").strip() or "intake"
+        who = str(cap.get("asserted_by") or "").strip()
+        when = str(cap.get("acquired_at") or cap.get("created_ts") or "")
+        for index, rel in enumerate(cap.get("media_paths") or []):
+            name = str(rel).rsplit("/", 1)[-1] or f"captura-{index}"
+            payload = b""
+            try:
+                full = (root / str(rel)).resolve()
+                if root in full.parents and full.is_file():
+                    payload = full.read_bytes()
+            except OSError:  # noqa: PERF203 — one unreadable file must not blank the list
+                payload = b""
+            ctype = (mimetypes.guess_type(name)[0] or "application/octet-stream").lower()
+            kind = kind_of(name, ctype)
+            px = _image_size(payload) if payload and ctype.startswith("image/") else None
+            sha = hashlib.sha256(payload).hexdigest() if payload else ""
+            item: dict[str, Any] = {
+                # Same rule as fold_thread's zero-byte handle: the fallback prefix must be OUTSIDE
+                # [0-9a-f] so a derived id can never collide with a real sha256 prefix.
+                "id": sha[:16] if sha else
+                      "k" + hashlib.sha256(f"{cid}:{index}".encode()).hexdigest()[:15],
+                "name": name,
+                "type": ctype,
+                "kind": kind,
+                "size": len(payload),
+                "px": list(px) if px else None,
+                "band": BAND_FILES,
+                "band_evidence": (f"captura por {channel} — registada por uma pessoa, não anexada a um email"
+                                  if payload else
+                                  f"captura por {channel} — ficheiro em falta no arquivo de capturas"),
+                "src": {"capture_id": cid, "index": index},
+                "first_seen": when,
+                "from_email": "",
+                "asserted_by": who,
+                "channel": channel,
+                "source": "capture",
+                "n_copies": 1,
+                "preview": kind == "image" and 0 < len(payload) <= PREVIEW_MAX_BYTES,
+            }
+            if not payload:
+                item["missing"] = True
+            if kind == "pdf" and payload:
+                item["pages"] = _pdf_pages(payload)
+            out.append(item)
     return out
 
 

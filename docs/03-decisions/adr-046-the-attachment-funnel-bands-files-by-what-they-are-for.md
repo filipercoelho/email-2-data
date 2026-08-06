@@ -5,6 +5,14 @@
 | Status | Accepted |
 | Date | 2026-07-26 |
 | Scope | `attachments.py` (new), `webapp.py` (`/api/thread`, `/api/attachment`), `cockpit_ui.py` (shared kit), `fila_page.py`, `para_ti_page.py`, `projetos_page.py` |
+| Amended by | [ADR-048](adr-048-recurring-branding-art-is-omitted-from-the-attachment-funnel.md) (2026-07-30) |
+
+> **Read §1's "Nothing is ever dropped" with ADR-048 in hand.** That sentence held until 2026-07-30.
+> Inline art we send ourselves that recurs across three or more unrelated threads — proven branding,
+> measured, never guessed per-part — is now omitted from the payload entirely, with
+> `email2data assets status` as the audit trail replacing the click-through. Everything else in this
+> ADR stands unchanged, including the bands, the hash dedup, and the index-stability rule ADR-048
+> depends on.
 
 ## Context
 

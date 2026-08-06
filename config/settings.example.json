@@ -7,6 +7,9 @@
     "use_ssl": true,
     "read_only": true,
     "mailbox": "INBOX",
+    "_mailboxes_note": "ADR-049: folders are DISCOVERED from the server (IMAP LIST) on every run — you do not have to list them. A per-account 'mailboxes' array is optional and does two things: it pins extras (an explicitly named folder is fetched even if it matches exclude_mailboxes) and it is the fallback if LIST ever fails.",
+    "_exclude_mailboxes_note": "Folders discovery refuses to open, matched on the last path segment (case-insensitive) or the RFC 6154 \\Junk attribute. Omit to use the default below. Trash is deliberately NOT excluded: deleted mail is still evidence a client wrote to us.",
+    "exclude_mailboxes": ["spam", "junk", "junk e-mail", "junk email", "bulk mail", "lixo"],
     "accounts": [
       {
         "id": "geral",

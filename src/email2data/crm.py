@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
 from .signals import OUR_DOMAIN
 
 # Bump this if the schema changes in a way that requires a full rebuild reminder.
-SCHEMA_VERSION = 5   # v5: speech_act column (ADR-036 act-driven Fila obligation). crm.db is regenerable, so
+SCHEMA_VERSION = 6   # v6: asset_spread table (ADR-048 branding register). crm.db is regenerable, so
 #                      this appears on the next `sync`/`crm` rebuild; SELECT * degrades on the old DB.
+#                      v5 was the speech_act column (ADR-036 act-driven Fila obligation).
 
 # Attachment filename extension → a compact category, so the Fila row can say what KIND of file is
 # attached ("can I quote without opening it?") — for a fabrication shop the CAD/vector/PDF distinction
@@ -106,6 +108,20 @@ CREATE TABLE IF NOT EXISTS entity_refs (
     PRIMARY KEY (entity_key, entity_value, message_id)
 );
 CREATE INDEX IF NOT EXISTS ix_entity_refs_lookup ON entity_refs(entity_key, entity_value);
+
+-- ADR-048: how widely each inline image WE send travels. One row per distinct content hash; the
+-- funnel omits those over attachments.BRANDING_MIN_THREADS distinct threads, because branding rides
+-- every signature while a drawing lives in one conversation. Rebuilt whole with the DB — it is a
+-- measurement, never a hand-curated list, and `email2data assets status` is how a human audits it.
+CREATE TABLE IF NOT EXISTS asset_spread (
+    sha          TEXT PRIMARY KEY,  -- sha256 of the DECODED bytes: the same key fold_thread dedups on
+    n_threads    INTEGER NOT NULL,  -- distinct thread_roots these exact bytes appeared in
+    n_messages   INTEGER NOT NULL,  -- distinct messages (>= n_threads; the weaker signal, kept for the audit)
+    sample_name  TEXT,              -- one observed filename, so the audit output is readable
+    px           TEXT,              -- "WxH", or "" when the dimensions were unreadable
+    size         INTEGER            -- decoded bytes
+);
+CREATE INDEX IF NOT EXISTS ix_asset_spread_threads ON asset_spread(n_threads);
 
 CREATE TABLE IF NOT EXISTS contacts (
     email               TEXT PRIMARY KEY,
@@ -510,6 +526,48 @@ class CrmStore:
         ).fetchone()["n"]
         return {"contacts": c, "interactions": i, "participants": p, "entity_refs": er, "external": ext}
 
+    # ── The ADR-048 branding register ────────────────────────────────────────────────────────
+    def write_asset_spread(self, spread: Mapping[str, dict[str, Any]]) -> int:
+        """Replace the register. ``spread`` is ``{sha: {threads, messages, sample_name, px, size}}``.
+
+        ``threads``/``messages`` are sets; only their sizes are stored — the point is the *count* of
+        unrelated conversations, and keeping the thread_roots would put subject-bearing identifiers
+        in a table nothing reads them from.
+        """
+        self._conn.execute("DELETE FROM asset_spread")
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO asset_spread"
+            " (sha, n_threads, n_messages, sample_name, px, size) VALUES (?,?,?,?,?,?)",
+            [(sha, len(e["threads"]), len(e["messages"]), e.get("sample_name") or "",
+              e.get("px") or "", int(e.get("size") or 0)) for sha, e in spread.items()],
+        )
+        self._conn.commit()
+        return len(spread)
+
+    def asset_spread(self) -> dict[str, int]:
+        """``{sha: n_threads}`` — the input to :func:`attachments.branding_shas`.
+
+        Returns ``{}`` when the table is absent, which is the case on a pre-v6 ``crm.db``. That is
+        the deliberate fail-open direction: an un-rebuilt DB shows every attachment (the ADR-046
+        behaviour) rather than hiding things on stale evidence.
+        """
+        try:
+            rows = self._conn.execute("SELECT sha, n_threads FROM asset_spread").fetchall()
+        except sqlite3.Error:
+            return {}
+        return {r["sha"]: int(r["n_threads"]) for r in rows}
+
+    def asset_spread_rows(self, min_threads: int = 0) -> list[dict[str, Any]]:
+        """Full register rows, widest-spread first — the audit surface behind ``assets status``."""
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM asset_spread WHERE n_threads >= ?"
+                " ORDER BY n_threads DESC, n_messages DESC, size DESC", (int(min_threads),)
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [dict(r) for r in rows]
+
     def top_contacts(self, limit: int = 15, external_only: bool = True) -> list[dict[str, Any]]:
         where = "WHERE is_internal=0" if external_only else ""
         rows = self._conn.execute(
@@ -531,6 +589,7 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
     Docker Desktop macOS volumes, where unlinking an open SQLite file causes I/O errors on the reader)."""
     import os
     from email import message_from_bytes as _msg_from_bytes
+    from . import attachments as _att
     from .config import paths as _paths
     from .envelope import parse_eml
     from .signals import header_signals as _header_signals
@@ -547,6 +606,10 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
         tmp.unlink()
     store = CrmStore(tmp).connect()
     recorded = skipped = 0
+    # ADR-048: {sha: {threads, messages, …}} for every inline image WE sent, accumulated in the walk
+    # that is already reading these bytes. Costs a second MIME parse per message (~7 s over the
+    # 825-message corpus, measured) and nothing at render time, which is the trade that matters.
+    assets: dict[str, dict[str, Any]] = {}
     for eml in sorted(p["corpus_dir"].glob("*.eml")):
         try:
             raw = eml.read_bytes()
@@ -564,6 +627,23 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
         v = {**v, "direction": _header_signals(_msg_from_bytes(raw)).direction}
         store.record(env, v)
         recorded += 1
+        # The register is keyed on the thread the message belongs to, NOT on the message — the whole
+        # signal is "unrelated conversations", and 5 copies inside one thread is what a real drawing
+        # looks like. `_thread_root` is the same fold `record` just used, so the two agree by
+        # construction rather than by a second guess.
+        root = _thread_root(env)
+        for cand in _att.register_candidates(raw, sender=(env.get("from") or {}).get("email") or ""):
+            entry = assets.setdefault(cand["sha"], {"threads": set(), "messages": set(),
+                                                    "sample_name": "", "px": "", "size": 0})
+            entry["threads"].add(root)
+            entry["messages"].add(env["message_id"])
+            entry["size"] = cand["size"]
+            entry["px"] = "x".join(str(n) for n in cand["px"]) if cand["px"] else ""
+            # First readable name wins: Outlook drops filenames on some copies, and an audit line
+            # reading "(sem nome)" for an image we can name is a worse audit line.
+            if not entry["sample_name"] and cand["name"]:
+                entry["sample_name"] = cand["name"]
+    store.write_asset_spread(assets)
     rollup = store.top_contacts(limit=10_000, external_only=False)
     (p["out_dir"] / "contacts.jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rollup), encoding="utf-8")
@@ -571,4 +651,6 @@ def build_crm(settings: dict[str, Any]) -> dict[str, int]:
     store.close()
     os.replace(tmp, db)  # atomic: old readers keep their file descriptor; new opens get fresh data
     return {"recorded": recorded, "skipped": skipped, "interactions": c["interactions"],
-            "contacts": c["contacts"], "external": c["external"]}
+            "contacts": c["contacts"], "external": c["external"],
+            "assets": len(assets),
+            "branding": len(_att.branding_shas({s: len(e["threads"]) for s, e in assets.items()}))}

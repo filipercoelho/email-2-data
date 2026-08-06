@@ -8,6 +8,7 @@ right name, which looks correct on screen and is only caught by comparing bytes.
 from __future__ import annotations
 
 import hashlib
+import json
 from email.message import EmailMessage
 from urllib.parse import quote
 
@@ -429,3 +430,524 @@ def test_flat_logo_art_sorts_below_real_content_inside_a_band():
                               "parts": [part("a" * 64, 11_000, "icon.png"),
                                         part("b" * 64, 4_000_000, "screenshot.png")]}])
     assert [i["name"] for i in items] == ["screenshot.png", "icon.png"]
+
+
+# ── the branding register (ADR-048) ──────────────────────────────────────────────────────────────
+#
+# ADR-046's bands read ONE part in isolation, which is why a 1280x1280 Facebook icon sat in the
+# visible band: nothing about those bytes says "logo". ADR-048 adds the one signal that is not a
+# per-part guess — how many unrelated threads the same bytes ride into. These tests pin the measured
+# gap (content tops out at 2 threads, branding starts at 5), the omission itself, and above all that
+# omitting an item does NOT shift the positional indices the 📎 chips are built from.
+
+def _own_domain_eml(mid: str, *, images: list[tuple[str, bytes]],
+                    sender: str = "orcamentos@lindoservico.pt", attach: bytes | None = None) -> bytes:
+    """A message from us with ``images`` pasted into the HTML body (so they are cid:-referenced)."""
+    m = EmailMessage()
+    m["From"] = sender
+    m["To"] = "cliente@acme.pt"
+    m["Subject"] = "Orçamento"
+    m["Message-ID"] = f"<{mid}>"
+    m["Date"] = "Mon, 20 Jul 2026 10:00:00 +0100"
+    m.set_content("texto")
+    m.add_alternative("".join(f'<img src="cid:{n}">' for n, _ in images), subtype="html")
+    for name, payload in images:
+        m.add_attachment(payload, maintype="image", subtype="png", filename=f"{name}.png", cid=name)
+        m.get_payload()[-1].replace_header("Content-Disposition", f'inline; filename="{name}.png"')
+    if attach is not None:
+        m.add_attachment(attach, maintype="application", subtype="pdf", filename="orcamento.pdf")
+    return m.as_bytes()
+
+
+def test_only_inline_images_we_sent_are_eligible_for_the_register():
+    """Scope, three ways. The register observes art LINDO attaches, so an external sender is out
+    entirely; a real attached document is out (it is FICHEIROS — someone chose to send it); and a
+    cid:-referenced non-image is out (a PDF embedded in a body is a document, never a logo)."""
+    ours = _own_domain_eml("a@lindoservico.pt", images=[("logo", _png(180, 60))],
+                           attach=b"%PDF quote")
+    got = att.register_candidates(ours, sender="orcamentos@lindoservico.pt")
+    assert [c["name"] for c in got] == ["logo.png"], "the attached PDF must not enter the register"
+
+    assert att.register_candidates(ours, sender="compras@fornecedor.pt") == [], \
+        "a supplier's signature art is not ours to omit — the decision is scoped to our own domain"
+    assert att.register_candidates(ours, sender="") == []
+
+
+def test_a_subdomain_of_ours_is_still_ours_and_a_lookalike_is_not():
+    assert att.is_own_domain("pedro@lindoservico.pt")
+    assert att.is_own_domain("Pedro.Ferreira@MAIL.lindoservico.pt")
+    assert not att.is_own_domain("spoof@notlindoservico.pt"), \
+        "endswith without the dot would swallow any domain ending in ours"
+    assert not att.is_own_domain("nobody")
+
+
+def test_the_register_threshold_sits_in_the_measured_gap():
+    """The corpus measurement, as arithmetic. Real content maxes out at 2 distinct threads (the
+    cotton-bag product photo); the narrowest-spread branding art is the animated footer at 5. The
+    threshold has to fall strictly between, or one side of the trade breaks."""
+    spread = {"cotton_bag": 2, "cad_drawing": 1, "press_kit": 1,
+              "footer_gif": 5, "facebook_icon": 41, "lindo_wordmark": 41}
+    hidden = att.branding_shas(spread)
+    assert hidden == {"footer_gif", "facebook_icon", "lindo_wordmark"}
+    assert 2 < att.BRANDING_MIN_THREADS <= 5, (
+        f"BRANDING_MIN_THREADS={att.BRANDING_MIN_THREADS} leaves the measured gap: content was seen "
+        "in up to 2 threads, branding in 5 or more")
+    assert att.branding_shas({}) == set(), "no register built yet must hide nothing"
+
+
+def _part(sha: str, *, index: int, name: str, size: int = 40_000, band: str | None = None) -> dict:
+    return {"index": index, "name": name, "type": "image/png", "kind": "image", "size": size,
+            "px": [400, 300], "band": band or att.BAND_INLINE, "band_evidence": "x",
+            "sha": sha, "cid": "c"}
+
+
+def test_recurring_branding_art_is_omitted_from_the_funnel_entirely():
+    """Not collapsed, not counted — gone. ADR-048 narrowed ADR-046's "nothing is ever dropped" on
+    purpose, so the count must not leak the omission back into the UI either."""
+    parts = [_part("a" * 64, index=0, name="desenho.png"),
+             _part("b" * 64, index=1, name="image001.png", band=att.BAND_SIGNATURE),
+             _part("c" * 64, index=2, name="image002.png")]
+    msgs = [{"message_id": "m1", "date": "2026-07-20", "from_email": "orcamentos@lindoservico.pt",
+             "parts": parts}]
+
+    before = att.fold_thread(msgs)
+    assert len(before) == 3 and att.band_counts(before)[att.BAND_SIGNATURE] == 1
+
+    after = att.fold_thread(msgs, branding={"b" * 64, "c" * 64})
+    assert [i["name"] for i in after] == ["desenho.png"]
+    counts = att.band_counts(after)
+    assert counts[att.BAND_SIGNATURE] == 0 and counts[att.BAND_INLINE] == 1, \
+        "an omitted item must not survive as a count"
+
+
+def test_omitting_an_item_does_not_shift_the_indices_the_chips_address():
+    """The load-bearing one. The per-message 📎 chips are POSITIONAL against
+    ``/api/attachment/{message_id}/{index}``, so an item removed before that counter increments
+    repoints every later link at the wrong file — and it looks perfect on screen. The surviving
+    items must keep the ``index`` the walk gave them, holes and all."""
+    parts = [_part("a" * 64, index=0, name="logo.png"),
+             _part("b" * 64, index=1, name="desenho.png"),
+             _part("c" * 64, index=2, name="icon.png"),
+             _part("d" * 64, index=3, name="foto.png")]
+    items = att.fold_thread(
+        [{"message_id": "m1", "date": "d", "from_email": "orcamentos@lindoservico.pt",
+          "parts": parts}], branding={"a" * 64, "c" * 64})
+    by_name = {i["name"]: i["src"]["index"] for i in items}
+    assert by_name == {"desenho.png": 1, "foto.png": 3}, (
+        "surviving items were renumbered — every 📎 link on the message card now serves the "
+        "wrong bytes under the right name")
+
+
+def test_an_omitted_hash_is_omitted_whoever_forwarded_it_back():
+    """The hash identifies the artefact, not the sender. A supplier quoting our mail carries our
+    logo in their reply; it is still our logo. Matching on the sender here would leave the icon
+    visible on exactly the threads with the most forwarding."""
+    items = att.fold_thread(
+        [{"message_id": "m1", "date": "d", "from_email": "compras@fornecedor.pt",
+          "parts": [_part("a" * 64, index=0, name="image001.png"),
+                    _part("b" * 64, index=1, name="peça.png")]}],
+        branding={"a" * 64})
+    assert [i["name"] for i in items] == ["peça.png"]
+
+
+def test_the_funnel_omits_recurring_art_end_to_end_and_keeps_the_drawing(tmp_path):
+    """Through ``/api/thread``, with the register in the real crm.db: the recurring logo is absent
+    from the payload while the postcard-shaped drawing that shares its message stays visible."""
+    from email2data.crm import CrmStore
+    logo, drawing = _png(180, 60), _png(431, 361, pad=300)
+    eml = tmp_path / "m1.eml"
+    eml.write_bytes(_own_domain_eml("m1@lindoservico.pt",
+                                    images=[("sig", logo), ("draw", drawing)]))
+    logo_sha = hashlib.sha256(logo).hexdigest()
+
+    crm = CrmStore(tmp_path / "crm.db").connect()
+    crm.record({"message_id": "m1", "from": {"email": "orcamentos@lindoservico.pt"}, "to": [],
+                "cc": [], "subject": "Orçamento", "date": "2026-07-20T09:00:00",
+                "references": [], "attachments": []},
+               {"counterparty": "CLIENT", "purpose": "OUTBOUND_QUOTE", "priority": "HIGH",
+                "direction": "outbound", "entities": {}})
+    # The logo rode into three unrelated threads; the drawing into one.
+    crm.write_asset_spread({
+        logo_sha: {"threads": {"t1", "t2", "t3"}, "messages": {"m1", "m2", "m3"},
+                   "sample_name": "image001.png", "px": "180x60", "size": len(logo)},
+        hashlib.sha256(drawing).hexdigest(): {"threads": {"t1"}, "messages": {"m1"},
+                                             "sample_name": "image002.png", "px": "431x361",
+                                             "size": len(drawing)},
+    })
+
+    c = _app(tmp_path, {"m1": eml}, crm_store=crm)
+    block = c.get("/api/thread/" + quote("mid:m1", safe="")).json()["attachments"]
+    names = [i["name"] for i in block["items"]]
+    assert "draw.png" in names, "the drawing must survive — it lives in one conversation"
+    assert "sig.png" not in names, "the recurring logo must be gone from the payload"
+    assert logo_sha[:16] not in {i["id"] for i in block["items"]}
+    assert block["counts"][att.BAND_SIGNATURE] == 0
+
+    # …and the surviving item still serves ITS OWN bytes through the public endpoint.
+    item = [i for i in block["items"] if i["name"] == "draw.png"][0]
+    br = c.get(f"/api/attachment/{quote(item['src']['message_id'], safe='')}/{item['src']['index']}")
+    assert br.status_code == 200
+    assert hashlib.sha256(br.content).hexdigest()[:16] == item["id"]
+
+
+def test_the_per_message_chips_still_list_every_part(tmp_path):
+    """ADR-048 scopes the omission to the AGGREGATE view, which is what was asked for. The message
+    card's own chips are index-aligned with the byte endpoint, so they keep every part — and that is
+    also the last way to reach a wrongly-omitted file from the UI."""
+    from email2data.crm import CrmStore
+    logo = _png(180, 60)
+    eml = tmp_path / "m1.eml"
+    eml.write_bytes(_own_domain_eml("m1@lindoservico.pt", images=[("sig", logo)]))
+    crm = CrmStore(tmp_path / "crm.db").connect()
+    crm.record({"message_id": "m1", "from": {"email": "orcamentos@lindoservico.pt"}, "to": [],
+                "cc": [], "subject": "Orçamento", "date": "2026-07-20T09:00:00",
+                "references": [], "attachments": []},
+               {"counterparty": "CLIENT", "purpose": "OUTBOUND_QUOTE", "priority": "HIGH",
+                "direction": "outbound", "entities": {}})
+    crm.write_asset_spread({hashlib.sha256(logo).hexdigest():
+                            {"threads": {"t1", "t2", "t3"}, "messages": {"m1", "m2", "m3"},
+                             "sample_name": "image001.png", "px": "180x60", "size": len(logo)}})
+    c = _app(tmp_path, {"m1": eml}, crm_store=crm)
+    d = c.get("/api/thread/" + quote("mid:m1", safe="")).json()
+    assert d["attachments"]["items"] == []
+    chips = [a["name"] for m in d["messages"] for a in (m.get("attachments") or [])]
+    assert chips == ["sig.png"], "the positional chip list must stay complete"
+
+
+def test_a_funnel_with_no_register_hides_nothing(tmp_path):
+    """Fail-open, and it must stay that way. A missing or pre-v6 crm.db means "no evidence", and the
+    honest response to no evidence is the ADR-046 behaviour — show everything. Hiding on stale
+    evidence is the failure mode this whole decision sits next to."""
+    from email2data.crm import CrmStore
+    eml = tmp_path / "m1.eml"
+    eml.write_bytes(_own_domain_eml("m1@lindoservico.pt", images=[("sig", _png(180, 60))]))
+    crm = CrmStore(tmp_path / "crm.db").connect()
+    crm.record({"message_id": "m1", "from": {"email": "orcamentos@lindoservico.pt"}, "to": [],
+                "cc": [], "subject": "Orçamento", "date": "2026-07-20T09:00:00",
+                "references": [], "attachments": []},
+               {"counterparty": "CLIENT", "purpose": "OUTBOUND_QUOTE", "priority": "HIGH",
+                "direction": "outbound", "entities": {}})
+    crm._conn.execute("DROP TABLE asset_spread")      # a v5 crm.db, exactly
+    c = _app(tmp_path, {"m1": eml}, crm_store=crm)
+    block = c.get("/api/thread/" + quote("mid:m1", safe="")).json()["attachments"]
+    assert [i["name"] for i in block["items"]] == ["sig.png"]
+
+
+# ── the project-wide file list: «Ficheiros» (ADR-052) ────────────────────────────────────────────
+#
+# Everything above is one thread's funnel. A PROJECT spans several threads and, since ADR-019, an
+# intake channel that is not MIME at all. These pin the fold across both, and above all the two ways
+# it can be confidently WRONG: a tile built with the array index as its options object, and a tile
+# naming a sender the merge order never entitled it to name.
+
+def _run_kit_js(body: str):
+    """Execute the SHIPPED funnel kit in node, so these assert on BEHAVIOUR, not on source text.
+
+    A grep can tell you `.map(_attTile)` is gone; only running it can tell you what the second
+    argument actually is once it is.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+
+    from email2data import cockpit_ui
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the funnel JS can't be executed")
+    kit = cockpit_ui._SHELL_UTILS
+    esc = kit[kit.index("const esc="):].split("\n")[0]
+    fns = kit[kit.index("const _ATT_GLYPH="):kit.index("function msgThreadHTML(")]
+    r = subprocess.run([node, "-e", esc + "\n" + fns + "\n" + body],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return _json.loads(r.stdout)
+
+
+def _kit_item(iid: str, **kw) -> dict:
+    base = {"id": iid, "name": iid + ".pdf", "type": "application/pdf", "kind": "pdf",
+            "size": 1000, "px": None, "band": att.BAND_FILES, "band_evidence": "x",
+            "src": {"message_id": "m-" + iid, "index": 0}, "first_seen": "2026-07-01T09:00:00",
+            "from_email": "a@acme.pt", "n_copies": 1, "preview": False}
+    base.update(kw)
+    return base
+
+
+def test_the_tile_helper_is_never_passed_the_array_index_as_options():
+    """``Array.map`` passes ``(item, index, array)``. The moment ``_attTile`` grew a second
+    parameter, a bare ``lst.map(_attTile)`` started handing it the ARRAY INDEX as its options
+    object — falsy for tile 0 and truthy for every tile after it. The Fila's first tile looks
+    perfect and every later one sprouts a source line built from a number, which is the worst kind of
+    defect: it renders. It breaks the Fila and Para Ti and NOT Projetos, so a Projetos-only check
+    would have passed."""
+    from email2data import cockpit_ui
+    kit = cockpit_ui._SHELL_UTILS
+    assert ".map(_attTile)" not in kit, (
+        "a bare .map(_attTile) feeds the tile helper the array index as its options object — "
+        "use .map(it=>_attTile(it,o))")
+    assert kit.count("_attTile(it,o)") >= 2, "both bands must forward the SAME options object"
+
+    # …and prove it by running it: with no options, no tile carries a source line — including the
+    # ones after the first, which is exactly what the index bug got wrong.
+    html = _run_kit_js(
+        "const items=[%s];"
+        "console.log(JSON.stringify(["
+        "  attFunnelHTML({items:items,counts:{FICHEIROS:3}}),"
+        "  attFunnelHTML({items:items,counts:{FICHEIROS:3}},{showSource:true})]));"
+        % ",".join(json.dumps(_kit_item(x, thread_root="t1")) for x in ("aa", "bb", "cc")))
+    assert "atti-src" not in html[0], "a lens that asked for no source line must get none, in ANY tile"
+    assert html[1].count("atti-src") == 3, "…and when it is asked for, EVERY tile carries it"
+
+
+def test_the_merge_keeps_the_chronologically_first_carrier():
+    """``attMerge`` was first-BLOCK-wins, i.e. ``project_threads.added_ts`` order — whichever thread
+    happened to be attached first. That was harmless only while nothing rendered a sender. A tile
+    that says *«maria@acme.pt · 2026-07-01»* about a file whose first carrier was someone else is a
+    confident lie, so the chronology fix is a precondition of the source line, not polish.
+
+    Executed rather than grepped: the sort key, the direction, and the dedup order all have to agree,
+    and source text cannot show that."""
+    late = _kit_item("dup", from_email="tarde@acme.pt", first_seen="2026-08-20T10:00:00",
+                     src={"message_id": "m-late", "index": 3}, thread_root="t-late")
+    early = _kit_item("dup", from_email="cedo@acme.pt", first_seen="2026-06-01T08:00:00",
+                      src={"message_id": "m-early", "index": 1}, thread_root="t-early")
+    undated = _kit_item("dup", from_email="sem-data@acme.pt", first_seen="",
+                        src={"message_id": "m-nodate", "index": 0}, thread_root="t-nodate")
+    got = _run_kit_js(
+        "console.log(JSON.stringify(attMerge([{items:[%s,%s]},{items:[%s]}]).items));"
+        % (json.dumps(undated), json.dumps(late), json.dumps(early)))
+    assert len(got) == 1 and got[0]["n_copies"] == 3, "the three copies must fold to one file"
+    assert got[0]["from_email"] == "cedo@acme.pt", (
+        "the merge kept the first BLOCK's copy, not the chronologically first carrier")
+    assert got[0]["src"] == {"message_id": "m-early", "index": 1}, (
+        "src must follow the winning carrier, or the byte link points at the wrong message")
+    assert got[0]["thread_root"] == "t-early", "…and so must the «ver na fila» jump target"
+
+
+def test_the_source_line_never_nests_an_anchor_inside_the_tile_anchor():
+    """The tile IS an ``<a>``. The source line carries its own «ver na fila →» link, and an ``<a>``
+    inside an ``<a>`` is invalid HTML that browsers silently un-nest — the DOM you get is not the
+    string you wrote, and the file link stops covering the tile. So the source line has to be a
+    sibling of the tile, never a child."""
+    html = _run_kit_js(
+        "console.log(JSON.stringify([_attTile(%s,{showSource:true}),_attTile(%s,{})]));"
+        % (json.dumps(_kit_item("aa", thread_root="t1")), json.dumps(_kit_item("bb"))))
+    with_src = html[0]
+    assert with_src.startswith("<div class=\"attw\">"), "the tile must be wrapped, not nested into"
+    tile = with_src[with_src.index("<a class=\"atti"):]
+    tile = tile[tile.index(">") + 1:tile.index("</a>")]      # the tile anchor's CHILDREN
+    assert "<a " not in tile, f"an anchor was nested inside the tile anchor: {tile!r}"
+    assert "/fila?thread=" in with_src, "the jump must name the Fila in full, never the root"
+    assert "atti-src" not in html[1], "no options object → no source line at all"
+    # The address is its OWN shrinkable span. Found by looking at the render: as one nowrap line, a
+    # real address filled the 132 px tile and pushed «ver na fila →» off the right edge — the one
+    # action the line offers, clipped on every tile, and invisible to every assertion above.
+    assert "atti-who" in with_src, "the address must be separately shrinkable from the jump link"
+    who = with_src[with_src.index("atti-who"):with_src.index("atti-jump")]
+    assert "acme.pt" in who and "ver na fila" not in who
+
+
+def test_the_funnel_heading_names_the_scope_it_folded():
+    """«Ficheiros da conversa» was a literal, printed over a list that in a Projetos panel spans N
+    conversations. Existing one-argument callers keep the thread wording."""
+    html = _run_kit_js(
+        "const a={items:[%s],counts:{FICHEIROS:1}};"
+        "console.log(JSON.stringify([attFunnelHTML(a),"
+        "attFunnelHTML(a,{title:'Ficheiros do projeto'})]));" % json.dumps(_kit_item("aa")))
+    assert "Ficheiros da conversa" in html[0] and "Ficheiros do projeto" not in html[0]
+    assert "Ficheiros do projeto" in html[1] and "Ficheiros da conversa" not in html[1]
+
+
+def test_the_projetos_lens_renders_the_project_wide_funnel():
+    """Projetos reached the funnel only transitively, through ``msgThreadHTML`` inside «Origem» — so
+    it was capped inside a 420 px scroll box and had no heading of its own. The «Ficheiros» tab calls
+    the shared renderer directly, with the project title and the source line switched on."""
+    from email2data import projetos_page
+    js = projetos_page._LENS_JS
+    assert "attFunnelHTML(" in js, "the Ficheiros panel must render the funnel itself"
+    assert "title:'Ficheiros do projeto'" in js
+    assert "showSource:true" in js, "a project-wide list must say which email brought each file"
+    assert 'data-tab="ficheiros"' in js and "function renderFiles(" in js
+
+
+def test_the_files_tab_badge_and_its_panel_are_built_from_one_object():
+    """The «Rever classificação» lesson: a chip that counts one population while its destination
+    lists another drifts silently. The badge and the panel are written in the same pass, from the
+    same ``items`` array — so they cannot disagree, and no test needs to assert a literal count."""
+    from email2data import projetos_page
+    fn = projetos_page._LENS_JS.split("function renderFiles(")[1].split("\nfunction ")[0]
+    assert "const items=" in fn and "const n=items.length" in fn
+    assert "attFunnelHTML(c.att" in fn, "the panel renders the object the count came from"
+    assert "'Ficheiros'+(n?" in fn, "…and the badge is written from that same n"
+    assert "getJSON(" not in fn, "renderFiles must not fetch — it renders what loadSource cached"
+    # The zero case is an ABSENT badge, never a hidden one: `.ptab-btn .bdg{display:inline-block}`
+    # (0,2,0) outranks the UA's [hidden] rule (0,1,0), so a zero badge paints an empty grey pill.
+    assert 'class="bdg" hidden' not in projetos_page._LENS_JS
+
+
+def test_an_unreachable_thread_costs_only_that_thread():
+    """``getJSON`` throws on any non-2xx and ``/api/thread`` 404s BOTH for a thread this person was
+    never granted (ADR-045) and for a dangling root. The ``try`` wrapped the whole root loop, so one
+    such thread lost every other thread's messages and files and printed «falhou ao carregar
+    contexto» — total silent loss on a partial failure."""
+    from email2data import projetos_page
+    fn = projetos_page._LENS_JS.split("async function loadSource(")[1].split("\nfunction ")[0]
+    loop = fn[fn.index("for(const root of roots)"):]
+    assert loop.index("try{") < loop.index("await getJSON"), "the try must be INSIDE the root loop"
+    assert "failed.push(root)" in loop, "a failed root is collected, not raised"
+    assert "renderFiles()" in fn, "…and the files tab is painted on every exit path"
+    assert "não carregou" in projetos_page._LENS_JS, "the incompleteness must be SAID, not implied"
+
+
+# ── intake captures as a second source (ADR-052) ─────────────────────────────────────────────────
+
+def _capture(cid: str, *, media: list[str], when: str = "2026-07-14T11:00:00",
+             who: str = "Rita", channel: str = "telegram") -> dict:
+    return {"capture_id": cid, "media_paths": media, "acquired_at": when,
+            "asserted_by": who, "channel": channel}
+
+
+def test_capture_media_carry_a_content_hash_so_they_join_the_dedup(tmp_path):
+    """The load-bearing property. Capture media had no sha256, so the only stable handle available
+    was a ``src``-derived id — which identifies a *slot*, not an artefact. The same drawing mailed by
+    the client and then re-sent through Telegram would have read as two different files sitting side
+    by side in a list whose entire promise is «one row per file».
+
+    Hashing the bytes here puts captures INSIDE the ADR-046 dedup instead of beside it."""
+    drawing = b"%PDF desenho da peca"
+    (tmp_path / "c-1").mkdir()
+    (tmp_path / "c-1" / "desenho.pdf").write_bytes(drawing)
+    items = att.capture_media_items([_capture("c-1", media=["c-1/desenho.pdf"])],
+                                    media_root=tmp_path)
+    assert len(items) == 1
+    assert items[0]["id"] == hashlib.sha256(drawing).hexdigest()[:16], (
+        "a capture must be keyed by its CONTENT, or it can never fold with an identical email part")
+
+    # …and the fold really happens: an email part carrying the same bytes has the same id.
+    mailed = att.fold_thread([{"message_id": "m1", "date": "2026-07-20T09:00:00",
+                               "from_email": "cliente@acme.pt",
+                               "parts": [{"index": 0, "name": "desenho.pdf", "type": "application/pdf",
+                                          "kind": "pdf", "size": len(drawing), "px": None,
+                                          "band": att.BAND_FILES, "band_evidence": "y",
+                                          "sha": hashlib.sha256(drawing).hexdigest(), "cid": ""}]}])
+    assert mailed[0]["id"] == items[0]["id"]
+    merged = _run_kit_js("console.log(JSON.stringify(attMerge([{items:%s},{items:%s}]).items));"
+                         % (json.dumps(mailed), json.dumps(items)))
+    assert len(merged) == 1, "the same drawing by two routes must be ONE file"
+    assert merged[0]["n_copies"] == 2
+    # The capture came first (14 Jul < 20 Jul), so it is the carrier the tile will name.
+    assert merged[0]["source"] == "capture" and merged[0]["asserted_by"] == "Rita"
+
+
+def test_every_capture_media_index_is_listed_not_only_the_first(tmp_path):
+    """The project timeline hardcoded ``/media/0``, so a capture carrying a photo AND a drawing hid
+    the drawing completely — and there was no other surface it could have appeared on."""
+    (tmp_path / "c-2").mkdir()
+    for n, payload in enumerate([b"\x89PNG foto", b"%PDF plano", b"DXF corte"]):
+        (tmp_path / "c-2" / f"f{n}.bin").write_bytes(payload)
+    items = att.capture_media_items(
+        [_capture("c-2", media=[f"c-2/f{n}.bin" for n in range(3)])], media_root=tmp_path)
+    assert [i["src"]["index"] for i in items] == [0, 1, 2]
+    assert all(i["src"]["capture_id"] == "c-2" for i in items)
+
+    from email2data import projetos_page
+    fn = projetos_page._LENS_JS.split("function timelineHTML(")[1].split("\nfunction ")[0]
+    assert "/media/0\"" not in fn and "/media/0'" not in fn, "the timeline still hardcodes index 0"
+    assert "_capIndex()" in fn, "the count must come from the capture data, not from a guess"
+
+
+def test_a_capture_is_never_laundered_into_looking_like_an_email_attachment(tmp_path):
+    """Two sources with different properties. A capture is somebody standing in a workshop taking a
+    photo — the FACT/INFERENCE rule applies unchanged, so the item has to say what it is: its own
+    ``source``, its own ``band_evidence`` naming the channel, and a byte link that goes to the
+    captures route rather than to a message that does not exist."""
+    (tmp_path / "c-3").mkdir()
+    (tmp_path / "c-3" / "foto.png").write_bytes(PNG_1x1)
+    it = att.capture_media_items([_capture("c-3", media=["c-3/foto.png"])], media_root=tmp_path)[0]
+    assert it["source"] == "capture"
+    assert "message_id" not in it["src"] and it["src"]["capture_id"] == "c-3"
+    assert "captura" in it["band_evidence"] and "telegram" in it["band_evidence"]
+    assert it["band"] == att.BAND_FILES, (
+        "a file a person deliberately sent belongs with the documents, not in a fourth band the "
+        "corpus calibration has no evidence for")
+    assert it["from_email"] == "" and it["asserted_by"] == "Rita"
+    assert it["first_seen"] == "2026-07-14T11:00:00", "chronology drives the merge — it must be set"
+    # …and the tile addresses the right route
+    html = _run_kit_js("console.log(JSON.stringify([_attTile(%s,{showSource:true})]));"
+                       % json.dumps(it))[0]
+    assert 'href="/api/captures/c-3/media/0"' in html
+    assert "/api/attachment/" not in html
+    assert "ver na fila" not in html, "a capture has no conversation to jump to"
+    assert "Rita" in html and "telegram" in html
+
+
+def test_a_media_file_missing_from_the_sole_copy_store_is_listed_not_skipped(tmp_path):
+    """ADR-020 says ``captures_dir`` is the sole copy. A gap in it is an incident to SEE, not a row
+    to quietly drop — the same reasoning that keeps zero-byte MIME parts in the funnel. Silently
+    shortening the list is how «never silently bin» dies."""
+    items = att.capture_media_items([_capture("c-4", media=["c-4/desapareceu.pdf"])],
+                                    media_root=tmp_path)
+    assert len(items) == 1
+    assert items[0]["missing"] is True and items[0]["size"] == 0
+    assert "em falta" in items[0]["band_evidence"]
+    assert items[0]["preview"] is False
+    assert not items[0]["id"].startswith(tuple("0123456789abcdef")), (
+        "a hashless id must use a prefix OUTSIDE the hex alphabet, or it can collide with a real "
+        "sha256 prefix and silently merge two different files")
+
+
+def test_media_paths_cannot_escape_the_captures_directory(tmp_path):
+    """The same traversal guard the bytes route applies. Reading is a smaller blast radius than
+    writing, but ``media_paths`` is a JSON column and the hash is computed from whatever it names."""
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"nao me leias")
+    root = tmp_path / "captures"
+    root.mkdir()
+    items = att.capture_media_items([_capture("c-5", media=["../secret.txt", "/etc/hosts"])],
+                                    media_root=root)
+    assert [i["missing"] for i in items] == [True, True]
+    assert all(i["size"] == 0 for i in items)
+
+
+def test_capture_media_reaches_the_project_file_list(tmp_path):
+    """End to end: a capture applied to a project shows up in the project's file endpoint, in the
+    ADR-046 funnel shape the client merges. «All communications» means email AND intake."""
+    from email2data.captures import CaptureStore
+    caps = tmp_path / "captures"
+    (caps / "c-9").mkdir(parents=True)
+    (caps / "c-9" / "peca.pdf").write_bytes(b"%PDF a peca")
+    ws = Workspace(tmp_path / "w.db").connect()
+    cstore = CaptureStore(ws._conn)
+    cstore.add(telegram_message_id=9, telegram_chat_id=1, raw_text="foto da peça",
+               media_paths=["c-9/peca.pdf"], channel="telegram", asserted_by="Rita")
+    app = webapp.create_app({"llm": {}}, workspace=ws, jobspecs={}, reply_pb="pb",
+                            prepared=([], [], {}), capture_store=cstore, captures_dir=caps)
+    c = signed_in_client(TestClient(app), ws)
+    pid = c.post("/api/projects", json={"title": "Peça Acme"}).json()["project_id"]
+    c.post("/api/captures/c-1-9/apply", json={"project_id": pid, "kind": "note"})
+
+    d = c.get(f"/api/projects/{pid}/captures").json()
+    assert d["n_captures"] == 1
+    assert [i["name"] for i in d["items"]] == ["peca.pdf"]
+    assert d["counts"][att.BAND_FILES] == 1
+    assert d["items"][0]["id"] == hashlib.sha256(b"%PDF a peca").hexdigest()[:16]
+    # the byte link the tile builds actually serves those bytes
+    src = d["items"][0]["src"]
+    r = c.get(f"/api/captures/{src['capture_id']}/media/{src['index']}")
+    assert r.status_code == 200 and r.content == b"%PDF a peca"
+
+
+def test_a_project_with_no_captures_returns_an_empty_block_not_an_error(tmp_path):
+    """The client merges this unconditionally; a 404 or a 500 here would blank the whole file list
+    for the 10 of 13 live projects that have no capture at all."""
+    from email2data.captures import CaptureStore
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app({"llm": {}}, workspace=ws, jobspecs={}, reply_pb="pb",
+                            prepared=([], [], {}), capture_store=CaptureStore(ws._conn),
+                            captures_dir=tmp_path / "captures")
+    c = signed_in_client(TestClient(app), ws)
+    pid = c.post("/api/projects", json={"title": "Vazio"}).json()["project_id"]
+    r = c.get(f"/api/projects/{pid}/captures")
+    assert r.status_code == 200
+    assert r.json() == {"items": [], "counts": {b: 0 for b in att.BANDS},
+                        "bands": list(att.BANDS), "n_captures": 0}
+    assert c.get("/api/projects/p-9999/captures").status_code == 404

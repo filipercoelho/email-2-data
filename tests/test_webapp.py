@@ -1087,6 +1087,81 @@ def test_sync_body_targets_an_account_and_can_skip_triage(tmp_path, monkeypatch)
     assert len(rebuilds) == 1, "fetch-only sync must not pay for a jobspec rebuild"
 
 
+def test_the_adr054_passes_run_on_a_triaging_sync_and_never_on_a_fetch_only_one(tmp_path, monkeypatch):
+    """The owner chose «CLI **and** automatic on sync», so new mail gets evidence without being
+    asked. Both passes spend LLM tokens, so both must be gated exactly as the spec build is —
+    running them on the "pull mail, spend zero Tier-1 tokens" run would bill the sync that promised
+    not to."""
+    from email2data import locate, narrate
+    from email2data import specbuild
+    from email2data import sync as syncmod
+    seen, loc, nar = [], [], []
+    monkeypatch.setattr(syncmod, "run_sync", lambda settings, **k: seen.append(k) or {
+        "fetched": 0, "triaged_new": 0, "per_account": {}, "account_failures": {}, "stages": None})
+    monkeypatch.setattr(specbuild, "rebuild_jobspecs", lambda settings, **k: {"built": 0})
+    monkeypatch.setattr(locate, "rebuild_evidence", lambda settings, **k: loc.append(k) or {"located": 2})
+    monkeypatch.setattr(narrate, "rebuild_narratives", lambda settings, **k: nar.append(k) or {"narrated": 1})
+    monkeypatch.setattr(webapp.report, "prepare", lambda s: ([EMAIL], [], {}))
+    monkeypatch.setattr(webapp, "_load_jobspecs", lambda o: {"m1": JOB})
+    c, _ = _admin_app(tmp_path)
+
+    assert c.post("/api/sync", json={}).status_code == 200
+    assert len(loc) == 1 and len(nar) == 1
+    assert loc[0]["incremental"] is True and nar[0]["incremental"] is True
+
+    c.post("/api/sync", json={"do_fetch": True, "do_triage": False})
+    assert len(loc) == 1 and len(nar) == 1, "a fetch-only sync must not pay for either pass"
+
+
+def test_a_failing_evidence_pass_cannot_take_down_the_sync_or_the_narrative(tmp_path, monkeypatch):
+    """Wrapped SEPARATELY, deliberately: a locate failure must not cost the narrative, and neither
+    may cost the mail we just fetched."""
+    from email2data import locate, narrate
+    from email2data import specbuild
+    from email2data import sync as syncmod
+    nar = []
+    monkeypatch.setattr(syncmod, "run_sync", lambda settings, **k: {
+        "fetched": 7, "triaged_new": 0, "per_account": {}, "account_failures": {}, "stages": None})
+    monkeypatch.setattr(specbuild, "rebuild_jobspecs", lambda settings, **k: {"built": 0})
+
+    def boom(settings, **k):
+        raise RuntimeError("vertex down")
+    monkeypatch.setattr(locate, "rebuild_evidence", boom)
+    monkeypatch.setattr(narrate, "rebuild_narratives", lambda settings, **k: nar.append(k) or {"narrated": 1})
+    monkeypatch.setattr(webapp.report, "prepare", lambda s: ([EMAIL], [], {}))
+    monkeypatch.setattr(webapp, "_load_jobspecs", lambda o: {"m1": JOB})
+    c, _ = _admin_app(tmp_path)
+
+    r = c.post("/api/sync", json={})
+    assert r.status_code == 200 and r.json().get("fetched") == 7
+    assert len(nar) == 1, "the narrative pass must still run after the locate pass fell over"
+
+
+def test_the_sidecar_loaders_tolerate_a_corrupt_file_instead_of_bricking_the_app(tmp_path):
+    """`_load_jobspecs` raises on a malformed line and runs at create_app time — before the lifespan
+    — so a bad file there makes the app unconstructable, /healthz never answers, and the container
+    crash-loops. These two files are written by LLM passes and carry free text, so they are the last
+    ones that should be able to do that."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "evidence.jsonl").write_text('{"message_id":"a","quotes":{}}\nNOT JSON\n', encoding="utf-8")
+    (out / "narratives.jsonl").write_text('lixo\n{"thread_root":"r","steps":[]}\n', encoding="utf-8")
+    ev, nr = webapp._load_sidecars(out)
+    assert set(ev) == {"a"} and set(nr) == {"r"}
+
+
+def test_the_decision_lines_hold_only_what_is_true_of_the_whole_thread():
+    """A per-message reclassification carries no message_id and no timestamp in the ledger, so
+    feeding it to a chronicler gives it an event it cannot place — and a chronicler that cannot place
+    an event will invent a place for it."""
+    f = webapp._thread_decision_lines({"r1": {"owners": ["Rita", "Diogo"], "handled": True,
+                                              "handled_ts": "2026-07-30T10:00:00Z"}})
+    lines = f("r1")
+    assert any("Rita, Diogo" in x for x in lines)
+    assert any("2026-07-30" in x for x in lines)
+    assert f("nao-existe") == []
+
+
 def _reextract_app(tmp_path, monkeypatch):
     """A project with two real CRM-linked messages, ready for a scoped re-extract."""
     from email2data.crm import CrmStore
@@ -1705,3 +1780,282 @@ def test_cockpit_pages_ship_the_translate_button_and_handler(tmp_path):
         assert "traduzir (EN)" in html and "closest('.trbtn')" in html
     proj = _client(tmp_path).get("/projetos").text
     assert 'id="_ailang"' in proj and "traduzido para" in proj
+
+
+def test_projetos_ships_a_files_tab(tmp_path):
+    """ADR-052 — «Ficheiros». The project workbench had six tabs and none of them meant "files": the
+    project-wide, cross-thread, content-deduped list already existed but rendered only *inside*
+    «Origem», under a 420 px scroll box, below the message cards. There was no way to consult a
+    project's attachments.
+
+    Seven tabs now, and the panel is wired to a renderer that reads what ``loadSource`` already
+    fetched — no second walk of the threads."""
+    html = _client(tmp_path).get("/projetos").text
+    assert 'data-tab="ficheiros"' in html                       # the button
+    assert 'data-panel="ficheiros"' in html and 'id="_files"' in html   # …and its panel
+    assert "function renderFiles(" in html
+    assert "if(name==='ficheiros') renderFiles()" in html       # the showTab hook
+    assert "Ficheiros do projeto" in html                       # the heading + the palette entry
+    # the file list is fed by the ONE walk, and its cache is the DATA (not the HTML _srcCache holds)
+    assert "const _attCache" in html and "_attCache[pid]={att:" in html
+    # …and a sync invalidates it: this lens defined no onSynced hook at all, so «Sincronizar» fell
+    # back to a full reload and the Ficheiros list would otherwise have shown the pre-sync files.
+    assert "async function onSynced()" in html
+    assert "delete _attCache[k]" in html and "delete _capCache[k]" in html
+
+
+def test_projetos_captures_endpoint_is_a_funnel_block(tmp_path):
+    """The intake half of ADR-052 answers in the SAME shape ``/api/thread`` uses for
+    ``attachments``, which is what lets the client fold both through one ``attMerge`` and show a
+    file that arrived by both routes exactly once."""
+    c = _client(tmp_path)
+    pid = c.post("/api/projects", json={"title": "P"}).json()["project_id"]
+    d = c.get(f"/api/projects/{pid}/captures").json()
+    assert set(d) == {"items", "counts", "bands", "n_captures"}
+    assert d["bands"] == ["FICHEIROS", "IMAGENS", "ASSINATURAS"]
+
+
+# ── ADR-053: the corpus filename IS the index (perf regression pins) ─────────────────────────────
+
+def _perf_corpus_eml(local: str, subject: str = "Perf ADR-053", body: str = "corpo") -> bytes:
+    """One tiny multipart .eml with a single attachment. Named-by-`local` so the derived Message-ID
+    is stable within a test."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["From"] = "cliente@exemplo.pt"
+    msg["To"] = "orcamentos@lindoservico.pt"
+    msg["Subject"] = subject
+    msg["Message-ID"] = f"<{local}@exemplo.pt>"
+    msg["Date"] = "Mon, 20 Jul 2026 10:00:00 +0100"
+    msg.set_content(body)
+    msg.add_attachment(b"payload", maintype="application", subtype="octet-stream",
+                       filename="a.bin")
+    return msg.as_bytes()
+
+
+def _seed_perf_corpus(tmp_path, *, target_local: str = "adr053-target",
+                      target_name_override: str | None = None,
+                      n_noise: int = 20) -> tuple[str, str]:
+    """Write a target eml + ``n_noise`` decoys under safe_filename(canonical_id_from_raw(raw)).
+
+    ``target_name_override`` writes the TARGET under a different name, to exercise the fallback
+    scan path. Returns ``(settings_path, target_mid)``.
+    """
+    from email2data.identity import canonical_id_from_raw, safe_filename
+    (tmp_path / "config").mkdir()
+    settings_path = tmp_path / "config" / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+
+    target_raw = _perf_corpus_eml(target_local)
+    target_mid = canonical_id_from_raw(target_raw)
+    name = target_name_override or safe_filename(target_mid)
+    (corpus_dir / name).write_bytes(target_raw)
+    for i in range(n_noise):
+        raw = _perf_corpus_eml(f"noise{i}")
+        (corpus_dir / safe_filename(canonical_id_from_raw(raw))).write_bytes(raw)
+    return str(settings_path), target_mid
+
+
+def _perf_client(tmp_path, settings_path: str):
+    """A signed-in admin against a real corpus/out/settings tree, no sync-on-startup, empty
+    prepared state — so the app boot never touches the corpus."""
+    out_dir = Path(settings_path).parents[1] / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ws = Workspace(out_dir / "workspace.db").connect()
+    settings = {**SETTINGS, "__settings_path__": settings_path,
+                "sync": {"on_startup": False}}
+    app = webapp.create_app(settings, workspace=ws, jobspecs={}, reply_pb="pb",
+                            prepared=([], [], {}))
+    return signed_in_client(TestClient(app), ws)
+
+
+def test_file_for_computes_the_path_and_does_not_scan_the_corpus(tmp_path, monkeypatch):
+    """ADR-053: the corpus filename is safe_filename(mid), so /api/attachment finds the file with
+    ZERO envelope.parse_eml calls. The old behavior globbed and parsed every .eml on the first
+    cold call — the reported 9-second click after a sync or restart."""
+    from urllib.parse import quote
+    from email2data import envelope
+    settings_path, target_mid = _seed_perf_corpus(tmp_path, n_noise=20)
+    c = _perf_client(tmp_path, settings_path)
+
+    calls = [0]
+    real = envelope.parse_eml
+
+    def counted(raw, *a, **kw):
+        calls[0] += 1
+        return real(raw, *a, **kw)
+
+    monkeypatch.setattr(envelope, "parse_eml", counted)
+    calls[0] = 0                                                    # ignore anything before the click
+    r = c.get(f"/api/attachment/{quote(target_mid, safe='')}/0")
+    assert r.status_code == 200, r.text
+    assert r.content == b"payload"
+    # ``attachment_part`` uses ``parse_message`` (headers.py), not ``envelope.parse_eml``, so this
+    # counter isolates the corpus-index work. Pre-ADR-053 this was ~21 (glob + parse of every .eml).
+    assert calls[0] == 0, f"_file_for scanned the corpus and burned {calls[0]} parse_eml calls"
+
+
+def test_file_for_falls_back_to_a_one_time_scan_when_the_filename_is_stale(tmp_path, monkeypatch):
+    """ADR-053: for the ~1-in-1000 case where an .eml's on-disk canonical id no longer matches
+    its filename (a legacy fetch, before the current derivation), the fallback runs a full scan
+    once, caches the mapping, and never re-scans on later clicks — even for a DIFFERENT mid."""
+    from urllib.parse import quote
+    from email2data import envelope
+    from email2data.identity import safe_filename
+    # Write the target under someone else's computed name → compute-first will miss.
+    settings_path, target_mid = _seed_perf_corpus(
+        tmp_path, n_noise=5,
+        target_name_override=safe_filename("mid:not-really-this@example.pt"))
+    c = _perf_client(tmp_path, settings_path)
+
+    calls = [0]
+    real = envelope.parse_eml
+
+    def counted(raw, *a, **kw):
+        calls[0] += 1
+        return real(raw, *a, **kw)
+
+    monkeypatch.setattr(envelope, "parse_eml", counted)
+
+    # First click: compute-first miss → fallback scan → served.
+    calls[0] = 0
+    r = c.get(f"/api/attachment/{quote(target_mid, safe='')}/0")
+    assert r.status_code == 200
+    scan_parses = calls[0]
+    assert scan_parses > 0, "an on-disk mismatch must still resolve via the one-time fallback scan"
+
+    # Second click on the SAME mid: served from _idx cache, no fresh scan.
+    calls[0] = 0
+    r2 = c.get(f"/api/attachment/{quote(target_mid, safe='')}/0")
+    assert r2.status_code == 200
+    assert calls[0] == 0, f"the fallback scan repeated (burned {calls[0]} parses) instead of caching"
+
+    # A click for an UNKNOWN mid must also not rescan (the _idx_state 'scanned' latch guards this).
+    calls[0] = 0
+    c.get("/api/attachment/mid:not-in-corpus@x/0")
+    # 404 (or 200 if by coincidence — we don't care), but the important pin is: no re-scan.
+    assert calls[0] == 0, f"an unknown-mid click re-scanned ({calls[0]} parses) instead of latching"
+
+
+def test_rebuild_state_does_not_clear_the_corpus_index_between_syncs(tmp_path, monkeypatch):
+    """ADR-053: corpus files are content-addressed via safe_filename(mid), so a cached _idx entry
+    never goes stale — new files land at their own computed name and are indexed lazily on first
+    access. The old ``_idx.clear()`` on every sync threw away a warm index and rearmed the
+    9-second click, once every 15 minutes on the periodic sync alone."""
+    from urllib.parse import quote
+    from email2data import envelope
+    from email2data import sync as syncmod
+    settings_path, target_mid = _seed_perf_corpus(tmp_path, n_noise=10)
+    c = _perf_client(tmp_path, settings_path)
+
+    monkeypatch.setattr(syncmod, "run_sync", lambda settings, **k:
+                        {"fetched": 0, "triaged_new": 0, "triaged_skipped": 0,
+                         "offline": 0, "llm": 0, "failed": 0})
+    monkeypatch.setattr(webapp.report, "prepare", lambda s: ([], [], {}))
+    monkeypatch.setattr(webapp, "_load_jobspecs", lambda out: {})
+
+    calls = [0]
+    real = envelope.parse_eml
+
+    def counted(raw, *a, **kw):
+        calls[0] += 1
+        return real(raw, *a, **kw)
+
+    monkeypatch.setattr(envelope, "parse_eml", counted)
+
+    # Warm the click (compute-first ⇒ 0 parses; asserted in the sibling test above).
+    calls[0] = 0
+    r1 = c.get(f"/api/attachment/{quote(target_mid, safe='')}/0")
+    assert r1.status_code == 200
+
+    # A sync runs. Old code called _idx.clear() here and reset _idx_state.
+    r_sync = c.post("/api/sync", json={})
+    assert r_sync.status_code == 200
+
+    # Next click must still be cheap — either the cached path served it (0 parses) or, if the fix
+    # regressed to re-scan-on-sync, this reads as the same non-zero count as the fresh scan would.
+    calls[0] = 0
+    r2 = c.get(f"/api/attachment/{quote(target_mid, safe='')}/0")
+    assert r2.status_code == 200
+    assert calls[0] == 0, (
+        f"sync burned _idx (or its cache), forcing {calls[0]} parses on the next click — "
+        "corpus files are content-addressed, the entries can never go stale")
+
+
+# ── Phase 2 (fila-evidence plan §Phase 2) — the signature reaches the SCREEN, never the prompt ──
+
+_SIG_EML = (
+    b"Subject: Corten\r\nFrom: ana@acme.pt\r\nTo: orcamentos@lindoservico.pt\r\n"
+    b"Message-ID: <m1@acme.pt>\r\nDate: Wed, 27 May 2026 09:00:00 +0100\r\n"
+    b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+    b"Bom dia,\r\n\r\nPrecisamos de 50 placas em corten.\r\n\r\n"
+    b"Melhores cumprimentos\r\n\r\nANA MARQUES\r\nDiretora de Compras\r\n"
+)
+
+
+def test_the_reply_prompt_never_receives_the_signature_lines(tmp_path, monkeypatch):
+    """THE guard on the Phase 2 design decision, and the reason the signature is a SEPARATE opt-in
+    entry point rather than a flag on `clean_email_body`.
+
+    `_thread_excerpts` feeds real client prose to `clientdraft.polish_draft`, whose prompt tells the
+    model that anything in HISTÓRICO is material it may restate **to a client**. Had Phase 2 changed
+    `clean_email_body` itself, every reply draft would silently have gained the counterparty's staff
+    names, roles and contact details as quotable source. This asserts on what the call actually
+    receives, not on which function the source appears to use."""
+    from email2data import clientdraft
+    eml = tmp_path / "m1.eml"
+    eml.write_bytes(_SIG_EML)
+    c, s = _admin_app(tmp_path, jobspecs={"m1": JOB}, corpus_index={"m1": eml})
+    (Path(s["__settings_path__"]).parent / "client_email_polish_playbook.md").write_text(
+        "PLAYBOOK", encoding="utf-8")
+    _stub_llm_client(monkeypatch)
+    pid = c.post("/api/projects", json={"title": "Corten", "from_message": "m1"}).json()["project_id"]
+
+    seen = {}
+
+    def fake_polish(base, qs, playbook, client, cfg, *, facts=None, thread=None):
+        seen["thread"] = thread
+        return "Bom dia,\n1. " + (qs[0] if qs else "?")
+
+    monkeypatch.setattr(clientdraft, "polish_draft", fake_polish)
+    keys = [a["key"] for a in c.get(f"/api/projects/{pid}/draft").json()["askables"]
+            if a["default"]][:1]
+    r = c.post(f"/api/projects/{pid}/draft/polish", json={"selected": keys})
+    assert r.status_code == 200, r.text
+
+    blob = json.dumps(seen.get("thread") or [], ensure_ascii=False)
+    assert "50 placas em corten" in blob, "the client's actual prose must still reach the prompt"
+    for leak in ("ANA MARQUES", "Diretora de Compras", "Melhores cumprimentos"):
+        assert leak not in blob, (
+            f"{leak!r} reached the reply prompt — clean_email_body's LLM-facing contract broke")
+
+
+def test_api_thread_ships_the_signature_beside_the_body_not_inside_it(tmp_path):
+    """The wire contract the client renders from. `body_clean` must be byte-identical to what it was
+    before Phase 2 — `msgHTML` compares its length against the raw body to decide whether to offer
+    «ver original», and folding the signature in would delete that escape hatch."""
+    from email2data.crm import CrmStore
+    from email2data.envelope import clean_email_body
+    eml = tmp_path / "m1.eml"
+    eml.write_bytes(_SIG_EML)
+    crm = CrmStore(":memory:").connect()
+    env = {"message_id": "m1", "date": "2026-05-27T09:00:00",
+           "from": {"email": "ana@acme.pt", "name": "Ana"}, "reply_to": {"email": "", "name": ""},
+           "to": [{"email": "orcamentos@lindoservico.pt", "name": ""}], "cc": [],
+           "references": [], "in_reply_to": None, "attachments": [], "subject": "Corten"}
+    crm.record(env, {"direction": "inbound", "counterparty": "CLIENT",
+                     "purpose": "ESTIMATE_REQUEST_FROM_CLIENT", "priority": "HIGH", "urgency": 80,
+                     "entities": {}, "confidence": 0.9, "decided_by": "t", "reason": "r"})
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = webapp.create_app(SETTINGS, workspace=ws, jobspecs={}, reply_pb="pb",
+                            prepared=([], [], {}), corpus_index={"m1": eml}, crm_store=crm)
+    c = signed_in_client(TestClient(app), ws)
+    msg = c.get("/api/thread/mid:m1").json()["messages"][0]
+
+    raw_body = _SIG_EML.split(b"\r\n\r\n", 1)[1].decode()
+    assert msg["body_clean"] == clean_email_body(raw_body)[:3000]   # unchanged, byte for byte
+    assert "ANA MARQUES" not in msg["body_clean"]
+    assert "ANA MARQUES" in msg["body_sig"] and "Diretora de Compras" in msg["body_sig"]
+    assert "50 placas" not in msg["body_sig"], "the body must not leak into the signature field"

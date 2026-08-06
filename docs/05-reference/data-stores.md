@@ -14,13 +14,39 @@ see [ADR-010](../03-decisions/adr-010-workspace-db-precious-vs-regenerable.md).
 | Path | What | Tier | Rebuilt? | Versioned by |
 | --- | --- | --- | --- | --- |
 | `out/results.jsonl` | append-only `TriageResult` per message | derived | re-run `triage --full` | `EXTRACTOR_VERSION` |
-| `out/crm.db` | interactions (event log) + contacts (person rollup) | **regenerable** | `email2data crm` drops & rebuilds each run | `crm.SCHEMA_VERSION` |
+| `out/crm.db` | interactions (event log) + contacts (person rollup) + `asset_spread` — how many **distinct threads** each inline image we send rides into, the [ADR-048](../03-decisions/adr-048-recurring-branding-art-is-omitted-from-the-attachment-funnel.md) branding register (v6) | **regenerable** | `email2data crm` drops & rebuilds each run | `crm.SCHEMA_VERSION` |
 | `out/sync.db` | per-mailbox IMAP **UID watermark** (cursor) + `message_scope` — which of our inboxes each message reached ([ADR-038](../03-decisions/adr-038-mail-account-attribution.md)) | cursor | deletable — next `fetch` re-bootstraps by date; **attribution degrades**, see below | `sync.SCHEMA` (additive) |
 | `out/workspace.db` | **human decisions** + Projects + edit history + the intake capture queue/allowlist (v5; capture `transcript` v6; `extracted_fields_json`+`confidence` v7; `para_ti_dismissals`+`counterparty_names` v8; `thread_snooze` v9; `people`+`person_scopes` v10 ([ADR-039](../03-decisions/adr-039-people-auth-and-the-default-deny-gate.md)); `people.email` v11 ([ADR-042](../03-decisions/adr-042-the-app-sends-exactly-one-kind-of-mail.md)); `people.signature`+`job_title`+`phone` v12 ([ADR-047](../03-decisions/adr-047-the-signature-belongs-to-the-person-not-the-playbook.md)) — see [ADR-028](../03-decisions/adr-028-decisions-persist-and-stay-reviewable.md)) | **precious** | **never auto-rebuilt** | `workspace.SCHEMA_VERSION` (`user_version`) |
 | `out/auth.db` | **credentials + sessions + invites + password resets** ([ADR-039](../03-decisions/adr-039-people-auth-and-the-default-deny-gate.md), [ADR-042](../03-decisions/adr-042-the-app-sends-exactly-one-kind-of-mail.md)): scrypt password hashes, SHA-256 session tokens, single-use invites, single-use reset tokens (30 min). Deliberately **not** in `workspace.db` — the precious store must be restorable without stale password material. Joined to `people` by `person_id`, with **no cross-file FK** SQLite could enforce. Every person-keyed table is named once in `auth._PERSON_TABLES`, which both `known_person_ids` and `purge_person` walk — a new table missing from it leaves a deleted person's secrets behind while the drift check reports clean | **precious** | **never auto-rebuilt** — losing it re-opens `/setup` (see below) | `auth.SCHEMA` (`CREATE TABLE IF NOT EXISTS`, additive) |
 | `out/knowledge.db` | the hand-curated **gazetteer** — `key → counterparty` priors ([ADR-005](../03-decisions/adr-005-gazetteer-is-prior-not-verdict.md)); a prior attached to the LLM input, never a verdict, and the **veto that stops an offline IGNORE** on a known client (`cascade.py:94`) | **regenerable from `config/gazetteer.csv`** — and the CSV is regenerable from the table (`email2data gazetteer export`), see below | `cascade.build_store` calls `store.seed_or_warn` on every run, which **`DELETE`s and replaces** the table from `config/gazetteer.csv` — and **warns loudly** if that CSV is missing while the table is non-empty | *(unversioned — `CREATE TABLE IF NOT EXISTS`)* |
+| `out/jobspecs.jsonl` | one JobSpec + Gate-1 readiness per job-relevant email (LEAD / PO / estimate), LLM-drafted | derived | `email2data jobspec`, and incrementally after every triaging sync | *(unversioned — no version field on a row)* · ⚠ **not covered by `bin/backup-workspace.sh`**, see below |
+| `out/evidence.jsonl` | **the located sentence** per message ([ADR-054](../03-decisions/adr-054-llm-derived-body-fragments-live-in-out-sidecars.md) Phase 4): `{message_id, quotes{key→sentence}, rejected{key→reason}}`. The quote is a **body fragment**, stored as the email's own text at the matched span — never the string the model typed | derived (LLM) | `email2data locate`, and incrementally after every triaging sync. Gate = **presence of a row**, so a rejection is stored too | *(unversioned)* · ⚠ not backed up — see below |
+| `out/narratives.jsonl` | **«Evolução da conversa»** per thread ([ADR-054](../03-decisions/adr-054-llm-derived-body-fragments-live-in-out-sidecars.md) Phase 5): `{thread_root, watermark, steps[{message_id, date, text}], state}`. Threads with ≥ 2 messages only | derived (LLM) | `email2data narrate`, and incrementally after every triaging sync | `watermark` — a sha256 over each message's `(id, date, direction, purpose, speech_act, counterparty, entities, subject)` · ⚠ not backed up |
 | `corpus/*.eml` | raw fetched messages (read-only source mirror) | cache | re-fetch | — |
 | `captures/<chat>/…` | intake media ([ADR-020](../03-decisions/adr-020-capture-egress-and-data-handling.md)) — sole copy once scrubbed from Telegram | **precious** | never | — · ⚠ **not covered by `bin/backup-workspace.sh`**, see below |
+
+### `asset_spread` — the branding register that makes the funnel hide things (ADR-048, v6)
+
+`crm.db` gained one table on 2026-07-30, and it is the only store in this project whose contents
+cause the UI to **omit** something. One row per distinct content hash of a `cid:`-referenced
+`image/*` part sent from `signals.OUR_DOMAIN`:
+
+| Column | Meaning |
+| --- | --- |
+| `sha` | sha256 of the **decoded** bytes — the same key `attachments.fold_thread` dedups on |
+| `n_threads` | distinct `thread_root`s these bytes appeared in. **The decision signal.** |
+| `n_messages` | distinct messages. Kept for the audit only — it does *not* decide (the CAD drawing and the animated footer are 5 messages each; they are 1 and 5 threads) |
+| `sample_name`, `px`, `size` | so `email2data assets status` reads like something a human can judge |
+
+The funnel omits every row at or above `attachments.BRANDING_MIN_THREADS` (**3**, sitting in a
+measured gap: content tops out at 2 threads, branding starts at 5). It holds **no addresses and no
+subjects** — the thread_roots are counted, never stored.
+
+**It is a measurement, not a curated list.** `build_crm` rewrites it whole, so art that stops being
+sent leaves the register on the next `crm`/`sync`, and a hand-edit is pointless. Two properties keep
+the failure direction safe: a missing or pre-v6 `crm.db` yields an empty set, so the funnel shows
+*everything* rather than hiding on stale evidence; and `email2data assets status` **exits 1** in that
+state instead of printing an empty list that reads like "nothing is hidden, all good".
 
 ### The gazetteer is managed again — CSV restored + the silent case made loud (fixed 2026-07-26)
 
@@ -103,6 +129,30 @@ across 10 inboxes, 0 unattributed.
 - `out/results.jsonl` is the triage ledger; `triage` appends only messages not already present
   ([ADR-009](../03-decisions/adr-009-incremental-idempotent-by-default.md)).
 
+### The filename IS the index — load-bearing perf invariant (ADR-053)
+
+`fetch.py` writes each `.eml` under `safe_filename(canonical_id_from_raw(raw))`
+([`identity.py:43-49`](../../src/email2data/identity.py)) which is
+`sha256(canonical_id)[:32] + ".eml"` — a **pure function** of the message id — and
+`envelope.parse_eml(...)["message_id"]` returns the *same* canonical id
+([`envelope.py:717`](../../src/email2data/envelope.py)). So `corpus_dir / safe_filename(mid)` is the
+answer, not a candidate.
+
+This is what makes `message_id → .eml` O(1) at three call sites without a persisted index:
+[`webapp._file_for`](../../src/email2data/webapp.py), [`report.prepare`](../../src/email2data/report.py),
+[`specbuild.rebuild_jobspecs`](../../src/email2data/specbuild.py). Before ADR-053 each of them
+globbed and parsed **every** `.eml` on cold call (9 s on a 1094-file corpus) and `_rebuild_state`
+threw the resulting index away after every sync — a warm click rearmed as a 9-second click every 15
+minutes. See [ADR-053](../03-decisions/adr-053-the-corpus-filename-is-the-index.md) for the diagnosis
+and the fix.
+
+**A change to either `safe_filename` or `canonical_id` will silently break every compute-first
+lookup.** Files still exist on disk, but nobody finds them until the lazy fallback scan runs (the
+one still-slow path). Any such change must ship a migration that renames existing files to the new
+scheme, and update ADR-053. Verified over the whole corpus: **1116/1117 files land on the computed
+name** — the single miss is a `sha256:`-fallback id from an older derivation and is what the
+fallback exists for.
+
 ## workspace.db migration discipline
 
 `Workspace.connect` runs `_migrate`, which stamps `user_version` and is where migrations go.
@@ -155,6 +205,24 @@ currently has **one** copy. The DB rows describing each capture *are* backed up,
 a restore would come back with a queue whose attachments are gone and no indication they ever
 existed. Recorded here rather than fixed silently; a fix needs its own change (a tree copy plus a
 verified read-back, since a media backup nobody has opened is the same claim as an unverified DB one).
+
+### The three LLM-derived JSONL sidecars are deliberately NOT in the backup set (ADR-054)
+
+`out/jobspecs.jsonl`, `out/evidence.jsonl` and `out/narratives.jsonl` all cost real LLM tokens to
+produce, so "just rebuild it" is not free — but none of them is in `bin/backup-workspace.sh`'s
+`STORES`, and that is now a **decision** rather than the accident it was for `jobspecs.jsonl`.
+
+The reason is mechanical and was measured, not assumed: `snapshot_and_verify` is sqlite3-only. It
+opens the source as a SQLite URI, queries `sqlite_master`, and copies with `VACUUM INTO`. Handed a
+`.jsonl`, `sqlite3` raises `DatabaseError: file is not a database`, and there is no `except` around
+it — so adding any one of the three to `STORES` makes the **whole** pre-migration backup exit 1 and
+print *"BACKUP FAILED — do not migrate"*, even though `workspace.db` and `auth.db` snapshotted fine.
+A backup script that fails on the run before a migration is worse than a gap you know about.
+
+What that costs, priced: a full rebuild of both ADR-054 sidecars from `corpus/` + `results.jsonl` is
+**≈ $0.68** at `gemini-2.5-flash` list price (736 locate calls + 157 narrate calls, derived from the
+real body sizes). Losing them is a bill, not a data loss. Backing up a JSONL properly needs the same
+change `captures/` needs — a file-tree copy plus a verified read-back — and that is its own change.
 
 ## Dangling references
 

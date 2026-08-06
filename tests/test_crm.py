@@ -1,8 +1,11 @@
 """CRM PoC: participant extraction + contact rollup (deterministic, no LLM)."""
 
+import hashlib
 import json
+from email.message import EmailMessage
 
-from email2data.crm import CrmStore, attach_kinds, participants
+from email2data import attachments as att
+from email2data.crm import CrmStore, attach_kinds, build_crm, participants
 
 
 def _env(mid, frm, to=None, cc=None, date="2026-05-20", subject="s", reply_to=None):
@@ -111,4 +114,128 @@ def test_record_persists_speech_act_for_the_obligation_fold(tmp_path):
     assert by_mid["m1"]["speech_act"] == "OBLIGATION"
     assert by_mid["m2"]["speech_act"] == ""      # absent in the verdict → empty (fold reads it as UNKNOWN)
     assert by_mid["m2"]["has_attach"] == 0
+    s.close()
+
+
+# ── the ADR-048 branding register ────────────────────────────────────────────────────────────────
+#
+# The register measures how many UNRELATED THREADS the same inline image rides into. Message count
+# was tried first and does not work: on the real corpus the annotated CAD drawing and a client
+# press-kit slide each appear in 5 messages, exactly like the animated footer banner. Thread spread
+# separates them cleanly — content 1-2 threads, branding 5-41.
+
+_LOGO = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"
+    "de0000000c4944415408d763f8cfc000000301010018dd8db00000000049454e44ae426082")
+
+
+def _png(w: int, h: int, tag: bytes = b"") -> bytes:
+    """A PNG whose IHDR declares ``w``x``h``; ``tag`` makes the bytes (and so the hash) distinct."""
+    ihdr = (b"\x00\x00\x00\rIHDR" + w.to_bytes(4, "big") + h.to_bytes(4, "big")
+            + b"\x08\x02\x00\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + ihdr + b"\x00" * 4 + tag + _LOGO[-12:]
+
+
+def _corpus_eml(*, mid: str, refs: list[str], sender: str, images: dict[str, bytes]) -> bytes:
+    m = EmailMessage()
+    m["From"] = sender
+    m["To"] = "cliente@acme.pt"
+    m["Subject"] = "Orçamento"
+    m["Message-ID"] = f"<{mid}>"
+    m["Date"] = "Mon, 20 Jul 2026 10:00:00 +0100"
+    if refs:
+        m["References"] = " ".join(f"<{r}>" for r in refs)
+    m.set_content("texto")
+    m.add_alternative("".join(f'<img src="cid:{n}">' for n in images), subtype="html")
+    for name, payload in images.items():
+        m.add_attachment(payload, maintype="image", subtype="png", filename=f"{name}.png", cid=name)
+        m.get_payload()[-1].replace_header("Content-Disposition", f'inline; filename="{name}.png"')
+    return m.as_bytes()
+
+
+def _project(tmp_path, messages):
+    """A minimal on-disk project: corpus/*.eml + out/results.jsonl, ready for ``build_crm``."""
+    (tmp_path / "config").mkdir(exist_ok=True)
+    sp = tmp_path / "config" / "settings.json"
+    sp.write_text(json.dumps({"paths": {"out_dir": "out", "corpus_dir": "corpus"}}),
+                  encoding="utf-8")
+    settings = {"paths": {"out_dir": "out", "corpus_dir": "corpus"}, "__settings_path__": str(sp)}
+    (tmp_path / "corpus").mkdir(exist_ok=True)
+    (tmp_path / "out").mkdir(exist_ok=True)
+    lines = []
+    for i, (mid, raw) in enumerate(messages):
+        (tmp_path / "corpus" / f"m{i}.eml").write_bytes(raw)
+        lines.append(json.dumps({"message_id": f"mid:{mid}", "counterparty": "CLIENT",
+                                 "purpose": "OUTBOUND_QUOTE", "priority": "HIGH",
+                                 "direction": "outbound", "urgency": 50}))
+    (tmp_path / "out" / "results.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    return settings
+
+
+def test_the_register_counts_threads_not_messages(tmp_path):
+    """The defect the whole ADR turns on. ``logo`` rides three unrelated conversations; ``drawing``
+    appears in FIVE messages of ONE conversation — which is what a real drawing being replied to
+    looks like. A message-count register buries the drawing and this test is why it cannot."""
+    logo, drawing = _png(180, 60, b"LOGO"), _png(431, 361, b"DRAW" * 80)
+    msgs = []
+    for t in (1, 2, 3):                    # three separate root messages = three thread_roots
+        msgs.append((f"t{t}", _corpus_eml(mid=f"t{t}", refs=[], sender="orcamentos@lindoservico.pt",
+                                          images={"sig": logo})))
+    for r in range(5):                     # five messages, all replying into thread t1
+        msgs.append((f"d{r}", _corpus_eml(mid=f"d{r}", refs=["t1"],
+                                          sender="orcamentos@lindoservico.pt",
+                                          images={"draw": drawing})))
+    settings = _project(tmp_path, msgs)
+    counts = build_crm(settings)
+
+    store = CrmStore(tmp_path / "out" / "crm.db").connect()
+    spread = store.asset_spread()
+    logo_sha, draw_sha = hashlib.sha256(logo).hexdigest(), hashlib.sha256(drawing).hexdigest()
+    assert spread[logo_sha] == 3, "the logo rode three unrelated threads"
+    assert spread[draw_sha] == 1, "five replies in one conversation is ONE thread, not five"
+
+    hidden = att.branding_shas(spread)
+    assert logo_sha in hidden and draw_sha not in hidden
+    assert counts["assets"] == 2 and counts["branding"] == 1, \
+        "the crm build must report how much the funnel will hide"
+    rows = {r["sha"]: r for r in store.asset_spread_rows()}
+    assert rows[draw_sha]["n_messages"] == 5 and rows[draw_sha]["n_threads"] == 1, \
+        "the weaker message signal is kept for the audit, just not used for the decision"
+    assert rows[logo_sha]["px"] == "180x60" and rows[logo_sha]["sample_name"] == "sig.png"
+    store.close()
+
+
+def test_the_register_ignores_art_other_people_sent(tmp_path):
+    """Scope: the decision omits art LINDO attaches. A supplier's recurring signature logo stays in
+    the collapsed ADR-046 band, because deciding for someone else's branding was never asked for."""
+    theirs = _png(180, 60, b"THEIRS")
+    msgs = [(f"s{t}", _corpus_eml(mid=f"s{t}", refs=[], sender="compras@fornecedor.pt",
+                                  images={"sig": theirs})) for t in (1, 2, 3, 4)]
+    build_crm(_project(tmp_path, msgs))
+    store = CrmStore(tmp_path / "out" / "crm.db").connect()
+    assert store.asset_spread() == {}, "an external sender's art must not enter the register"
+    store.close()
+
+
+def test_the_register_is_rebuilt_whole_and_never_accumulates(tmp_path):
+    """It is a measurement, not a curated list. A logo that stops being sent must leave the register
+    on the next rebuild, or the funnel keeps hiding a file on evidence that no longer exists."""
+    s = CrmStore(tmp_path / "crm.db").connect()
+    s.write_asset_spread({"old": {"threads": {"a", "b", "c"}, "messages": {"m"},
+                                 "sample_name": "gone.png", "px": "1x1", "size": 9}})
+    assert s.asset_spread() == {"old": 3}
+    s.write_asset_spread({"new": {"threads": {"a"}, "messages": {"m"},
+                                 "sample_name": "here.png", "px": "1x1", "size": 9}})
+    assert s.asset_spread() == {"new": 1}, "a stale hash survived the rebuild"
+    s.close()
+
+
+def test_a_pre_v6_db_reports_an_empty_register_instead_of_raising(tmp_path):
+    """Fail-open. ``crm.db`` is regenerable and may predate this table; the reader must degrade to
+    "no evidence, hide nothing" rather than 500 the thread panel."""
+    s = CrmStore(tmp_path / "crm.db").connect()
+    s._conn.execute("DROP TABLE asset_spread")
+    assert s.asset_spread() == {}
+    assert s.asset_spread_rows() == []
+    assert att.branding_shas(s.asset_spread()) == set()
     s.close()

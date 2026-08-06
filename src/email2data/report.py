@@ -9,7 +9,6 @@ jobspec). Bodies are read from the local corpus at render time (results.jsonl st
 
 from __future__ import annotations
 
-import glob
 import json
 from pathlib import Path
 from typing import Any
@@ -17,10 +16,18 @@ from typing import Any
 from . import crm, jobspec as _js
 from .config import paths
 from .envelope import parse_eml
+from .identity import safe_filename
 from .signals import OUR_DOMAIN
 
 BODY_CAP = 8000
 _PRI = {"HIGH": 0, "NEEDS_REVIEW": 1, "MEDIUM": 2, "LOW": 3, "IGNORE": 4}
+
+# ADR-053: parsed-envelope cache. The corpus filename is a pure function of the message_id, so a
+# parsed envelope for a given mid never changes across prepare() calls in one process. Bounded by
+# corpus size (~1000s of entries today, each a small dict). Cleared on process restart — the derived
+# personal data is deliberately not persisted (no new store, ADR-042-friendly). Removes the ~9.6 s
+# per-message re-parse the perf diagnosis measured on the sync path.
+_env_cache: dict[str, dict[str, Any]] = {}
 
 
 def _internal(em: str) -> bool:
@@ -29,8 +36,15 @@ def _internal(em: str) -> bool:
 
 
 def prepare(settings: dict[str, Any], corpus_glob: str = "corpus/*.eml"):
-    """Load + enrich emails (body/people/attachments/cost/jobspec) for the report. Returns (emails, contacts, cost)."""
-    out = paths(settings, settings["__settings_path__"])["out_dir"]
+    """Load + enrich emails (body/people/attachments/cost/jobspec) for the report. Returns (emails, contacts, cost).
+
+    ``corpus_glob`` is kept for backward-compatibility with any external caller; the actual lookup
+    now goes through :func:`identity.safe_filename` against ``corpus_dir`` (ADR-053), which removes
+    the ~9-second whole-corpus scan the diagnosis measured on the sync path.
+    """
+    p = paths(settings, settings["__settings_path__"])
+    out = p["out_dir"]
+    corpus_dir = p["corpus_dir"]
     # Guard like its siblings below: on a FRESH out/ (first run / empty Docker volume) results.jsonl
     # does not exist yet — the boot-sync writes it. An unguarded read here crashed app construction
     # (create_app runs prepare() BEFORE the lifespan boot-sync), bricking a clean `docker compose up`.
@@ -48,21 +62,41 @@ def prepare(settings: dict[str, Any], corpus_glob: str = "corpus/*.eml"):
                 jobspecs[j["message_id"]] = j
     emails.sort(key=lambda r: (_PRI.get(r.get("priority"), 9), -r.get("urgency", 0)))
     contacts.sort(key=lambda c: -c.get("msg_count", 0))
-    mid2file = {}
-    for f in glob.glob(corpus_glob):
-        try:
-            mid2file[parse_eml(Path(f).read_bytes())["message_id"]] = f
-        except Exception:  # noqa: BLE001
-            pass
+
+    # Lazy fallback for the ~1-in-1000 legacy case where an .eml's on-disk canonical id no longer
+    # matches its filename. Built once per prepare() call, only if compute-first misses.
+    fallback_idx: dict[str, Path] | None = None
+
+    def _resolve(mid: str) -> Path | None:
+        nonlocal fallback_idx
+        cand = corpus_dir / safe_filename(mid)
+        if cand.exists():
+            return cand
+        if fallback_idx is None:
+            fallback_idx = {}
+            for f in corpus_dir.glob("*.eml"):
+                try:
+                    fallback_idx.setdefault(parse_eml(f.read_bytes())["message_id"], f)
+                except Exception:  # noqa: BLE001
+                    pass
+        return fallback_idx.get(mid)
+
     for r in emails:
-        pc = per_cost.get(r["message_id"], {})
+        mid = r["message_id"]
+        pc = per_cost.get(mid, {})
         r.update(_date=None, _body="", _body_trunc=False, _people=[], _attach=[], _reply=False, _thread="",
                  _tin=pc.get("in", 0), _tout=pc.get("out", 0), _cost=pc.get("cost", 0.0),
-                 _jobspec=jobspecs.get(r["message_id"]))
-        f = mid2file.get(r["message_id"])
-        if not f:
-            continue
-        env = parse_eml(Path(f).read_bytes())
+                 _jobspec=jobspecs.get(mid))
+        env = _env_cache.get(mid)
+        if env is None:
+            cand = _resolve(mid)
+            if cand is None:
+                continue
+            try:
+                env = parse_eml(cand.read_bytes())
+            except Exception:  # noqa: BLE001
+                continue
+            _env_cache[mid] = env
         body = env.get("body_text") or ""
         r["_date"] = env.get("date")
         r["_body"] = body[:BODY_CAP]

@@ -128,6 +128,11 @@ docker compose exec email2data email2data triage   # Tier-0 signals → Tier-1 G
 docker compose exec email2data email2data sync     # fetch-new + triage-new (also on boot + button)
 docker compose exec email2data email2data eval     # score counterparty/priority vs labels
 #   add --full to fetch/triage/sync to re-bootstrap / reclassify everything
+
+docker compose exec email2data email2data locate   # ADR-054: the sentence justifying each extracted value
+docker compose exec email2data email2data narrate  # ADR-054: «Evolução da conversa» per multi-message thread
+#   both SPEND TOKENS, both are incremental, and both already run after every triaging sync —
+#   you only need them by hand for a backfill (--all) or to retry one item (--only <id>).
 ```
 
 For the test suite and linting you still want a local dev install

@@ -25,7 +25,7 @@ commits it (the cockpit trust grammar).
 │ vistas rail  │  list pane (~40%)        │  dossier pane (~60%)           │
 │ Em risco 54  │  ▾ PRECISAM DE RESPOSTA 8│  [Cliente] devemos há 13 d     │
 │ € em jogo 9  │    row · row · row …     │  Subject · verb bar (E R H A P)│
-│ Prazos 7     │  ▸ À ESPERA DELES 58     │  tiles · IA · história · draft │
+│ Prazos 7     │  ▸ À ESPERA DELES 58     │  IA · registo · história·draft │
 │ A aguardar 13│  ▸ INTERNOS —            │  timeline ⇵ + mensagens        │
 │ Tratados     │                          │                                │
 ├ footer ──────┴───────────────────────────────────────────────────────────┤
@@ -66,7 +66,8 @@ Tabs are **client-side subsets of the one queue in the one order** — no second
 > "cobrar" now always means real money owed to us. The group id is derived in `cockpit.fila_group()` (one source
 > of truth in Python); the JS `semGroup` just renders `row.group`. Stage 1 adds **«A pagar»** (inbound bills,
 > `G_PAY`). **Stage 2** makes the group the folded **obligation** (`cockpit.derive_obligation` from the new
-> `speech_act` axis, ADR-036): `OWE_REPLY`→«Precisam de resposta», `OWE_PAYMENT`→«A pagar», `COLLECT`→«A cobrar»,
+> `speech_act` axis, ADR-036, amended by **ADR-051** — our own outbound reply discharges an owed reply, never an
+> owed payment): `OWE_REPLY`→«Precisam de resposta», `OWE_PAYMENT`→«A pagar», `COLLECT`→«A cobrar»,
 > `AWAIT_THEM`→«A aguardar»/«À espera deles», `FYI`→**«Informações»** (`G_INFO`, quiet, collapsed); `ACK`/`CLOSE`
 > self-close. The clock only colours+sorts. Before a user-run `triage --full`, `_legacy_obligation` reproduces the
 > deterministic Stage 0/1 routing.
@@ -124,25 +125,92 @@ Top→bottom:
 3. **Verb bar** — `[✍ Responder R] [✓ Tratado E] [Adiar H] [@ Dono A] [▦ Projeto P]`, keys printed
    on the buttons (the palette-as-trainer pattern). Ignorar is deliberately *not* here — it stays in
    the palette with a forced reason (making IGNORE harder than tratado is a feature).
-4. **Signal tiles** (2×4→2×2): **Em jogo** (`entities.money`, dashed note "valor estimado (IA)") ·
-   **Prazo** (`entities.deadline` + human note) · **Resposta** (clock age vs the normal band) ·
-   **Ritmo** (momentum: Ativo / A abrandar / Parado — deterministic from message-date deltas, §8).
-5. **Análise IA** (dashed border): `Pedem: <entities.action_requested>` + `trust.reason`, with the
+4. **«Registo do fio»** — the thread ledger (`.dledger`, ADR-033 P4a). *This replaced the original
+   2×4 signal tiles*, which spent prime space printing «— · sem valor associado» and had nowhere to
+   accumulate what the thread had taught us. **Ritmo** survives inline on the clock line; the rest is:
+   - **Facts**, one row per key in `FK` order (Valor · Prazo · Produto/serviço · Pedido · Nome ·
+     NIF · IBAN), each the **latest** mention across *all* the thread's messages plus its source
+     date and «+N menções». `Object.keys(FK)` drives render order, so reordering `FK` moves the
+     screen. Checksum FACTs (NIF/IBAN, ADR-007) render **solid**; everything LLM-extracted renders
+     **dashed with a «?»** — the load-bearing proposed-vs-confirmed convention.
+   - **Human decisions** — reclassifications, owner, tratado, adiada, project.
+   - Absence is **one quiet line** («sem factos extraídos deste fio»), never a grid of dashes.
+
+   Values **wrap**; they are not truncated (owner request, 2026-08-05). Measured over the live
+   corpus, `product_or_service` runs median 25 / p90 51 / **max 226** characters, so an ellipsis was
+   hiding the job itself. Because grid rows are auto-sized, the wrap is clamped to **3 lines** — one
+   long value would otherwise inflate the height of every other cell in its row — and a value past
+   **60 chars** spans the full grid (`.lg-r.wide{grid-column:1/-1}`), where 3 lines actually hold it.
+   The threshold is on **length, not key**, so a short «corte MDF» keeps its compact cell. Since the
+   clamp *hides* text, the untruncated value is always in `title=`. One builder, `_lgRow`, emits
+   every row and is executed (not grepped) by the suite.
+
+   **Each value is a button onto its own evidence** (fila-evidence §Phase 3, decision D2). Click it
+   and the sentence that produced it lights up in the message body below, scrolled into view; click
+   again to put it out. **One** value is lit at a time and there is **one** highlight colour —
+   deliberately, because colour in this pane is already fully committed (clock bands are urgency,
+   the trio is counterparty, `--int` is a checksum FACT, dashed-vs-solid is proposed-vs-confirmed),
+   so a per-field palette would make a green «Prazo» read as *on time*. Mechanics:
+   - **Zero LLM, and never a server-computed offset.** `extract.py`'s `_AMOUNT`/`_NIF`/`_IBAN` are
+     mirrored client-side (`evMatches`) over the string actually on screen, mod-11 check included.
+     `extract_values` folds (NFKD → strip combining → casefold) *before* matching, so its outputs
+     are not substrings of the body and folding changes string length on Portuguese text — an offset
+     computed server-side drifts silently on exactly the mail this app handles.
+   - **Format-locked keys match by normalised form**, which is why a body writing an IBAN in groups
+     of four still matches the space-stripped stored value. Everything else falls back to a
+     fold-tolerant literal search — rejected as a *primary* strategy (37% hit rate) but correct as a
+     user-initiated secondary, where a miss costs nothing.
+   - **Painted with the CSS Custom Highlight API** over live `Range`s (`::highlight(evid)`), never
+     `<mark>`: `esc()` does not escape `'` and indexing escaped text drifts 4 chars per `&`, and a
+     wrapper element would repoint the `nextElementSibling` toggles (§7).
+   - **Evidence inside a collapsed «assinatura»/«mensagem citada» block opens it** — painting text
+     nobody can see is indistinguishable from finding nothing.
+   - **Absence is stated: «sem evidência visível».** 40% of extracted values are in the email text
+     in no form at all, so this is the *common* answer, not an edge case. Never a nearest match.
+   - The picked key is **module state, re-applied by `renderDossier()`** — not a field on the row,
+     because `refresh()` replaces every row object every 15 s and hand-copies a fixed field list.
+     The click itself calls `applyEvidence`, **not** `renderDossier`, so it cannot throw away a
+     block the reader had opened.
+
+   Measured over the live corpus by driving a real browser: **43 of 83 ledger clicks (52%) paint
+   evidence; the other 40 say «sem evidência visível»; none is silent.**
+
+   **The located sentence (fila-evidence §Phase 4, ADR-054) is a strict FALLBACK to all of the
+   above.** When the value itself is nowhere on screen — the common case, and structurally
+   unreachable for `Prazo` (0% of ledger rows paint deterministically) and `Pedido` (20%) — the
+   highlight falls back to the sentence the locate pass stored for that value, found with the same
+   fold-tolerant search plus whitespace collapse (`evLocateQuote`). The order is the design: the
+   deterministic span is *more precise*, and on rows it already paints, the model's quote is a
+   useless echo of the value 89% of the time. A row with neither still says «sem evidência visível».
+   The stored quote is **the email's own text at the matched span**, never the string the model
+   typed, and the server-side matcher (`locate.find_spans`) and the client painter are pinned to
+   agree by a test that executes both.
+5. **«Evolução da conversa»** (`.dnarr`, fila-evidence §Phase 5, ADR-054) — how this negotiation got
+   here, so someone arriving now understands it without reading the fio. At most 6 one-sentence
+   beats, each dated and each **clickable to the message it came from** (`data-nmid` → `data-tmid`,
+   scrolled into view, no re-render), plus one «estado» line about whose move it is. Its **own**
+   container, deliberately not a child of «Análise IA»: that block is conditional on
+   `decided||tr.reason||en.action_requested` and a narrative inside it would vanish on exactly the
+   threads where all three are empty. Solid border, not the dashed INFERENCE one — every beat cites
+   a message id that was checked against the thread before it was stored, and a beat citing anything
+   else is discarded. **Absent is silent**: only threads with ≥ 2 messages are ever narrated (157 of
+   767), and a heading over nothing would be noise on the other 610.
+6. **Análise IA** (dashed border): `Pedem: <entities.action_requested>` + `trust.reason`, with the
    confidence chip («Gemini · 91%») and «Porquê?». The always-visible version of what was a hidden
    click.
-6. **Counterparty history card**: initials avatar · display name · contact · N conversas ·
+7. **Counterparty history card**: initials avatar · display name · contact · N conversas ·
    € em aberto (cluster rollups `we_owe_count`/`response_risk` — already computed server-side) ·
    «↻ N relacionadas» links · project line with **readiness ring + «faltam N campos» /
    «pronto a orçamentar»** (`projects.coverage/estimable`, denormalized v3 columns) · spec-conflict
    alert when `merge_job_fields` reports a contradiction.
-7. **Staged draft** (dashed card, only when a draft exists/was requested): template name, body,
+8. **Staged draft** (dashed card, only when a draft exists/was requested): template name, body,
    `[Copiar]` + `[✉ Abrir no mail]`, footer «rascunho — revê antes de enviar · a app nunca envia».
    **«Abrir no mail»** hands `to` + `Re: <assunto>` + body to the OS default client via `mailto:`
    (which opens a composer and cannot send); «Copiar» stays as the fallback where no client is
    registered. The body arrives already closed with the reader's **own signature** — see
    [reply-signature.md](reply-signature.md) and
    [ADR-047](../03-decisions/adr-047-the-signature-belongs-to-the-person-not-the-playbook.md).
-8. **Conversa** — vertical timeline + messages (§7).
+9. **Conversa** — vertical timeline + messages (§7).
 
 The message renderer is the **existing** `msgHTML`/`_threadCache` kit — the dossier is a new *mount
 point*, not a new renderer (the named drift risk).
@@ -164,6 +232,25 @@ re-grounded in the deterministic clock:
   as the growing tail of the conversation. For AWAITING threads the tail is hollow-styled (their
   move), for WE_OWE filled (ours).
 - Pure client-side render over the already-fetched `messages` array + `clock` — no new endpoint.
+
+**Each message shows three collapsible regions, in this order, and every one of them exists because
+hiding text outright is the thing this app does not do:** «▸ assinatura» (`.tsig`) · «▸ mensagem
+citada» (`.tquote`) · «ver original» (`.rawbody`). All three are wired by `msgWireQuoteToggles` and
+all three find their target with `nextElementSibling`, so **nothing may ever be inserted between a
+toggle and the block it reveals** — the failure is silent (a button that opens someone else's text),
+which is why `tests/test_cockpit_ui.py` asserts the adjacency positionally after executing `msgHTML`.
+
+«assinatura» is the newest (fila-evidence §Phase 2, 2026-08-05). `clean_email_body` used to *delete*
+the closing salutation and everything after it; that block is where a sender's name, role and NIF
+live, and its removal was invisible. The signature now arrives in its own field, `body_sig`, beside
+an unchanged `body_clean` — see [module-map](../02-architecture/module-map.md) for why it is a
+separate opt-in entry point and not a flag. Measured over the corpus: **546 of 1259 messages carry
+one; 96% hold at least one non-closing line** (a name, role or NIF); median 45 chars, p90 804,
+capped at 1500 on the wire. Reachable extracted values move **37% → 40%**, all of it `client_name`
+(**35% → 48%, +68**). That gain exceeds `probe_region`'s 15-value `signature` bucket because the
+block is collected from anywhere in the body, **including signatures inside quoted replies** — which
+were doubly hidden before (deleted from `body_clean`, so expanding «mensagem citada» did not reveal
+them either).
 
 ## 8 · Momentum («Ritmo») — deterministic definition
 
@@ -235,7 +322,12 @@ Joined server-side in `_fila_rows` (P1–P2), each absent when unknown:
 «a responder» · «a aguardar» · «rever N» · «correio há N min» · «Hoje» · «Clientes» · «Fornecedores» ·
 «Leads» · «Em risco» · «€ em jogo» · «Prazos» · «A aguardar» · «Tratados» · «A aguardar — sem resposta
 há 72 h+» · «A cobrar» (billing: unpaid OUTBOUND_INVOICE) · «faltam N campos» · «pronto a orçamentar» · «valor estimado (IA)» · «novo contacto» ·
-«N relacionadas» · «sem resposta há N dias» (timeline gap) · «agora» · «Adiar» · «acorda antes se
+«N relacionadas» · «assinatura» (colapsada, §7) · «sem evidência visível» (§6, valor sem origem
+localizável no texto) ·
+«Evolução da conversa» (§6, a narrativa do fio) · «ver a mensagem de onde saiu» (title de cada passo) ·
+«Registo do fio» · «sem factos extraídos deste fio» · «sem decisões humanas
+registadas» · «+N menções» · «a carregar registo…» ·
+«sem resposta há N dias» (timeline gap) · «agora» · «Adiar» · «acorda antes se
 responderem» · «Tratar agora» · «N de M» · «selecionadas: N» · «rascunho — revê antes de enviar · a
 app nunca envia» · zero states: «Tudo tratado · nada em risco» / «Sem leads novos — bom sinal».
 
@@ -253,6 +345,7 @@ The design-proposal palette is the app's token system (`cockpit_ui.py` `:root`, 
 | **Cliente** | `--cli` `#0A8F72` / `--cli-bg` `#DFF1EC` |
 | **Fornecedor** | `--forn` `#3B5FC0` / `--forn-bg` `#E5EAF9` |
 | **Lead** | `--lead` `#A16207` / `--lead-bg` `#F6ECD7` |
+| **Evidence highlight** | `--hl-bg` `#FFDA47` / `--hl-tx` `#1A1405` (dark: `#8A6A12` / `#FFF6DF`) |
 
 The counterparty trio is **CVD-validated** (dataviz six-checks: worst adjacent pair ΔE 19.4 deutan /
 21.0 normal-vision, chroma ≥ 0.1, all ≥ 3:1 on white). **Lead-purple is rejected** — ΔE 2.9 protan
@@ -260,6 +353,13 @@ against fornecedor blue makes them indistinguishable for protanopia; amber also 
 new/hot semantics («novo» shares the family). `--purple` survives only for non-counterparty
 identities (Para ti gates, Prazos vista dot). Dark mode is future work; the artifact carries a
 validated dark variant (`#219980`/`#6E85DE`/`#BA8628`) when it lands.
+
+**`--hl-bg`/`--hl-tx` is the one token in this palette that means nothing on its own** (fila-evidence
+§Phase 3), and that is the point: every other hue is committed — bands are urgency, the trio is
+counterparty, `--int` is a checksum FACT, `--ac` is «selected» — so a highlight reusing any of them
+would read as a *claim about* the text it lands on. It appears only as a background inside message
+body text, only while a ledger value is picked, and so never sits beside the counterparty trio the
+CVD validation constrains. Amber-yellow is the find-a-match convention and carries no meaning here.
 
 ## 14 · Non-goals
 

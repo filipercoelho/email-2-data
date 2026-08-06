@@ -122,6 +122,17 @@ def test_pt_pt_copy_and_the_two_sync_modes():
     assert "do_triage: (_mode === 'full')" in html
 
 
+def test_the_mailbox_panel_does_not_claim_the_pinned_list_is_everything_fetched():
+    """ADR-049: the fetch opens every folder the server lists, so a panel headed «Caixas de correio
+    (78)» over a 78-item list reads as the complete scope while the fetcher opens 82. Same class of
+    defect as offering a door the server refuses — what the screen shows must match what runs."""
+    html = admin_page.build_html([ACCOUNT])
+    assert "Caixas de correio fixadas" in html
+    assert "resto automático" in html
+    assert "Todas as pastas do servidor são procuradas automaticamente" in html
+    assert "spam" in html, "the one exclusion must be named, not left implicit"
+
+
 def test_sync_button_is_disabled_while_a_sync_runs():
     html = admin_page.build_html([ACCOUNT], {"running": True})
     assert "const dis = running ? ' disabled' : '';" in html

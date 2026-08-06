@@ -280,8 +280,17 @@ exists; the expert labels do not) · 🔄 jobs route to estimate-or-clarify — 
   then reused; below-floor skipped; disable flag; create-failure fallback; expiry eviction). The Anthropic
   path had `cache_control: ephemeral` already (`llm.py:198`); this brought Gemini to parity.
 - ⬜ Forward-aware body trimming (strip signatures/quotes/footers; **keep** the forwarded original) — not
-  built. Nothing in `envelope.py` trims quoted history before the prompt. (`extract.py:74 _dedupe` is
-  de-duplication of *extracted values*, not of body text — do not mistake it for this.)
+  built **for the prompt**, and now deliberately pointed the other way for the UI. Nothing in
+  `envelope.py` trims quoted history before the prompt. (`extract.py:74 _dedupe` is de-duplication of
+  *extracted values*, not of body text — do not mistake it for this.)
+  **Read this before implementing it (2026-08-05).** `envelope.clean_email_body` already strips
+  signatures, and it is **frozen**: it is the text `clientdraft.polish_draft` receives, so trimming
+  *more* there changes what a client-facing draft may quote. The display side went the opposite way —
+  fila-evidence §Phase 2 stopped *deleting* the signature and now returns it via
+  `clean_email_body_parts` for the dossier to collapse — because deleting the sender's own name and
+  NIF is the same class of act as silently binning a message. So this item is now specifically
+  **quoted-history trimming for the prompt**, not signature trimming, and it must not be implemented
+  by widening `clean_email_body`.
 - ⬜ Near-duplicate dedup — not built. Dedup today is exact-identity only (canonical `message_id`,
   `identity.py`), which is idempotency, not token minimization.
 
@@ -297,8 +306,15 @@ the **cockpit**, and it has been the main surface of the app for months while th
 is not one page but a set of lenses behind the ADR-039 auth gate: **Início** (`/`, ADR-044) · **Fila /
 «Mesa com Foco»** (`/fila`, ADR-029/-033/-034/-036/-037) · **Para ti** (ADR-024/-028) · **Projetos** ·
 **Contrapartes**, with deep-linkable URLs (ADR-014), a 30 s freshness poll (ADR-023), dark mode (ADR-035)
-and per-person visibility (ADR-045). Reading this file to find out what is left to build was the failure
-mode; the sub-items are therefore itemised honestly below.
+and per-person visibility (ADR-045). The **Projetos** workbench is itself seven tabs — *Especificação ·
+Origem · Ficheiros · Linha do tempo · Email ao cliente · Descritivo · Registar* — the seventh of which,
+**«Ficheiros»** (ADR-052), is the project's whole file list across every attached conversation *and* its
+intake captures, content-deduped, each tile naming the email that first carried it. That tab is where
+Phase 7's own measurement lands in the UI: **88 % of job-relevant mail carries an attachment and 53 %
+put the spec *in* the attachment, not the body** (see Phase 7's empirical base), so "consult the
+project's files" is not a convenience next to the spec panel — for half the jobs it *is* the spec.
+Reading this file to find out what is left to build was the failure mode; the sub-items are therefore
+itemised honestly below.
 
 - ✅ **Priority dashboard (M2): queue sorted by urgency** — built, then *superseded in design*. The Fila
   no longer sorts by a priority scalar: it partitions by **obligation** and lets the clock colour and sort
@@ -323,6 +339,17 @@ mode; the sub-items are therefore itemised honestly below.
   host (CLAUDE.md §"Docker is the only deployment target", 2026-07-20): `email2data` published to
   `127.0.0.1:8042` + `intake-bot`. A LAN bind is opt-in behind the ADR-039 gate with TLS. Anyone reviving
   a NAS target should re-decide it against that posture rather than treat this line as a live plan.
+- ✅ **The dossier carries its own evidence, and the thread tells its story** — the five-phase
+  [fila-evidence plan](../04-implementation/fila-evidence-and-narrative-phases.md) is now **complete**.
+  Phases 1–3 shipped 2026-08-05 (values wrap; the signature is collapsed rather than deleted; clicking a
+  ledger value highlights it in the body deterministically). Phases 4–5 shipped **2026-08-06** behind
+  [ADR-054](../03-decisions/adr-054-llm-derived-body-fragments-live-in-out-sidecars.md): a separate
+  **locate** pass stores the sentence that justifies each extracted value (`out/evidence.jsonl`), and a
+  **narrate** pass writes «Evolução da conversa» per multi-message thread (`out/narratives.jsonl`). Both
+  are `email2data locate` / `narrate` **and** incremental on every triaging sync. Neither touches the
+  triage prompt or schema, so no verdict churns. The measured reason Phase 4 exists at all: the
+  deterministic Phase-3 search paints **350 of 790 ledger rows**, and **431 of the 440 it leaves dark are
+  absent from the email text in any form** — a search cannot reach them, and a sentence can.
 
 ---
 

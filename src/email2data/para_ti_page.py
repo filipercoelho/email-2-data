@@ -263,7 +263,14 @@ async function loadDetail(item){
   try{
     const d=await getJSON('/api/thread/'+encodeURIComponent(root));
     if(d.error) _detailErr[root]=d.error;
-    else _detail[root]={messages:d.messages||[], spec:d.spec||null};
+    /* `attachments` is KEPT. It was dropped here while detailHTML went on passing
+       `attachments: d.attachments` — undefined — so attFunnelHTML returned '' and Para Ti has never
+       once rendered the ADR-046 funnel, on a page whose whole job is deciding about a conversation.
+       Confirmed in Chrome: a thread showing 8 📎 chips and no `.attf` at all. The sweep in
+       tests/test_attachments.py only ever asserted that no lens FORKS the shared kit — never that a
+       lens RENDERS one, which is exactly why two lines of omission survived. */
+    else _detail[root]={messages:d.messages||[], spec:d.spec||null,
+                        attachments:d.attachments||null};
   }catch(e){ _detailErr[root]='falhou ao carregar a conversa'; }
 }
 
@@ -304,7 +311,11 @@ function actionsHTML(item, i){
       +esc(ctx.project.title||ctx.project.project_id)+'</button>';
   }
   if(item.thread_root){
-    html+='<a href="/?focus='+esc(item.thread_root)+'" data-act="nav" style="font-size:12px;color:var(--ac);text-decoration:none">ver na fila →</a>';
+    /* '/fila?thread=' — explicit prefix and the CANONICAL param. It said '/?focus=' until ADR-044
+       moved the Fila off the root, which sent this straight to Início (no query params read at all).
+       encodeURIComponent, not esc(): a Message-ID carrying '&' or '+' produced a URL that pointed at
+       a different conversation, or none — and its output is already safe in an attribute. */
+    html+='<a href="/fila?thread='+encodeURIComponent(item.thread_root)+'" data-act="nav" style="font-size:12px;color:var(--ac);text-decoration:none">ver na fila →</a>';
   }
   return '<div class="gacts">'+html+'</div>';
 }

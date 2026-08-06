@@ -72,3 +72,6 @@ certs/
 # data as out/. The repo is public; a screenshot leaks exactly what results.jsonl is ignored to protect.
 .playwright-mcp/
 /*.png
+
+# Spike output: carries verbatim client sentences + real Message-IDs (ADR-054 §"and nowhere else").
+design/spike_quotes_raw.json

@@ -29,8 +29,12 @@ from typing import Any
 # ── nav items (order = visual order) ─────────────────────────────────────────
 _NAV = [
     # ADR-044 moved the Fila off "/" — "/" is Início, the landing page. The Fila keeps every URL it
-    # had except that one, and the query-string deep links (?tab=, ?thread=, …) are unchanged because
-    # syncURL() builds them from location.pathname.
+    # had except that one. Its OWN deep links (?tab=, ?thread=, …) survived because syncURL() builds
+    # them from location.pathname — but that is only true of links the Fila writes for itself, and
+    # reasoning from it is what broke six CROSS-page links, which hard-coded "/?thread=" and so
+    # landed on Início, a page that reads no query parameter at all. The rule for anything added
+    # here or on any other page: a link leaving the page it is written on has no location.pathname
+    # to inherit and MUST name its route in full ("/fila?thread=", never "/?thread=").
     ("fila",         "Fila",          "/fila"),
     ("contrapartes", "Contrapartes",  "/contrapartes"),
     ("projetos",     "Projetos",      "/projetos"),
@@ -76,9 +80,18 @@ def page(
     entry. A builder that forgets to forward it therefore costs an *admin* their link — visible and
     self-reporting — rather than offering a member a door ADR-040 already locked, which nobody
     would notice. `test_every_lens_forwards_the_signed_in_person_to_the_shell` closes that gap.
+
+    Every lens also gets ``const IS_ADMIN`` for free, injected here rather than passed by each
+    builder. The nav's «Administração» has been gated since ADR-040, but the ⌘K palettes are JS and
+    could not see `person` at all, so two of them kept offering doors the gate refuses — `/admin` on
+    Projetos and `/inbox` on the Fila (both in `_ADMIN_EXACT`). Deriving it once means a new palette
+    entry is gated by asking `IS_ADMIN`, not by remembering that a page needed a new parameter — the
+    same reason the auth gate is middleware rather than a decorator (non-negotiable #6).
     """
     counts = nav_counts or {}
-    consts = "\n".join(
+    # Default-deny, and `is_admin` may arrive as 0/1 from SQLite — bool() so the embed is a real
+    # JS boolean and `if(IS_ADMIN)` cannot read a truthy string.
+    consts = f"const IS_ADMIN = {_embed(bool(person and person.get('is_admin')))};\n" + "\n".join(
         f"const {k.upper()} = {_embed(v)};" for k, v in (embeds or {}).items()
     )
     return (
@@ -473,6 +486,12 @@ _HEAD = """<!doctype html>
     --green:#2E7D4F;--green-bg:#E4F1E9;--green-line:#C6E0D0;
     --purple:#6b4fd1;--purple-bg:#EFEAFB;
     --cli:#0A8F72;--cli-bg:#DFF1EC;--forn:#3B5FC0;--forn-bg:#E5EAF9;--lead:#A16207;--lead-bg:#F6ECD7;
+    /* transient evidence highlight (fila-evidence §Phase 3) — the ONE colour in this palette that
+       means nothing on its own. Every other hue is committed: bands are urgency, the trio is
+       counterparty, --int is a checksum FACT, --ac is «selected». A highlight that reused any of
+       them would read as a claim about the text it lands on. Body-text background only, and only
+       while a ledger row is picked, so it never sits beside the counterparty trio. */
+    --hl-bg:#FFDA47;--hl-tx:#1A1405;
     --shadow:0 1px 2px rgba(20,28,36,.05),0 1px 3px rgba(20,28,36,.04);
     --rpad:12px;--rfont:13.5px;}
   /* ── dark theme (ADR-035) ───────────────────────────────────────────────
@@ -491,6 +510,7 @@ _HEAD = """<!doctype html>
     --green:#58B282;--green-bg:#1C3226;--green-line:#2E4A3A;
     --purple:#9C86E8;--purple-bg:#241E3A;
     --cli:#219980;--cli-bg:#12332C;--forn:#6E85DE;--forn-bg:#1F2942;--lead:#BA8628;--lead-bg:#332810;
+    --hl-bg:#8A6A12;--hl-tx:#FFF6DF;
     --shadow:0 1px 2px rgba(0,0,0,.34),0 1px 3px rgba(0,0,0,.28);}
   body.compact{--rpad:7px;--rfont:13px}
   *{box-sizing:border-box} html,body{margin:0}
@@ -631,8 +651,14 @@ _HEAD = """<!doctype html>
   .tatts-d>summary::-webkit-details-marker{display:none}
   .tatts-d[open]>summary{margin-bottom:4px}
   .tbody{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--tx);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
-  .qtoggle,.rawtoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0;display:block}
-  .qtoggle:hover,.rawtoggle:hover{color:var(--ac)}
+  .qtoggle,.rawtoggle,.stoggle{margin-top:6px;font-size:11px;font-weight:600;color:var(--mut);background:none;border:none;cursor:pointer;padding:0;display:block}
+  .qtoggle:hover,.rawtoggle:hover,.stoggle:hover{color:var(--ac)}
+  /* the evidence span for the picked ledger value (fila-evidence §Phase 3). ::highlight() paints
+     over live Ranges — no element is inserted, so the nextElementSibling toggles below are safe. */
+  ::highlight(evid){background:var(--hl-bg);color:var(--hl-tx)}
+  /* the sender's closing block — collapsed, never deleted (fila-evidence §Phase 2) */
+  .tsig{margin-top:5px;padding-left:9px;border-left:2px dashed var(--bd);font-size:12px;line-height:1.45;
+    color:var(--mut);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
   .rawbody{margin-top:4px;border-top:1px dashed var(--bd);padding-top:6px}
   /* translate-to-English reading aid (ADR-032) */
   .tract{margin-top:6px}
@@ -674,6 +700,21 @@ _HEAD = """<!doctype html>
   .atti-ev{font-size:9px;color:var(--mut2);opacity:.85;overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;font-style:italic}
   .atti-n8{position:absolute}
+  /* A file whose bytes are gone from the sole-copy capture store (ADR-020) — listed, never hidden. */
+  .atti.gone{border-style:dashed;opacity:.72}
+  /* Provenance line (ADR-052). Its own element OUTSIDE the tile anchor — it carries a link of its
+     own, and an <a> inside an <a> is invalid HTML the browser silently un-nests. */
+  .attw{display:flex;flex-direction:column;min-width:0}
+  .attw>.atti{border-bottom-left-radius:0;border-bottom-right-radius:0;border-bottom:none}
+  .atti-src{font-size:9.5px;color:var(--mut2);background:var(--surface2);border:1px solid var(--bd);
+    border-radius:0 0 8px 8px;padding:3px 6px;display:flex;align-items:baseline;gap:5px;
+    overflow:hidden;white-space:nowrap}
+  /* min-width:0 is the load-bearing half — a flex item defaults to min-width:auto and refuses to
+     shrink below its text, which is what pushed the jump link out of the tile. */
+  .atti-who{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .atti-src.cap{color:var(--ext,var(--mut2))}
+  .atti-jump{flex:0 0 auto;color:var(--ac);text-decoration:none;font-weight:600}
+  .atti-jump:hover{text-decoration:underline}
   .attf-sig>summary{cursor:pointer;list-style:none;font-size:10px;font-weight:700;
     text-transform:uppercase;letter-spacing:.05em;color:var(--mut2);margin-bottom:5px}
   .attf-sig>summary::-webkit-details-marker{display:none}
@@ -974,6 +1015,15 @@ function msgHTML(m, opts){
   const noVisible=!sp.visible && !sp.quoted;
   const vis=noVisible?(spRaw.visible||spRaw.quoted):(sp.visible||sp.quoted||'');
   const visHTML=vis?'<div class="tbody">'+esc(vis.slice(0,2000))+(vis.length>2000?'\n…':'')+'</div>':'';
+  /* The closing block. `clean_email_body` used to DELETE it, which is where a sender's name, role
+     and NIF live — so it now arrives as its own field and renders one click away. Its own field,
+     not folded into body_clean, for three measured reasons: `hasNoise` below compares the two
+     lengths and would lose «ver original»; `noVisible` above would stop falling back; and the
+     server's cut would start landing inside the signature instead of the message. */
+  const sigHTML=(m.body_sig&&!noVisible)
+    ?'<button class="stoggle">▸ assinatura</button>'
+     +'<div class="tsig hidden">'+esc(String(m.body_sig).slice(0,1500))+'</div>'
+    :'';
   const quoteHTML=(sp.quoted&&!noVisible)
     ?'<button class="qtoggle">▸ mensagem citada</button>'
      +'<div class="tquote hidden">'+esc(sp.quoted.slice(0,3000))+'</div>'
@@ -1008,7 +1058,12 @@ function msgHTML(m, opts){
     ?'<div class="tract"><button class="trbtn" type="button" data-mid="'+esc(m.message_id||'')
        +'">traduzir (EN)</button></div><div class="trbody hidden"></div>'
     :'';
-  return '<div class="tmsg dir-'+esc(tag.k)+(m.embedded?' embedded':'')+'">'
+  /* data-tmid, not data-mid: `.trbtn[data-mid]` is read with closest()-style lookups by the
+     translate handler, and giving the WRAPPER the same attribute would make every click inside a
+     message resolve to it. This one exists so «Evolução da conversa» can scroll to the message a
+     narrative step cites (ADR-054) — provenance you can follow, not just claim. */
+  return '<div class="tmsg dir-'+esc(tag.k)+(m.embedded?' embedded':'')
+    +'" data-tmid="'+esc(m.message_id||'')+'">'
     +'<div class="tmeta">'
     +'<span class="tdir" style="color:'+tag.c+'">'+tag.i+tag.t+'</span>'
     +'<span class="taddr">'+esc(m.from_email||'?')+'</span>'
@@ -1019,7 +1074,7 @@ function msgHTML(m, opts){
     +(atts?'<span class="tatts">'+atts+'</span>':'')
     +'</div>'
     +provBadges
-    +visHTML+quoteHTML+rawToggle+trHTML
+    +visHTML+sigHTML+quoteHTML+rawToggle+trHTML
     +'</div>';
 }
 /* ── the attachment funnel (ADR-046) ───────────────────────────────────────
@@ -1038,12 +1093,55 @@ function _attSize(n){
   if(n>=1024)    return Math.round(n/1024)+' KB';
   return n+' B';
 }
-function _attTile(it){
-  const url='/api/attachment/'+encodeURIComponent((it.src&&it.src.message_id)||'')+'/'+((it.src&&it.src.index)||0);
+/* Where the bytes live. TWO sources share this tile (ADR-052): a MIME part addressed by
+   {message_id,index}, and an intake capture's media addressed by {capture_id,index}. The item says
+   which; the tile never guesses from the shape of a string. */
+function _attURL(it){
+  const s=it.src||{};
+  return s.capture_id
+    ? '/api/captures/'+encodeURIComponent(s.capture_id)+'/media/'+(s.index||0)
+    : '/api/attachment/'+encodeURIComponent(s.message_id||'')+'/'+(s.index||0);
+}
+/* «Quem trouxe este ficheiro?» — rendered only where a lens asks for it (o.showSource), because it
+   is only TRUE where the merge is chronological. See attMerge: first-carrier-wins is meaningless
+   unless the list was sorted by first_seen before the dedup ran. */
+function _attSrcHTML(it){
+  const when=(it.first_seen||'').slice(0,10);
+  if(it.source==='capture'){
+    const bits=['captura'+(it.channel?' · '+it.channel:'')];
+    if(it.asserted_by) bits.push(it.asserted_by);
+    if(when) bits.push(when);
+    return '<span class="atti-src cap">'+esc(bits.join(' · '))+'</span>';
+  }
+  const bits=[];
+  if(it.from_email) bits.push(it.from_email);
+  if(when) bits.push(when);
+  /* '/fila?thread=' written in full — never the bare root. The root stopped being the Fila in
+     ADR-044, so a rootward query lands on Início, which reads no query parameter at all. A guard in
+     tests/test_fila.py greps every lens for the old shape, so do not reintroduce it even in prose. */
+  const jump=it.thread_root
+    ? ' <a class="atti-jump" href="/fila?thread='+encodeURIComponent(it.thread_root)+'">ver na fila →</a>'
+    : '';
+  /* The address goes in its OWN span so flexbox can shrink and ellipsise it while the jump link
+     never shrinks. Looking at the render is what caught this: with the whole line as one nowrap
+     span, a real address («ana@espumas.pt · 2026-07-20») filled a 132 px tile and pushed «ver na
+     fila →» clean off the right edge — the one action the line offers, invisible on every tile. */
+  return '<span class="atti-src"><span class="atti-who">'
+    +esc(bits.length?bits.join(' · '):'origem desconhecida')+'</span>'+jump+'</span>';
+}
+function _attTile(it, o){
+  o=o||{};
+  const url=_attURL(it);
   /* Size-gated preview: only a small image gets a real <img>, and it is lazy so a collapsed band
      costs nothing until opened. Everything else shows its kind glyph — no byte is fetched to draw
-     an icon. The server decides (item.preview); the client never guesses from the size. */
-  const thumb=it.preview
+     an icon. The server decides (item.preview); the client never guesses from the size.
+
+     o.bigPreviews is the ONE opt-in, and it is a decision about the SURFACE, not a guess about the
+     file: in a panel whose entire purpose is looking at the project's files, iconising the 6 MB
+     client photo while previewing the 6 KB supplier logo inverts the view. Still lazy, so only what
+     scrolls into frame is fetched. Every other lens keeps the gate. (ADR-052 §Preview) */
+  const wantImg=it.preview||(o.bigPreviews&&it.kind==='image'&&!it.missing);
+  const thumb=wantImg
     ? '<span class="atti-t"><img loading="lazy" decoding="async" src="'+url+'" alt=""></span>'
     : '<span class="atti-t"><span class="atti-g">'+(_ATT_GLYPH[it.kind]||_ATT_GLYPH.file)+'</span></span>';
   const bits=[_attSize(it.size)];
@@ -1052,15 +1150,19 @@ function _attTile(it){
   if(it.n_copies>1) bits.push('×'+it.n_copies);
   const name=it.name||'(sem nome)';
   const ev=it.band_evidence||'';
-  return '<a class="atti" href="'+url+'" target="_blank" rel="noopener" title="'
+  const tile='<a class="atti'+(it.missing?' gone':'')+'" href="'+url+'" target="_blank" rel="noopener" title="'
     +esc(name+' — '+bits.join(' · ')+(ev?('\nporquê: '+ev):''))+'">'
     +thumb
     +'<span class="atti-n">'+esc(name)+'</span>'
     +'<span class="atti-m">'+esc(bits.join(' · '))+'</span>'
     +(ev?'<span class="atti-ev">'+esc(ev)+'</span>':'')
     +'</a>';
+  /* The source line carries its own link, so it CANNOT live inside the tile's <a>: nested anchors
+     are invalid HTML and the browser silently splits the DOM around them. Wrapper instead. */
+  return o.showSource ? '<div class="attw">'+tile+_attSrcHTML(it)+'</div>' : tile;
 }
-function attFunnelHTML(att){
+function attFunnelHTML(att, o){
+  o=o||{};
   if(!att) return '';
   const items=att.items||[];
   if(!items.length) return '';
@@ -1071,38 +1173,54 @@ function attFunnelHTML(att){
   if(counts.FICHEIROS)   sub.push(counts.FICHEIROS+(counts.FICHEIROS===1?' ficheiro':' ficheiros'));
   if(counts.IMAGENS)     sub.push(counts.IMAGENS+(counts.IMAGENS===1?' imagem no corpo':' imagens no corpo'));
   if(counts.ASSINATURAS) sub.push(counts.ASSINATURAS+(counts.ASSINATURAS===1?' assinatura':' assinaturas'));
-  let out='<div class="attf"><div class="attf-h">📎 Ficheiros da conversa'
+  /* The heading names the scope it actually folded. It was the literal «Ficheiros da conversa» for
+     a list that, in a Projetos panel, spans every conversation of the project — a heading that lies
+     about its own scope. Existing callers pass one argument and keep the thread wording. */
+  const title=(o&&o.title)||'Ficheiros da conversa';
+  let out='<div class="attf"><div class="attf-h">📎 '+esc(title)
     +'<span class="attf-sub">'+esc(sub.join(' · '))+'</span></div>';
   const INF='<span class="attf-inf" title="INFERÊNCIA — nada no MIME diz «isto é um logótipo». '
     +'A banda é deduzida por uma regra determinista; cada ficheiro mostra a sua evidência.">INFERÊNCIA</span>';
   ['FICHEIROS','IMAGENS'].forEach(band=>{
     const lst=by[band]||[];
     if(!lst.length) return;
+    /* Always an arrow — never a bare reference to the tile helper. Array.map passes
+       (item, index, array), so passing the function itself hands it the ARRAY INDEX as its options
+       object: falsy for tile 0 and truthy for every tile after it. The first tile looks perfect and
+       the rest sprout a source line built from a number. Same for the signature band below, and
+       tests/test_attachments.py greps for the bare shape — do not write it, even in prose. */
     out+='<div class="attf-band"><div class="attf-bl">'+esc(_ATT_BANDLABEL[band])
       +' <b>'+lst.length+'</b>'+INF+'</div>'
-      +'<div class="attf-grid">'+lst.map(_attTile).join('')+'</div></div>';
+      +'<div class="attf-grid">'+lst.map(it=>_attTile(it,o)).join('')+'</div></div>';
   });
   const sig=by.ASSINATURAS||[];
   if(sig.length){
     /* Collapsed, but the COUNT is visible — a human can see there are 15 and open them. */
     out+='<details class="attf-band attf-sig"><summary>'+esc(_ATT_BANDLABEL.ASSINATURAS)
       +' <b>'+sig.length+'</b> — mostrar</summary>'
-      +'<div class="attf-grid">'+sig.map(_attTile).join('')+'</div></details>';
+      +'<div class="attf-grid">'+sig.map(it=>_attTile(it,o)).join('')+'</div></details>';
   }
   return out+'</div>';
 }
-/* Merge several threads' funnels into one — a Projetos panel spans every thread of the project.
-   Dedup stays on the item id (the content hash), so the same drawing quoted in two threads of one
-   project is ONE file, and the band order the server chose is re-applied after the merge. */
+/* Merge several sources' funnels into one — a Projetos panel spans every thread of the project, plus
+   its intake captures (ADR-052). Dedup stays on the item id (the content hash), so the same drawing
+   quoted in two threads — or mailed AND re-sent through Telegram — is ONE file, and the band order
+   the server chose is re-applied after the merge. */
 const _ATT_ORDER={FICHEIROS:0,IMAGENS:1,ASSINATURAS:2};
 function attMerge(blocks){
   const seen={}, order=[];
-  (blocks||[]).forEach(b=>{
-    if(!b||!b.items) return;
-    b.items.forEach(it=>{
-      if(seen[it.id]){ seen[it.id].n_copies+=(it.n_copies||1); return; }
-      seen[it.id]=Object.assign({},it); order.push(it.id);
-    });
+  /* Chronological BEFORE the dedup pass, not block order. fold_thread's contract is "the first
+     occurrence wins: it supplies src, first_seen and from_email" — and this merge inherited that
+     wording while feeding it project_threads.added_ts order, so the winning copy was whichever
+     thread happened to be attached first. Harmless while nothing rendered a sender; a tile that
+     names WHO SENT THIS FILE turns it into a confident lie, which is the worst failure mode in this
+     codebase. An item with no date sorts LAST, so a dated carrier always outranks an undated one. */
+  const flat=[];
+  (blocks||[]).forEach(b=>{ if(b&&b.items) b.items.forEach(it=>flat.push(it)); });
+  flat.sort((a,b)=>String(a.first_seen||'9999').localeCompare(String(b.first_seen||'9999')));
+  flat.forEach(it=>{
+    if(seen[it.id]){ seen[it.id].n_copies+=(it.n_copies||1); return; }
+    seen[it.id]=Object.assign({},it); order.push(it.id);
   });
   const items=order.map(k=>seen[k]);
   items.sort((a,b)=>(_ATT_ORDER[a.band]-_ATT_ORDER[b.band])||(b.size-a.size)
@@ -1157,6 +1275,15 @@ function msgWireQuoteToggles(container){
       }
       e.stopPropagation(); return;
     }
+    const st=e.target.closest('.stoggle');
+    if(st){
+      const s=st.nextElementSibling;
+      if(s&&s.classList.contains('tsig')){
+        const hid=s.classList.toggle('hidden');
+        st.textContent=(hid?'▸':'▾')+' assinatura';
+      }
+      e.stopPropagation(); return;
+    }
     const rt=e.target.closest('.rawtoggle');
     if(rt){
       const rb=rt.nextElementSibling;
@@ -1167,6 +1294,175 @@ function msgWireQuoteToggles(container){
       e.stopPropagation();
     }
   });
+}
+/* ── evidence spans (fila-evidence §Phase 3) ───────────────────────────────────────────────────
+   Click a ledger value, its evidence lights up in the message body. Deterministic and LLM-free.
+
+   These MIRROR extract.py's patterns rather than reusing its output, and that is the whole design.
+   `extract_values` folds first (NFKD → strip combining marks → casefold), so what it stores is NOT
+   a substring of the body: a space-stripped upper-case IBAN does not occur in a body that writes it
+   in groups of four, and a casefolded 'eur' amount does not occur in one that writes EUR — both
+   verified by execution, see tests/test_cockpit_ui.py. Folding also changes string LENGTH on
+   Portuguese text, so any offset computed server-side drifts silently on exactly the mail this app
+   handles. The only safe place to locate a span is over the string that is on screen.
+
+   No literal example values in this comment, deliberately: a 9-digit run here trips
+   test_webapp.py::test_admin_page_does_not_embed_the_whole_settings_dict, which greps the rendered
+   page for a Telegram user id. The examples live in the tests, where they belong.
+
+   Keep in step with src/email2data/extract.py. */
+const _EV_AMOUNT=/(?:€|eur\b|euros?\b)\s?\d[\d. ]*(?:,\d+)?|\d[\d. ]*(?:,\d+)?\s?(?:€|eur\b|euros?\b)/gi;
+const _EV_NIF=/(?:nif|nipc|contribuinte)\D{0,12}(?<!\d)(\d{9})(?!\d)/gi;
+const _EV_IBAN=/\bpt\d{2}(?:\s?\d){21}\b/gi;
+/* PT NIF mod-11 — the check digit is what turns a noisy 9-digit run into a near-certain NIF (ADR-007).
+   Dropping it here would highlight any phone number that happens to follow the word «contribuinte». */
+function evValidNif(n){
+  if(!/^\d{9}$/.test(n)) return false;
+  let t=0; for(let i=0;i<8;i++) t+=parseInt(n[i],10)*(9-i);
+  let c=11-(t%11); if(c>=10) c=0;
+  return c===parseInt(n[8],10);
+}
+function evFold(s){
+  return String(s||'').normalize('NFKD').replace(/[̀-ͯ]/g,'').toLowerCase();
+}
+/* Every match of `key`'s pattern in `text`, as {s,e,text} offsets into THAT string. */
+function evMatches(text,key){
+  const t=String(text||''), out=[];
+  const re=key==='nif'?_EV_NIF:(key==='iban'?_EV_IBAN:(key==='money'?_EV_AMOUNT:null));
+  if(!re) return out;
+  re.lastIndex=0;
+  let m;
+  while((m=re.exec(t))!==null){
+    if(m[0]==='') { re.lastIndex++; continue; }
+    /* _EV_NIF captures the digits; the other two do not. Highlighting m[0] for NIF would paint the
+       «NIF: » anchor as if it were the value — so the offset is re-derived from the group. */
+    let s=m.index, e=m.index+m[0].length;
+    if(key==='nif'){
+      if(!evValidNif(m[1])) continue;
+      s=m.index+m[0].indexOf(m[1]); e=s+m[1].length;
+    }
+    out.push({s:s,e:e,text:t.slice(s,e)});
+  }
+  return out;
+}
+/* Where in `text` is `value`'s evidence? Format-locked keys match by NORMALISED form (so a spaced
+   IBAN still matches the folded stored one); everything else falls back to a fold-tolerant literal
+   search. A value that is not there yields [] — 40% of extracted values are in the email in no form
+   at all, and a wrong highlight is worse than none. */
+function evLocate(text,key,value){
+  const t=String(text||''), v=String(value==null?'':value).trim();
+  if(!t||!v) return [];
+  const norm=s=>evFold(s).replace(/[\s.]/g,'');
+  if(key==='nif'||key==='iban'||key==='money'){
+    const want=norm(v);
+    return evMatches(t,key).filter(m=>norm(m.text)===want);
+  }
+  const hay=evFold(t), needle=evFold(v);   /* fold is 1:1 per char here — offsets stay aligned */
+  const out=[]; let i=hay.indexOf(needle);
+  while(i>=0&&out.length<50){ out.push({s:i,e:i+needle.length,text:t.slice(i,i+needle.length)});
+    i=hay.indexOf(needle,i+Math.max(1,needle.length)); }
+  return out;
+}
+/* ── the Phase-4 quote path (ADR-054) ──────────────────────────────────────────────────────────
+   The locate pass stores the EMAIL's own sentence, but by the time that sentence reaches the DOM it
+   has been through clean_email_body (whole lines dropped), msgSplitQuote (both halves TRIMMED), and
+   three separate slices. Whitespace is the one difference that survives all of that, so it is the
+   one difference tolerated here — and offsets are recovered through a map, never by arithmetic on
+   the normalised string, because folding is NOT length-preserving (NFKD expands a ligature, and a
+   lone combining mark folds away to nothing). That assumption is exactly what makes a server-side
+   offset unusable; this is the client-side version of the same trap. */
+function evNorm(t){
+  const s=String(t||''), out=[], idx=[];
+  let runAt=-1;                            /* where the pending whitespace run STARTED */
+  for(let i=0;i<s.length;i++){
+    const c=s[i];
+    if(/\s/.test(c)){ if(out.length&&runAt<0) runAt=i; continue; }
+    const f=evFold(c);
+    if(!f) continue;                       /* a combining mark on its own folds to '' */
+    /* The collapsed space maps to the START of its run, not to the character after it. That is what
+       makes map[i+len] an EXCLUSIVE end: a match ending just before a space closes on the first
+       whitespace character, not past it, so the painted span carries no trailing blank. */
+    if(runAt>=0){ out.push(' '); idx.push(runAt); runAt=-1; }
+    for(let k=0;k<f.length;k++){ out.push(f[k]); idx.push(i); }
+  }
+  idx.push(s.length);                      /* one past the end, so a match at the end can close */
+  return {t:out.join(''), map:idx};
+}
+/* Every occurrence of `quote` in `text`, as {s,e} offsets into TEXT, tolerating any run of
+   whitespace and the same folding evLocate uses. Returns [] when the sentence is not on screen —
+   which is a real answer: the quote may sit in a region this message's render cut away. */
+function evLocateQuote(text,quote){
+  const q=String(quote==null?'':quote).trim();
+  if(!text||!q) return [];
+  const c=evNorm(text), n=evNorm(q);
+  if(!c.t||!n.t) return [];
+  const out=[]; let i=c.t.indexOf(n.t);
+  while(i>=0&&out.length<50){ out.push({s:c.map[i], e:c.map[i+n.t.length]});
+    i=c.t.indexOf(n.t,i+Math.max(1,n.t.length)); }
+  return out;
+}
+/* The text nodes a highlight may paint: everything the user can actually reach in this dossier.
+   Excludes the .rawbody copy — there are TWO .tbody per message when the raw body is noisier, and
+   painting the hidden one shows nothing while making the match count lie. */
+function evTextNodes(root){
+  const nodes=[];
+  root.querySelectorAll('.tbody,.tquote,.tsig').forEach(box=>{
+    if(box.closest('.rawbody')) return;
+    const w=document.createTreeWalker(box,NodeFilter.SHOW_TEXT);
+    let n; while((n=w.nextNode())) nodes.push(n);
+  });
+  return nodes;
+}
+/* Open the collapsed block an element sits in, and correct its toggle's caret. Never inserts or
+   removes an element — the toggles find their target with nextElementSibling. */
+function evReveal(el){
+  if(!el||!el.closest) return;
+  const box=el.closest('.tquote,.tsig');
+  if(!box||!box.classList.contains('hidden')) return;
+  box.classList.remove('hidden');
+  const t=box.previousElementSibling;
+  if(t&&/toggle$/.test(t.className||'')) t.textContent=(t.textContent||'').replace('▸','▾');
+}
+let _evReg=null;
+/* Paint `value`'s evidence inside `root`. Uses the CSS Custom Highlight API over live Ranges: it
+   mutates NO DOM, which is required here — splicing <mark> into the escaped body would both index
+   escaped text (esc() drifts 4 chars per &, and never escapes ') and repoint the nextElementSibling
+   toggles. Returns the number of spans painted. */
+function evHighlight(root,key,value,quote){
+  evClear();
+  if(!root||typeof CSS==='undefined'||!CSS.highlights||typeof Highlight==='undefined') return 0;
+  const nodes=evTextNodes(root);
+  const collect=fn=>{
+    const rs=[];
+    nodes.forEach(node=>{ fn(node.nodeValue).forEach(m=>{
+      if(m.e<=m.s) return;
+      const r=new Range(); r.setStart(node,m.s); r.setEnd(node,m.e); rs.push(r); }); });
+    return rs;
+  };
+  let ranges=collect(t=>evLocate(t,key,value));
+  /* The LOCATED sentence (ADR-054 Phase 4) is a fallback, never a replacement, and the order is the
+     whole design. The deterministic search already paints 44% of ledger rows exactly — on those the
+     model's quote is an echo of the value 89% of the time, so preferring it would swap a precise
+     span for a whole sentence and lose nothing but precision. Phase 4 exists for the other 56%,
+     where the value is in the email in NO form (an ISO-normalised prazo, a paraphrased pedido) and
+     the sentence is the only thing there is to point at. */
+  if(!ranges.length&&quote) ranges=collect(t=>evLocateQuote(t,quote));
+  if(!ranges.length) return 0;
+  /* If the evidence sits in a collapsed «assinatura» / «mensagem citada» block, open it — painting
+     text nobody can see is indistinguishable from finding nothing. 41% of the model's evidence
+     quotes and 31% of extracted values live behind exactly these two toggles. */
+  ranges.forEach(r=>evReveal(r.startContainer.parentElement));
+  _evReg=new Highlight(...ranges);
+  CSS.highlights.set('evid',_evReg);
+  /* .tbody/.tquote/.tsig are themselves scrollers (max-height + overflow:auto), so bringing a span
+     into view scrolls a NESTED box — 'nearest' keeps the page still and moves only that box. */
+  const first=ranges[0].startContainer.parentElement;
+  if(first&&first.scrollIntoView) first.scrollIntoView({block:'nearest'});
+  return ranges.length;
+}
+function evClear(){
+  _evReg=null;
+  if(typeof CSS!=='undefined'&&CSS.highlights) CSS.highlights.delete('evid');
 }
 let _pi=[],_pf=0;
 function openPalette(){_pi=paletteItems('');_pf=0;$('#_palette').classList.remove('hidden');_rp();const q=$('#_pq');q.value='';q.focus();}

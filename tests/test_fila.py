@@ -152,7 +152,9 @@ def test_fila_page_ships_related_thread_jump_links():
     assert 'class="drel"' in html and "data-relroot=" in html
     assert "conversa" in html and "relacionada" in html    # the pt-PT header (singular/plural)
     assert "[data-relroot]" in html                        # the click handler is wired
-    assert "focusTo(i)" in html and "?thread=" in html      # focus-in-place OR navigate
+    # focus-in-place OR navigate. The prefix is asserted, not just the param: "?thread=" alone
+    # matched the pre-ADR-044 "/?thread=" too, so it stayed green while the jump landed on Início.
+    assert "focusTo(i)" in html and "/fila?thread=" in html
     assert ".drel{" in html and ".drel-i{" in html          # its CSS
 
 
@@ -167,6 +169,23 @@ def test_timeline_debt_uses_the_authoritative_floor_humanizer_not_fmtgap():
     assert "Math.floor(h/24)+' dias'" in html                      # floors days, like Python
     assert "debtVerb+_humanizeAge(c.age_hours" in html             # the debt chip uses it
     assert "debtVerb+_fmtGap(debtMs)" not in html                  # …never the rounding one
+
+
+def test_the_debt_chip_only_speaks_as_debt_over_the_segment_it_actually_spans():
+    """ADR-051 — the chip is drawn between «agora» and the NEWEST message, so calling it the response
+    debt is only true when the clock is anchored there. It was unconditional, which put «sem resposta
+    há 2 dias» directly above a mail sent an hour earlier (the live report). It must now branch on
+    the server's `anchored_at_last` and fall back to the plain elapsed `gap_hours`, still with no
+    client-side wall clock."""
+    fn = _thread_html_js()
+    assert "c.anchored_at_last!==false" in fn                       # the server decides, not the JS
+    assert "debtOwnsSegment?" in fn                                 # …and both arms exist
+    assert "c.gap_hours*3600000" in fn                              # the honest fallback length
+    assert "_fmtGap(segMs)" in fn                                   # rendered like any other gap
+    assert "Date.now()" not in fn                                   # still no wall-clock recompute
+    # the chip is only styled as the debt on the arm that earns it
+    debt_arm = fn.split("segMs>=1800000")[1].split("ordered.forEach")[0]
+    assert "'debt '+esc(c.band" in debt_arm and "_gapBand(segMs)" in debt_arm
 
 
 def test_js_humanize_age_matches_python_humanize_age():
@@ -289,8 +308,13 @@ def test_contrapartes_detail_page_links_to_related_data(tmp_path):
     html = cl.get("/contrapartes/acme.pt").text
     assert 'id="_stats"' in html and "function statCard(" in html          # insight strip
     assert "/inbox#" not in html                                           # NEVER the legacy app
-    assert "/?search='+encodeURIComponent" in html                         # email chips → Fila search
-    assert "/?thread='+encodeURIComponent" in html                         # threads + timeline → Fila
+    # The '/fila' prefix is part of the assertion. These read "/?search=" / "/?thread=" until
+    # ADR-044 moved the Fila off the root, at which point every one of these links landed on Início
+    # — which reads no query parameter — and silently dropped the conversation.
+    assert "/fila?search='+encodeURIComponent" in html                     # email chips → Fila search
+    assert "/fila?thread='+encodeURIComponent" in html                     # threads + timeline → Fila
+    assert "'/?search=" not in html and "'/?thread=" not in html           # never the Início gate
+    assert "/fila?domain='+encodeURIComponent" in html                     # «Abrir na Fila» (domínio)
     assert "/para-ti?item='+encodeURIComponent" in html                    # gates → the exact card
     assert "/projetos/'+encodeURIComponent(p.project_id)" in html          # projects → workbench
     assert "Decisões pendentes" in html and "O que trocámos" in html       # para-ti + purpose sections
@@ -605,6 +629,45 @@ def test_para_ti_page_ships_the_expandable_detail(tmp_path):
     assert "msgThreadHTML(" in html                      # the shared kit, not a private copy
     assert "function specHTML(" in html and "function _specFold(" in html
     assert "const FIELDS =" in html                      # jobspec registry for the field labels
+
+
+def test_rever_chip_lands_on_the_group_it_names_not_the_unfiltered_list():
+    """«Rever classificação N» must open THAT group, not all of Para ti.
+
+    The chip names one population and sent you to the unfiltered list, so the click answered a wider
+    question than it asked. ``?tipo=`` is read by para_ti_page's applyURL() and written back by its
+    syncURL(), so the destination already supported being addressed precisely.
+
+    Not fixed here, and deliberately: the N counts NEEDS_REVIEW interactions while the group counts
+    rows under the confidence floor — two different populations, so the destination can still hold a
+    different number. That is an owner's question about what «Rever classificação» means."""
+    html = fila_page.build_fila_html([], ["Diogo"], now_iso="2026-06-03T12:00:00")
+    assert "'/para-ti?tipo=rever_classificacao'" in html
+    assert "==='rever') location.href='/para-ti'" not in html    # the unfiltered destination is gone
+    # The token has to be one Para ti actually groups by, or the filter silently matches nothing.
+    from email2data import para_ti_page
+    assert "rever_classificacao" in para_ti_page.build_html([])
+
+
+def test_para_ti_ver_na_fila_anchor_points_at_the_fila_not_the_inicio_gate(tmp_path):
+    """The visible «ver na fila →» anchor, and the accept href it sits beside, must both reach the
+    Fila with the conversation mounted.
+
+    Both said ``/?focus=`` until ADR-044 moved the Fila off the root; after that they landed on
+    Início, which reads no query parameter, so the card's whole point — go look at this thread —
+    silently stopped working. The same card carried the bug twice (page anchor + API href) and
+    neither was asserted anywhere, which is why the move was silent."""
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict(cp="LEAD"))]))
+    html = cl.get("/para-ti").text
+    assert '"/fila?thread=\'+encodeURIComponent(item.thread_root)' in html
+    # The LINK form, not any mention of it — the comment beside it names the old shape on purpose.
+    assert '"/?focus=' not in html, "the anchor still points at the Início gate"
+    assert '"/?thread=' not in html
+    # encodeURIComponent, not esc(): a Message-ID with '&' or '+' otherwise builds a URL that
+    # points at a different conversation, or at none.
+    assert '"/fila?thread=\'+esc(' not in html
+    # And the API href beside it agrees — the card must not offer two different destinations.
+    assert cl.get("/api/para-ti").json()["items"][0]["accept"].get("href", "/fila?").startswith("/fila?")
 
 
 def test_para_ti_page_uses_canonical_labels_not_a_private_copy(tmp_path):
@@ -1254,14 +1317,44 @@ def test_related_items_carry_momentum(tmp_path):
 
 def test_api_fila_carries_freshness_badges_and_needs_review(tmp_path):
     """The poll updates everything in one round-trip (mirrors /api/para-ti): synced_at + syncing +
-    nav_counts + the NEEDS_REVIEW count that finally gets a surface (the «rever N» chip)."""
+    nav_counts + the count behind the «Rever classificação N» chip.
+
+    That count is the SIZE OF THE GROUP THE CHIP OPENS — Para ti's «Classificações a rever», i.e.
+    rows under the confidence floor. It used to count NEEDS_REVIEW-priority interactions instead,
+    a disjoint population, so the chip promised a number the click did not deliver. A NEEDS_REVIEW
+    row at high confidence therefore contributes 0 here, and a low-confidence row contributes 1
+    whatever its priority — which is exactly what this fixture separates."""
     crm = _crm_with([(_env("t1", 3), _verdict()),
                      (_env("t2", 4, frm="x@spam.biz", subject="??"),
                       {**_verdict(), "priority": "NEEDS_REVIEW"})])
     d = _client(tmp_path, crm)[0].get("/api/fila").json()
     assert "synced_at" in d and "syncing" in d
     assert isinstance(d["nav_counts"], dict)
-    assert d["needs_review"] == 1
+    # Both rows sit at the default 0.9 confidence — above the floor — so the group is empty and the
+    # chip says nothing, even though one row IS priority NEEDS_REVIEW.
+    assert d["needs_review"] == 0
+
+
+def test_rever_count_equals_what_the_group_it_opens_will_show(tmp_path):
+    """The chip and its destination must agree — pinned by comparing them, not by asserting a
+    literal, so the two can never drift apart again.
+
+    Measured before the fix on this exact shape: chip 2, destination 1, sets disjoint."""
+    crm = _crm_with([
+        # priority NEEDS_REVIEW but CONFIDENT — the old count included these, the group never did.
+        (_env("t1", 3), {**_verdict(), "priority": "NEEDS_REVIEW"}),
+        (_env("t2", 4), {**_verdict(), "priority": "NEEDS_REVIEW"}),
+        # unconfident — what «Classificações a rever» actually lists.
+        (_env("t3", 5, frm="novo@acme.pt"), {**_verdict(), "confidence": 0.2}),
+    ])
+    cl = _client(tmp_path, crm)[0]
+    chip = cl.get("/api/fila").json()["needs_review"]
+    group = [it for it in cl.get("/api/para-ti").json()["items"]
+             if it["kind"] == "rever_classificacao"]
+    assert chip == len(group), (
+        f"the rail promises {chip} but «Classificações a rever» holds {len(group)}")
+    assert chip == 1                                   # the unconfident row, not the two flagged ones
+    assert group[0]["thread_root"] == "mid:t3"
 
 
 def test_fila_routes_forbid_http_caching(tmp_path):
@@ -1435,6 +1528,99 @@ def test_fila_dossier_tiles_are_gone_and_ledger_present(tmp_path):
     assert "Registo do fio" in html and "dledger" in html
     assert "sem factos extraídos" in html                 # honest empty state, one quiet line
     assert "A abrandar" in html                           # momentum still exists, inline
+    assert "_lgRow(" in html                              # rows come from ONE named builder (P1)
+
+
+# ── Phase 1 (fila-evidence plan §Phase 1) — the ledger WRAPS instead of truncating ────────────
+# Owner request: a long «Produto / serviço» was cut off mid-word with no way to read it. Measured
+# over the live corpus: product_or_service median 25 / p90 51 / MAX 226 chars, action_requested max
+# 96, client_name max 60 — so this is not a rare tail, it is the field that carries the job.
+
+def _lg_row_js() -> str:
+    """The SHIPPED _lgRow source, sliced out of the Fila lens JS (mirrors _thread_html_js)."""
+    return fila_page._LENS_JS.split("function _lgRow(")[1].split("\nfunction ")[0]
+
+
+def test_the_ledger_value_wraps_and_clamps_instead_of_truncating(tmp_path):
+    """The old rule was `white-space:nowrap;overflow:hidden;text-overflow:ellipsis` — one line, and
+    a 226-char value became «letras em inox para a fachada do…» with the rest unreachable. It now
+    wraps, and is clamped so ONE long value cannot inflate the height of every other cell in its
+    grid row (grid rows are auto-sized). Nothing pinned the old behaviour, hence this guard."""
+    html = _p0_page(tmp_path)
+    rule = html.split(".lg-r b{")[1].split("}")[0]
+    assert "nowrap" not in rule                            # …the truncation is gone
+    assert "text-overflow" not in rule and "ellipsis" not in rule
+    assert "-webkit-line-clamp:3" in rule and "-webkit-box-orient:vertical" in rule
+    assert "overflow:hidden" in rule                       # the clamp is inert without it
+    assert "overflow-wrap:anywhere" in rule                # an unbroken 60-char token still wraps
+    # The dashed-vs-solid provenance convention (fila_page.py) must survive the display change.
+    assert ".lg-r b.prop{" in html and ".lg-r b.solid{" in html
+
+
+def test_a_long_ledger_value_gets_the_full_grid_width(tmp_path):
+    """At the 190px grid track a clamped 3 lines holds ~90 chars — still short of the measured 226.
+    A long value therefore spans the whole grid (`grid-column:1/-1`), where 3 lines is enough. The
+    trigger is the value's LENGTH, not its key: a short «corte MDF» keeps its compact cell."""
+    html = _p0_page(tmp_path)
+    assert ".lg-r.wide{grid-column:1/-1}" in html
+    assert "repeat(auto-fill,minmax(190px,1fr))" in html   # the track it spans is unchanged
+
+
+def test_the_ledger_row_builder_widens_by_length_and_keeps_the_whole_value(tmp_path):
+    """EXECUTES the shipped _lgRow in node rather than grepping it — the three things that can each
+    silently ship wrong are the wide threshold, the per-key class, and the title. The title is the
+    honesty guarantee: the clamp HIDES text, so the full value must remain reachable on hover."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    long_val = "letras em inox escovado 304 para a fachada, " + ("x" * 190)   # 233 chars, > the 226 max
+    harness = (
+        "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')"
+        ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}\n"
+        "function _lgRow(" + _lg_row_js() + "\n"
+        "const short=_lgRow('product_or_service','Produto / serviço',"
+        "{value:'corte MDF',fact:false,date:'2026-08-01'},0);\n"
+        "const long=_lgRow('product_or_service','Produto / serviço',"
+        "{value:" + json.dumps(long_val) + ",fact:false,date:'2026-08-01'},2);\n"
+        "const nif=_lgRow('nif','NIF',{value:'274023911',fact:true,date:'2026-08-01'},0);\n"
+        "console.log(JSON.stringify({short:short,long:long,nif:nif}));\n"
+    )
+    out = subprocess.run([node, "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    d = json.loads(out.stdout)
+    # length drives the widening — a short value must NOT eat a whole grid row
+    assert "wide" not in d["short"] and "wide" in d["long"]
+    # per-key class, so a future rule can target one field without touching the JS
+    assert "lg-k-product_or_service" in d["short"] and "lg-k-nif" in d["nif"]
+    # the clamp hides text, so the FULL value stays reachable — and stays escaped
+    assert 'title="' + long_val + '"' in d["long"]
+    assert long_val in d["long"]
+    # provenance vocabulary unchanged: checksum FACT solid and unmarked, LLM value dashed with «?»
+    assert 'class="solid"' in d["nif"] and "?" not in d["nif"].split("<span")[0].split("</b>")[0]
+    assert 'class="prop"' in d["short"] and "corte MDF?" in d["short"]
+    assert "+2 menções" in d["long"] and "menções" not in d["short"]
+
+
+def test_the_ledger_value_title_cannot_break_out_of_its_attribute(tmp_path):
+    """`esc()` escapes `&<>"` but NOT `'` (cockpit_ui.py) — so the title attribute it feeds must be
+    double-quoted, and the value must go through esc(). A quote-bearing product name is real:
+    «chapa 3" inox». Without this, a value ends the attribute and injects markup."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    harness = (
+        "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')"
+        ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}\n"
+        "function _lgRow(" + _lg_row_js() + "\n"
+        "console.log(_lgRow('product_or_service','P',"
+        "{value:'chapa 3\" inox <b>x</b>',fact:false,date:''},0));\n"
+    )
+    out = subprocess.run([node, "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    row = out.stdout
+    assert "&quot;" in row and "&lt;b&gt;" in row          # both escaped, in the title AND the body
+    assert "<b>x</b>" not in row                            # …no live markup smuggled through
+    assert row.count('title="') == 1                        # the attribute was not terminated early
 
 
 def test_api_thread_carries_the_ledger(tmp_path):
@@ -1627,3 +1813,227 @@ def test_a_person_with_no_signature_gets_the_install_default_in_their_draft(tmp_
     from conftest import TEST_ADMIN
     draft = cl.post("/api/thread/reply-draft", json={"thread_root": "mid:t2"}).json()["draft"]
     assert draft.rstrip().endswith(f"Com os melhores cumprimentos,\n{TEST_ADMIN}\nLindo Serviço")
+
+
+# ── Phase 3 (fila-evidence plan §Phase 3) — clicking a ledger value lights up its evidence ─────
+
+def test_a_ledger_value_is_a_click_target_for_its_own_evidence(tmp_path):
+    """Decision D2: ONE accent, driven by the click, instead of a permanent 7-colour per-field
+    palette. Colour is already fully committed in this pane — clock bands, the counterparty trio,
+    direction tint, `--int` for checksum FACTs, and dashed-vs-solid for proposed-vs-confirmed — so a
+    green «Prazo» chip would read as «on time»."""
+    html = _p0_page(tmp_path)
+    assert 'data-lgk="' in html                         # the row carries its key
+    assert ".lg-r{cursor:pointer" in html               # …and invites the click
+    assert ".lg-r.picked{background:var(--hl-bg)}" in html
+
+
+def test_the_evidence_branch_runs_before_the_verb_branch(tmp_path):
+    """`dispatch(action, i)` is never handed the element, so a ledger click cannot be routed through
+    `data-act` — it needs its own `closest()` branch, and that branch must come FIRST or the generic
+    handler swallows the click. Asserted by position in the shipped handler, not by its presence."""
+    html = _p0_page(tmp_path)
+    handler = html.split("$('#_doss').addEventListener('click'")[1].split("\n});")[0]
+    assert "data-lgk" in handler and "data-act" in handler
+    assert handler.index("data-lgk") < handler.index("data-act"), (
+        "the [data-act] branch would claim the ledger click first")
+
+
+def test_the_picked_evidence_is_module_state_not_a_field_on_the_row(tmp_path):
+    """THE trap in this lens. `refresh()` replaces every row object every 15 s and hand-copies a
+    FIXED list of underscore fields; anything parked on the row that is not in that list silently
+    vanishes on the next tick — the highlight would die seconds after the click, intermittently,
+    with no error. Keeping it in module state sidesteps the carry list entirely."""
+    html = _p0_page(tmp_path)
+    assert "let _evKey = null;" in html                 # module scope
+    assert "r._evKey" not in html and "_evKey:" not in html
+    # …and it is re-applied after every render, because innerHTML destroys the live Ranges
+    assert "applyEvidence(r);" in html
+    render_fn = html.split("function renderDossier(){")[1].split("\n}")[0]
+    assert render_fn.index("el.innerHTML=dossierHTML(r);") < render_fn.index("applyEvidence(r)")
+
+
+def test_the_attachment_funnel_survives_a_live_refresh_tick(tmp_path):
+    """Same trap as the picked-evidence test, in a different colour. `refresh()` builds new row
+    objects every REFRESH_MS and hand-copies a fixed list of underscore fields — `_att` (the
+    ADR-046 funnel payload populated by ensureThread) was NOT on that list, so a few seconds
+    after landing on a thread the funnel silently vanished: `attFunnelHTML(undefined)` returns ''
+    and there is no error to notice. `_threadMsgs` IS carried, so renderDossier's early-return
+    also stops ensureThread from restoring `_att` from `_threadCache` on the next render."""
+    js = fila_page._LENS_JS
+    body = js.split("async function refresh(")[1].split("\neveryMs(")[0]
+    # The carry is `next.forEach(r=>{…;r._threadMsgs=o._threadMsgs;…});` — it spans two source lines,
+    # so isolate the whole `next.forEach(...)` statement rather than filtering by any one line.
+    carry = body.split("next.forEach(", 1)[1].split(");", 1)[0].replace(" ", "").replace("\n", "")
+    assert "r._threadMsgs=o._threadMsgs" in carry        # baseline: the carry line still exists
+    assert "r._att=o._att" in carry, \
+        "_att must survive the poll — else the attachment funnel disappears silently after REFRESH_MS"
+
+
+def test_changing_thread_drops_the_previous_threads_evidence(tmp_path):
+    """Evidence belongs to the conversation it was found in. Without this, picking «Valor» on one
+    thread and moving to the next re-lights a key whose value came from somewhere else."""
+    html = _p0_page(tmp_path)
+    fn = html.split("function focusTo(i){")[1].split("\n}")[0]
+    assert "_evKey=null" in fn.replace(" ", "")
+    assert "focusRoot!==v[i].thread_root" in fn.replace(" ", ""), "only on a REAL thread change"
+
+
+def test_absence_is_stated_rather_than_rendered_as_a_dead_click(tmp_path):
+    """40% of extracted values are in the email text in no form at all — ISO-normalised deadlines,
+    model paraphrases. Clicking those is the COMMON case, so silence would read as a broken button,
+    and a nearest-match would be a zero-hallucination breach. The row says so instead."""
+    html = _p0_page(tmp_path)
+    assert "sem evidência visível" in html
+    assert ".lg-r.noev::after" in html
+    assert "cell.classList.add('noev')" in html
+
+
+# ── Phase 4/5: the located sentence and «Evolução da conversa» (ADR-054) ────
+
+def _crm_ent(mid="t1", **ents):
+    return _crm_with([(_env(mid, 3), _verdict_ent(**ents))])
+
+
+def test_the_thread_endpoint_carries_the_located_sentence_on_the_fact_it_justifies(tmp_path):
+    """The quote rides INSIDE the fact entry, not as a sibling key. `facts` is already threaded
+    through all three client places; a new top-level key renders on first expand and vanishes on the
+    next poll — the defect that left Para Ti's attachment funnel unrendered."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": []}, workspace=ws, jobspecs={}, prepared=([], [], {}), reply_pb="",
+                     crm_store=_crm_ent(deadline="2026-08-30", money="1250€"),
+                     evidence={"t1": {"quotes": {"deadline": "até dia 30 de agosto"}}})
+    cl = signed_in_client(TestClient(app), ws)
+    facts = {f["key"]: f for f in cl.get("/api/thread/mid:t1").json()["facts"]}
+    assert facts["deadline"]["quote"] == "até dia 30 de agosto"
+    assert "quote" not in facts["money"], "absent evidence must be absent, not an empty string"
+
+
+def test_a_tree_with_no_evidence_store_serves_exactly_what_it_served_before(tmp_path):
+    """Phase 4 must be additive. With no sidecar every fact is shaped as it was, so a tree that has
+    never run the locate pass cannot render differently."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": []}, workspace=ws, jobspecs={}, prepared=([], [], {}), reply_pb="",
+                     crm_store=_crm_ent(deadline="2026-08-30"))
+    cl = signed_in_client(TestClient(app), ws)
+    facts = cl.get("/api/thread/mid:t1").json()["facts"]
+    assert facts and all("quote" not in f for f in facts)
+
+
+def test_the_narrative_is_null_when_the_thread_has_none(tmp_path):
+    """Honest absence, the convention the spec block already uses: 610 of 767 threads have one
+    message and will never have a narrative, and `[]` would claim we looked and found no story."""
+    cl, _ = _client(tmp_path, _crm_with([(_env("t1", 3), _verdict())]))
+    assert cl.get("/api/thread/mid:t1").json()["narrative"] is None
+
+
+def test_the_narrative_reaches_the_thread_endpoint_with_its_steps(tmp_path):
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": []}, workspace=ws, jobspecs={}, prepared=([], [], {}), reply_pb="",
+                     crm_store=_crm_with([(_env("t1", 3), _verdict())]),
+                     narratives={"mid:t1": {"steps": [{"message_id": "t1", "date": "2026-07-01",
+                                                       "text": "Pediram três réplicas."}],
+                                            "state": "À espera deles."}})
+    cl = signed_in_client(TestClient(app), ws)
+    n = cl.get("/api/thread/mid:t1").json()["narrative"]
+    assert n["steps"][0]["text"] == "Pediram três réplicas."
+    assert n["state"] == "À espera deles."
+
+
+def test_a_narrative_row_with_no_steps_reads_as_absent_not_as_an_empty_block(tmp_path):
+    """A thread the model failed on has a row but nothing to say. Rendering an empty «Evolução da
+    conversa» heading would claim the conversation had no developments."""
+    ws = Workspace(tmp_path / "w.db").connect()
+    app = create_app({"team": []}, workspace=ws, jobspecs={}, prepared=([], [], {}), reply_pb="",
+                     crm_store=_crm_with([(_env("t1", 3), _verdict())]),
+                     narratives={"mid:t1": {"steps": [], "error": "RuntimeError"}})
+    cl = signed_in_client(TestClient(app), ws)
+    assert cl.get("/api/thread/mid:t1").json()["narrative"] is None
+
+
+def test_the_narrative_is_threaded_through_all_three_client_places(tmp_path):
+    """A per-thread field lives in THREE places or it breaks in a way that looks intermittent:
+    ensureThread's cache-hit branch, its fetch branch, and refresh()'s carry list. Para Ti shipped
+    the attachment funnel with two of the three and never rendered it once."""
+    js = fila_page._LENS_JS
+    ensure = js.split("async function ensureThread(")[1].split("\nfunction ", 1)[0].replace(" ", "")
+    assert "r._narr=c0.narr" in ensure, "the cache-HIT branch"
+    assert "r._narr=d.narrative" in ensure, "the FETCH branch"
+    assert "narr:d.narrative" in ensure, "and it must be written INTO the cache"
+    body = js.split("async function refresh(")[1].split("\neveryMs(")[0]
+    carry = body.split("next.forEach(", 1)[1].split(");", 1)[0].replace(" ", "").replace("\n", "")
+    assert "r._narr=o._narr" in carry, "the carry list — else it vanishes every REFRESH_MS"
+
+
+def test_a_sync_drops_the_cached_thread_payload_so_a_grown_thread_is_not_stale(tmp_path):
+    """Phase 5's own gotcha, and it was DOUBLY locked: _threadCache is keyed by thread_root with no
+    version and was never invalidated anywhere, and refresh() carries _threadMsgs forward, which
+    keeps renderDossier's re-fetch guard permanently false after the first open. A thread that grew
+    kept serving its pre-sync messages, ledger and narrative for the life of the tab."""
+    js = fila_page._LENS_JS
+    fn = js.split("function onSynced(){")[1].split("\n}", 1)[0].replace(" ", "")
+    assert "delete_threadCache[k]" in fn, "the cache itself must be dropped"
+    assert "r._threadMsgs=null" in fn, "…and the carried copy, or the guard never re-fires"
+    assert "r._narr=null" in fn
+    assert "r._facts=undefined" in fn, "undefined is «a carregar registo…»; [] would claim no facts"
+
+
+def test_the_evolution_block_renders_its_steps_and_state(tmp_path):
+    html = _p0_page(tmp_path)
+    assert "Evolução da conversa" in html
+    assert 'class="dnarr"' in html and 'class="nsteps"' in html
+    assert "data-nmid=" in html and ".nstate{" in html
+
+
+def test_the_evolution_block_is_not_rendered_inside_the_conditional_analysis_block(tmp_path):
+    """`.dai` is conditional on `decided||tr.reason||en.action_requested`; a narrative rendered
+    inside it would vanish on exactly the threads where all three are empty."""
+    html = _p0_page(tmp_path)
+    doss = html.split("function dossierHTML(")[1].split("\nfunction ", 1)[0]
+    dai = doss.split("if(decided||tr.reason||en.action_requested){")[1].split("}", 1)[0]
+    assert "dnarr" not in dai
+    assert "dnarr" in doss
+
+
+def test_a_narrative_step_jumps_to_the_message_it_cites(tmp_path):
+    """Provenance you can follow. The step branch must also sit ahead of the generic verb branch,
+    for the same structural reason the evidence branch does — dispatch() is never handed the
+    element. (The attribute of that last branch is deliberately not spelled in this docstring: a
+    sibling test asserts source ORDER and would fire on the prose.)"""
+    html = _p0_page(tmp_path)
+    handler = html.split("$('#_doss').addEventListener('click',e=>{")[1].split("\n});", 1)[0]
+    assert "data-nmid" in handler and "data-tmid=" in handler
+    assert handler.index("data-lgk") < handler.index("data-nmid") < handler.index("data-act")
+    assert "renderDossier()" not in handler.split("data-nmid")[1].split("return;")[0], \
+        "a re-render would shut whatever the reader had opened"
+
+
+def test_a_step_whose_message_has_no_date_renders_no_empty_date_chip():
+    """Executes the shipped renderer in node. 2 of the 533 narrative steps on the live corpus cite an
+    interaction whose `date` is genuinely '' in crm.db, and an empty `<span class="nd">` beside the
+    text reads as a broken render rather than as a missing date. Found by looking at the data after
+    the real pass, not by a test."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    body = fila_page._LENS_JS.split("function dossierHTML(r){")[1]
+    steps = body.split('<ol class="nsteps">\'')[1].split("+'</ol>'")[0]
+    harness = (
+        "function esc(s){return String(s);}\n"
+        "const r={_narr:{steps:["
+        "  {message_id:'m1',date:'2026-08-01',text:'com data'},"
+        "  {message_id:'m2',date:'',text:'sem data'}]}};\n"
+        "console.log(JSON.stringify({h:''" + steps + "}));\n"
+    )
+    out = subprocess.run([node, "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    h = json.loads(out.stdout)["h"]
+    assert h.count('class="nd"') == 1, "the dateless step must render no date chip at all"
+    assert "com data" in h and "sem data" in h          # …but BOTH steps still render
+    assert '<span class="nd"></span>' not in h
+
+
+def test_the_ledger_click_hands_the_quote_to_the_highlighter(tmp_path):
+    html = _p0_page(tmp_path)
+    fn = html.split("function applyEvidence(r){")[1].split("\n}", 1)[0].replace(" ", "")
+    assert "evHighlight($('#_doss'),_evKey,f.value,f.quote)" in fn

@@ -927,9 +927,17 @@ function detailHTML(){
   /* Descritivo panel — the proposta/fatura DESCRIÇÃO text (ADR-030), a second distinct outbound task. */
   const descTab='<div class="ppanel hidden" data-panel="descritivo"><div id="_desc"><div class="hint2">a preparar descritivo…</div></div></div>';
 
+  /* Ficheiros panel — the project's whole file list, across every thread AND its intake captures
+     (ADR-052). No fetch of its own: loadSource() already walks the roots, so this panel reads the
+     data that walk cached. The badge is written by renderFiles() from the SAME object it renders,
+     never from a second count. */
+  const filesTab='<div class="ppanel hidden" data-panel="ficheiros"><div id="_files">'
+    +'<div class="hint2">a reunir ficheiros…</div></div></div>';
+
   const tabs='<div class="ptabs">'
     +'<button class="ptab-btn on" data-tab="espec">Especificação</button>'
     +'<button class="ptab-btn" data-tab="origem">Origem'+(nthreads?' <span class="bdg">'+nthreads+'</span>':'')+'</button>'
+    +'<button class="ptab-btn" data-tab="ficheiros">Ficheiros</button>'
     +'<button class="ptab-btn" data-tab="timeline">Linha do tempo</button>'
     +'<button class="ptab-btn" data-tab="email">Email ao cliente'+(nmiss?' <span class="bdg warn">'+nmiss+'</span>':'')+'</button>'
     +'<button class="ptab-btn" data-tab="descritivo">Descritivo</button>'
@@ -949,6 +957,7 @@ function detailHTML(){
     +contestedBanner()+tabs
     +'<div class="ppanel" data-panel="espec">'+espec+'</div>'
     +'<div class="ppanel hidden" data-panel="origem">'+origem+'</div>'
+    +filesTab
     +'<div class="ppanel hidden" data-panel="timeline"><div id="_timeline"><div class="hint2">a carregar histórico…</div></div></div>'
     +emailTab
     +descTab
@@ -961,6 +970,9 @@ function showTab(name){
   root.querySelectorAll('.ptab-btn').forEach(b=>b.classList.toggle('on', b.dataset.tab===name));
   root.querySelectorAll('.ppanel').forEach(pl=>pl.classList.toggle('hidden', pl.dataset.panel!==name));
   if(name==='timeline') loadTimeline();
+  // No fetch — the walk loadSource() already made owns the data; this only repaints from it, and
+  // covers the case where the panel is opened before that walk has resolved.
+  if(name==='ficheiros') renderFiles();
   if(name==='descritivo') loadDescription();
   try{
     const want=name==='registar'?(location.pathname+'?registar=nota'):location.pathname;
@@ -973,7 +985,12 @@ async function loadTimeline(){
   const box=$('#_timeline'); if(!box||!selected) return;
   const pid=selected.project_id, seq=++_tlSeq;
   try{
-    const d=await getJSON('/api/projects/'+encodeURIComponent(pid)+'/timeline');
+    // Await the capture media block too: timelineHTML enumerates EVERY media index of a capture,
+    // and the count comes from there. Awaiting it (rather than reading whatever loadSource happened
+    // to have cached) is what makes the thumbnail count exact instead of a race — and it is free
+    // after the first call, which loadSource already made on project open.
+    const [d]=await Promise.all([
+      getJSON('/api/projects/'+encodeURIComponent(pid)+'/timeline'), loadCaptures(pid)]);
     if(seq!==_tlSeq) return;                       // a newer load superseded this one
     box.innerHTML=timelineHTML(d.timeline||[]);
   }catch(e){ box.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao carregar histórico</div>'; }
@@ -992,13 +1009,20 @@ function timelineHTML(rows){
     const chan=(r.channel&&CHAN_ICON[r.channel])?(CHAN_ICON[r.channel]+' '):'';
     const who=r.asserted_by?(' · '+esc(r.asserted_by)):'';
     const when=esc((r.acquired_at||r.ts||'').slice(0,10));
-    // The photo in the project timeline: a capture event carries its media via source_mid
-    // ("capture:<cid>", set on apply) — render the sole-copy thumbnail inline (ADR-020).
+    // The photos in the project timeline: a capture event carries its media via source_mid
+    // ("capture:<cid>", set on apply) — render the sole-copy thumbnails inline (ADR-020).
+    // EVERY index, not just /media/0: a capture carrying a photo AND a drawing hid the drawing
+    // completely, and the only other place it could have surfaced is the Ficheiros tab, which did
+    // not exist. The count comes from _capIndex (the same fetch the file list uses); with no data
+    // yet, fall back to the single index the old code assumed rather than rendering nothing.
     const sm=r.source_mid||'';
-    const thumb=(isEvent&&sm.indexOf('capture:')===0)
-      ? '<img class="tl-thumb" src="/api/captures/'+encodeURIComponent(sm.slice(8))+'/media/0"'
-        +' alt="captura" loading="lazy" onclick="window.open(this.src)">'
-      : '';
+    const cid=(isEvent&&sm.indexOf('capture:')===0)?sm.slice(8):'';
+    const nMedia=cid?(_capIndex()[cid]||0):0;
+    let thumb='';
+    for(let mi=0;mi<nMedia;mi++){
+      thumb+='<img class="tl-thumb" src="/api/captures/'+encodeURIComponent(cid)+'/media/'+mi+'"'
+        +' alt="captura" loading="lazy" onclick="window.open(this.src)">';
+    }
     return '<div class="tl-row'+(isEvent?' event':'')+(isClear?' removed':'')+'">'
       +'<div class="tl-h">'+head+'</div>'+thumb+'<div class="tl-m">'+chan+when+who+'</div></div>';
   }).join('')+'</div>';
@@ -1047,35 +1071,127 @@ function markRow(addr, value){
   row.classList.remove('saved'); void row.offsetWidth; row.classList.add('saved');  // commit confirmation
 }
 
-/* ── source emails (lazy, cached per project) ─────────────────────────── */
+/* ── source emails + the project file list (lazy, cached per project) ───
+   ONE walk feeds two panels: «Origem» renders the conversation, «Ficheiros» renders the merged,
+   content-deduped file list across every thread AND the project's intake captures (ADR-052).
+   _srcCache holds the HTML; _attCache holds the DATA, because renderFiles has to be able to rebuild
+   the badge and the panel from the same object without re-fetching. */
 const _srcCache = {};
+const _attCache = {};
+const _capCache = {};      // {pid: {items, n_captures}} — the intake half, fetched once per project
+const _capWait  = {};      // {pid: Promise} — in-flight, so loadSource and loadTimeline share one call
+
+/* {capture_id: n_media} for the CURRENT project — what the timeline enumerates. Derived from the
+   fetched items rather than stored a second time, so it cannot disagree with the file list. */
+function _capIndex(){
+  const c=selected?_capCache[selected.project_id]:null, out={};
+  ((c&&c.items)||[]).forEach(it=>{
+    const cid=(it.src||{}).capture_id; if(!cid) return;
+    out[cid]=Math.max(out[cid]||0, ((it.src||{}).index||0)+1);
+  });
+  return out;
+}
+
+/* The capture media of one project, as a funnel block. Cached per project; a failure caches an
+   EMPTY, FAILED block rather than nothing, so the file list can say the list is incomplete instead
+   of quietly shrinking. */
+function loadCaptures(pid){
+  if(_capCache[pid]) return Promise.resolve(_capCache[pid]);
+  if(_capWait[pid])  return _capWait[pid];
+  _capWait[pid]=getJSON('/api/projects/'+encodeURIComponent(pid)+'/captures')
+    .then(d=>{ _capCache[pid]={items:(d&&d.items)||[], n_captures:(d&&d.n_captures)||0, failed:false};
+               delete _capWait[pid]; return _capCache[pid]; })
+    .catch(()=>{ _capCache[pid]={items:[], n_captures:0, failed:true};
+                 delete _capWait[pid]; return _capCache[pid]; });
+  return _capWait[pid];
+}
+
 async function loadSource(){
-  const box=$('#_origem'); if(!box) return;
+  const box=$('#_origem'); if(!box||!selected) return;
   const pid=selected.project_id, roots=selected.threads||[];
   if(!roots.length){
     box.innerHTML='<div class="hint2">Sem emails ligados — este projeto não tem contexto. '
       +'Usa <b>+ ligar email</b> para anexar a thread de origem (importa também os campos já conhecidos).</div>';
+    // A project with no threads can still hold captures, and the tab must never sit on «a reunir…»
+    // forever. Every exit path of this function ends in renderFiles() — that is the invariant.
+    const cap=await loadCaptures(pid);
+    _attCache[pid]={att:attMerge([{items:cap.items}]), failed:[], nroots:0,
+                    ncaps:cap.n_captures, capfail:cap.failed};
+    renderFiles();
     return;
   }
-  if(_srcCache[pid]){box.innerHTML=_srcCache[pid];msgWireQuoteToggles(box);return;}
-  try{
-    const all=[]; const attBlocks=[];
-    for(const root of roots){
+  if(_srcCache[pid]){box.innerHTML=_srcCache[pid];msgWireQuoteToggles(box);renderFiles();return;}
+  const all=[], attBlocks=[], failed=[];
+  for(const root of roots){
+    /* The try is INSIDE the loop. It used to wrap the whole walk, and getJSON throws on any
+       non-2xx — /api/thread 404s both for a thread this person was never granted (ADR-045) and for
+       a dangling root — so ONE unreachable thread cost every OTHER thread's messages and files, and
+       the panel said only «falhou ao carregar contexto». One thread now costs only itself. */
+    try{
       const d=await getJSON('/api/thread/'+encodeURIComponent(root));
       if(d&&d.messages) all.push(...d.messages);
-      if(d&&d.attachments) attBlocks.push(d.attachments);
-    }
-    // provenance: {field_addr: message_id} — shows which message supplied each spec field
-    const prov=selected.provenance||{};
-    const html=all.length
-      ? msgThreadHTML(all, {provenance: prov, attachments: attMerge(attBlocks)})
-      : '<div class="hint2">sem mensagens neste projeto</div>';
-    _srcCache[pid]=html;
-    const b2=$('#_origem'); if(b2){b2.innerHTML=html; msgWireQuoteToggles(b2);}
-  }catch(e){
-    const b2=$('#_origem');
-    if(b2) b2.innerHTML='<div class="hint2" style="color:var(--red)">falhou ao carregar contexto</div>';
+      if(d&&d.attachments){
+        // Stamp the carrier thread on every item BEFORE the merge, so a tile in the project-wide
+        // list can link back to the conversation the file actually arrived in.
+        (d.attachments.items||[]).forEach(it=>{it.thread_root=root;});
+        attBlocks.push(d.attachments);
+      }
+    }catch(e){ failed.push(root); }
   }
+  const cap=await loadCaptures(pid);
+  if(cap.items.length) attBlocks.push({items:cap.items});
+  const att=attMerge(attBlocks);
+  _attCache[pid]={att:att, failed:failed, nroots:roots.length,
+                  ncaps:cap.n_captures, capfail:cap.failed};
+  // provenance: {field_addr: message_id} — shows which message supplied each spec field
+  const prov=selected.provenance||{};
+  const warn=failed.length
+    ? '<div class="dwarn">'+_incompleteMsg(failed.length, roots.length)+'</div>' : '';
+  const html=all.length
+    ? warn+msgThreadHTML(all, {provenance: prov, attachments: att})
+    : (failed.length ? warn : '<div class="hint2">sem mensagens neste projeto</div>');
+  _srcCache[pid]=html;
+  const b2=$('#_origem'); if(b2){b2.innerHTML=html; msgWireQuoteToggles(b2);}
+  renderFiles();
+}
+
+/* One merged sentence, deliberately: the client CANNOT distinguish "not granted to you" from "no
+   CRM context" — both are a bare 404, so a 403 never confirms a thread exists (ADR-045). */
+function _incompleteMsg(nfail, ntotal){
+  return '⚠ '+nfail+' de '+ntotal+' conversa'+(ntotal===1?'':'s')+' não carregou — esta lista está '
+    +'incompleta. Pode faltar aqui um ficheiro.';
+}
+
+/* ── «Ficheiros»: the project's whole file list (ADR-052) ────────────────
+   No fetch of its own — it renders _attCache[pid], which loadSource built. The tab BADGE and the
+   panel are written from that one object in the same pass, so the chip can never promise a count
+   its destination does not hold (the «Rever classificação» lesson). */
+function renderFiles(){
+  const box=$('#_files'); if(!box||!selected) return;
+  const pid=selected.project_id, c=_attCache[pid];
+  const btn=$('#_detail').querySelector('.ptab-btn[data-tab="ficheiros"]');
+  if(!c){ box.innerHTML='<div class="hint2">a reunir ficheiros…</div>';
+          if(btn) btn.innerHTML='Ficheiros';
+          return; }
+  const items=(c.att&&c.att.items)||[];
+  const n=items.length;
+  const warn=(c.failed&&c.failed.length)
+    ? '<div class="dwarn">'+_incompleteMsg(c.failed.length, c.nroots)+'</div>' : '';
+  const capwarn=c.capfail
+    ? '<div class="dwarn">⚠ As capturas deste projeto não carregaram — pode faltar aqui um ficheiro.</div>'
+    : '';
+  const note=(c.nroots>1)
+    ? '<div class="hint2">Reunidos de '+c.nroots+' conversas'+(c.ncaps?' e '+c.ncaps+' captura'+(c.ncaps===1?'':'s'):'')
+      +' e deduplicados pelo conteúdo — o mesmo ficheiro enviado duas vezes conta uma vez (×N).</div>'
+    : '';
+  const body=n
+    ? attFunnelHTML(c.att, {title:'Ficheiros do projeto', showSource:true, bigPreviews:true})
+    : '<div class="attf-empty">Sem ficheiros nos emails deste projeto.</div>';
+  box.innerHTML=warn+capwarn+note+body;
+  // The badge is derived from the SAME items just rendered. Written as innerHTML rather than
+  // toggled on a permanent hidden <span>: `.ptab-btn .bdg{display:inline-block}` (specificity 0,2,0)
+  // beats the UA's [hidden] rule (0,1,0), so a zero badge would paint an empty grey pill.
+  if(btn) btn.innerHTML='Ficheiros'+(n?' <span class="bdg">'+n+'</span>':'');
 }
 
 /* ── scoped re-extraction (ADR-025 §4) ────────────────────────────────────
@@ -1115,7 +1231,7 @@ async function reextract(){
   try{
     const d=await post('/api/projects/'+encodeURIComponent(pid)+'/reextract',{tier:reTier});
     if(d.project) selected=d.project;
-    delete _srcCache[pid];          // provenance moved → the cached thread render is stale
+    delete _srcCache[pid]; delete _attCache[pid];   // provenance moved → both cached views are stale
     renderDetail();
     const b2=$('#_rexres'); if(b2) b2.innerHTML=rexResultHTML(d);
     showTab('origem');
@@ -1140,6 +1256,25 @@ async function reextract(){
 
 function render(){ if(selected) renderDetail(); else renderList(); }
 
+/* Post-sync (the shell's onSynced hook). This lens defined none, so «Sincronizar» fell back to
+   location.reload() — which repainted the shell but left every per-project cache below intact in
+   the NEW page's fresh scope only by accident of the reload. Now it is explicit: a sync rebuilds
+   crm.db, so every cached thread render, file list and capture block for this project is stale.
+   Without this the Ficheiros tab kept showing the pre-sync list and nothing said so. */
+async function onSynced(){
+  for(const k of Object.keys(_srcCache)) delete _srcCache[k];
+  for(const k of Object.keys(_attCache)) delete _attCache[k];
+  for(const k of Object.keys(_capCache)) delete _capCache[k];
+  if(selected){
+    try{ selected=await getJSON('/api/projects/'+encodeURIComponent(selected.project_id)); }
+    catch(e){ /* keep the project we have; the caches are cleared either way */ }
+  }else{
+    try{ projects=await getJSON('/api/projects'); }catch(e){}
+  }
+  render();
+  toast(S.sincronizado);
+}
+
 /* ── keyboard ─────────────────────────────────────────────────────────── */
 function onKey(e){
   if(selected){ if(e.key==='Escape'){closeDetail();} return; }
@@ -1160,10 +1295,16 @@ function paletteItems(q){
     {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
     {kind:'ação',label:'Novo projeto',run:promptNew},
     {kind:'ação',label:'Registar conhecimento',run:()=>{ if(selected) showTab('registar'); else toast('abre um projeto primeiro'); }},
+    /* NOT inside the IS_ADMIN group below — a file list is not an admin door, so the door count
+       test_auth_gate.py pins is untouched. */
+    {kind:'ação',label:'Ficheiros do projeto',run:()=>{ if(selected) showTab('ficheiros'); else toast('abre um projeto primeiro'); }},
     {kind:'ação',label:'Re-extrair este projeto',sub:'gasta tokens',run:()=>{ if(selected) reextract(); else toast('abre um projeto primeiro'); }},
-    {kind:'ação',label:'Admin',run:()=>{location.href='/admin';}},
     {kind:'ação',label:S.actSync,run:syncNow},
   ];
+  /* «Admin» only for an admin — /admin is in _ADMIN_EXACT, so a member choosing it got a 403.
+     This palette was the last copy of the door ADR-040 closed in the nav; the gear menu next to it
+     has been gated since. A locked door is not offered (non-negotiable #7). */
+  if(IS_ADMIN) base.push({kind:'ação',label:'Admin',run:()=>{location.href='/admin';}});
   projects.forEach(p=>base.push({kind:'projeto',label:p.title,sub:p.stage,run:()=>loadDetail(p.project_id)}));
   return q?base.filter(it=>(it.label+' '+(it.sub||'')+' '+it.kind).toLowerCase().includes(q)):base;
 }
@@ -1286,7 +1427,8 @@ $('#_detail').addEventListener('click', async e=>{
   if(e.target.closest('#_attachbtn')){
     const ref=prompt('Cola o thread_root ou message_id do email a ligar:'); if(!ref||!ref.trim()) return;
     try{ selected=await post('/api/projects/'+selected.project_id+'/attach',{ref:ref.trim()});
-      delete _srcCache[selected.project_id]; renderDetail(); toast('email ligado'); }
+      const _p=selected.project_id; delete _srcCache[_p]; delete _attCache[_p];
+      renderDetail(); toast('email ligado'); }
     catch(err){ toast(S.falhou); } return; }
   if(e.target.closest('#_additem')){ try{
     selected=await post('/api/projects/'+selected.project_id+'/item/add',{}); renderDetail();}

@@ -4,10 +4,17 @@ SAFETY (red-team B1): we open the mailbox read-only (EXAMINE) AND fetch only wit
 We never issue STORE/DELETE/EXPUNGE/APPEND/COPY and never fetch ``RFC822``/``BODY[]`` (those set
 \\Seen). PEEK is the client-side guarantee; read-only select is the belt to that suspenders.
 
-Multi-mailbox: each account may list ``mailboxes`` (e.g. ``["INBOX", "Enviados"]``).  One
-connection handles all folders.  Emails from non-INBOX folders get a synthetic
-``X-Email2Data-Source: <folder>`` header prepended so downstream signal detection can set
-``direction = "outbound"`` for sent mail instead of relying on the From domain alone.
+Multi-mailbox: the folder list is **discovered from the server** on every run (IMAP ``LIST``) and
+unioned with whatever the account pins in ``mailboxes``.  One connection handles all folders.
+Emails from non-INBOX folders get a synthetic ``X-Email2Data-Source: <folder>`` header prepended so
+downstream signal detection can set ``direction = "outbound"`` for sent mail instead of relying on
+the From domain alone.
+
+Discovery exists because a hand-curated folder list is a snapshot, and people re-organise their mail
+(ADR-049).  A folder created after the snapshot was never opened, so mail filed into it between two
+polls vanished from the app entirely — observed, not theorised: the 2026-07-29 20:02 proposal in the
+"Órfãos da Lua" thread was filed into ``INBOX.orcamentado`` (a folder absent from
+settings.json) before the next poll, and no store downstream ever saw it.
 """
 
 from __future__ import annotations
@@ -92,15 +99,120 @@ def _connect(settings: dict[str, Any], account: dict[str, Any]) -> imaplib.IMAP4
     return conn
 
 
-def _account_mailboxes(settings: dict[str, Any], account: dict[str, Any]) -> list[str]:
-    """Return the ordered list of IMAP folders to fetch for this account.
+# Folders discovery refuses to open. Junk only, on purpose: Trash is NOT here, because deleted mail
+# is still evidence a client wrote to us (non-negotiable #2 — never silently bin a client), and
+# ``orcamentos/INBOX.Trash`` has been fetched since day one. Overridable via ``imap.exclude_mailboxes``.
+# Matched against the LAST path segment, case-folded, so ``INBOX.spam`` and ``spam`` both hit.
+_DEFAULT_EXCLUDE = ("spam", "junk", "junk e-mail", "junk email", "bulk mail", "lixo")
 
-    Per-account ``mailboxes`` list takes precedence; falls back to the top-level
-    ``imap.mailbox`` (default ``"INBOX"``).
+# RFC 6154 special-use attributes for the same thing, for a server that names the folder something
+# else. ``\Noselect`` is a container (no messages), not a mailbox we can EXAMINE.
+_JUNK_ATTRS = ("\\junk", "\\spam")
+_NOSELECT = "\\noselect"
+
+# (flags) "delim" name  — the name is bare, quoted, or (handled separately) a literal.
+_LIST_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s+(?P<name>.+)$')
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    return str(value or "")
+
+
+def _flags_of(text: str) -> list[str]:
+    """The attribute list at the head of a LIST response line.
+
+    Accepts it either still parenthesised (the literal-name shape, where we only have the raw head)
+    or already unwrapped by the regex. Returning ``[]`` for an unwrapped list would silently disable
+    the ``\\Junk``/``\\Noselect`` checks — which is exactly what it did until the tests caught it.
     """
-    if "mailboxes" in account:
-        return list(account["mailboxes"])
-    return [settings["imap"].get("mailbox", "INBOX")]
+    start, end = text.find("("), text.find(")")
+    if start >= 0 and end > start:
+        return text[start + 1:end].split()
+    return text.split()
+
+
+def _unquote(name: str) -> str:
+    name = name.strip()
+    if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return name
+
+
+def _parse_list_line(item: Any) -> tuple[list[str], str] | None:
+    """One IMAP LIST response item -> ``(attributes, mailbox name)``, or None if unparseable.
+
+    Handles both shapes imaplib hands back: a single byte string, and the ``(head, literal)`` tuple a
+    server uses when the folder name arrives as a literal. Names stay in the server's own encoding
+    (modified UTF-7) — that is exactly what EXAMINE wants back, and what settings.json already holds.
+    """
+    if isinstance(item, tuple) and len(item) >= 2:
+        return _flags_of(_as_text(item[0])), _as_text(item[1]).strip()
+    match = _LIST_RE.match(_as_text(item).strip())
+    if not match:
+        return None
+    return _flags_of(match.group("flags")), _unquote(match.group("name"))
+
+
+def _is_junk(name: str, attrs: list[str], patterns: tuple[str, ...] | list[str]) -> bool:
+    if any(a.lower() in _JUNK_ATTRS for a in attrs):
+        return True
+    leaf = re.split(r"[./\\]", name)[-1].strip().lower()
+    return any(leaf == str(p).strip().lower() for p in patterns)
+
+
+def _discover_mailboxes(conn: imaplib.IMAP4, patterns: tuple[str, ...] | list[str]) -> list[str] | None:
+    """Every selectable folder the server LISTs, minus junk. ``None`` when LIST is unavailable.
+
+    ``None`` is distinct from ``[]`` on purpose: a server that answers "no folders" is a fact worth
+    honouring, but a LIST we could not run must fall back to the pinned list rather than silently
+    narrow the fetch to nothing. LIST is read-only — it opens no mailbox and touches no flag.
+    """
+    try:
+        typ, data = conn.list()
+    except Exception:  # noqa: BLE001 — server quirk; fall back to the pinned list
+        return None
+    if typ != "OK":
+        return None
+    found: list[str] = []
+    for item in data or []:
+        parsed = _parse_list_line(item)
+        if parsed is None:
+            continue
+        attrs, name = parsed
+        if not name or any(a.lower() == _NOSELECT for a in attrs):
+            continue
+        if _is_junk(name, attrs, patterns):
+            continue
+        if name not in found:
+            found.append(name)
+    return found
+
+
+def _exclude_patterns(settings: dict[str, Any]) -> tuple[str, ...] | list[str]:
+    configured = settings.get("imap", {}).get("exclude_mailboxes")
+    return list(configured) if isinstance(configured, list) else _DEFAULT_EXCLUDE
+
+
+def _account_mailboxes(settings: dict[str, Any], account: dict[str, Any], *,
+                       discovered: list[str] | None = None) -> list[str]:
+    """Ordered folders to fetch: everything the server LISTs, UNION whatever the account pins.
+
+    Discovery is what keeps the fetch in step with how people actually file their mail; the pinned
+    ``mailboxes`` list stays authoritative on top of it for two reasons. It is the **escape hatch** —
+    an explicitly named folder is fetched even if it matches the junk filter — and it is the
+    **fallback** when LIST fails, so a server quirk can never shrink the fetch below what was
+    configured. INBOX sorts first so the mailbox that matters most is drained before any cap bites.
+    """
+    pinned = ([str(m) for m in account["mailboxes"]] if "mailboxes" in account
+              else [settings["imap"].get("mailbox", "INBOX")])
+    ordered: list[str] = []
+    for name in list(discovered or []) + pinned:
+        if name and name not in ordered:
+            ordered.append(name)
+    ordered.sort(key=lambda n: n.upper() != "INBOX")  # stable: INBOX first, rest keep their order
+    return ordered
 
 
 def _source_header(folder: str) -> bytes:
@@ -280,7 +392,6 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
     corpus_dir, audit_log = p["corpus_dir"], p["audit_log"]
     since_days = int(settings.get("fetch", {}).get("since_days", 30))
     max_messages = int(settings.get("fetch", {}).get("max_messages", 200))
-    mailboxes = _account_mailboxes(settings, account)
     account_id = account["id"]
     # ADR-038: the scope token is the ADDRESS, not the account id -- margarida.reis@ and friends are
     # real inboxes with no fetch account, and keying on the address grants them uniformly.
@@ -290,6 +401,17 @@ def fetch_account(settings: dict[str, Any], account: dict[str, Any], *,
     written: list[Path] = []
     try:
         conn = _connect(settings, account)
+        # ADR-049: ask the server what folders exist rather than trusting a snapshot in settings.json.
+        # Audited either way, because "which folders did we even look in?" is the first question when
+        # a message is missing — and the answer used to be unrecorded.
+        discovered = _discover_mailboxes(conn, _exclude_patterns(settings))
+        if discovered is None:
+            audit.log(audit_log, "mailbox_discovery_failed", account_id,
+                      {"reason": "list_unavailable", "falling_back_to_pinned": True})
+        mailboxes = _account_mailboxes(settings, account, discovered=discovered)
+        audit.log(audit_log, "mailboxes_selected", account_id,
+                  {"discovered": len(discovered) if discovered is not None else None,
+                   "pinned": len(account.get("mailboxes") or []), "fetching": len(mailboxes)})
         for mailbox in mailboxes:
             try:
                 cursor = sync.get_cursor(account_id, mailbox) if sync is not None else None

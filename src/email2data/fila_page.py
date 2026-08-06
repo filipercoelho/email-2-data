@@ -35,6 +35,11 @@ let filters = {};   /* active filters — keys: counterparty, purpose, band, own
                        band pseudo-values: 'risk' = WE_OWE red|amber (the «a responder» chip),
                        'chase' = AWAITING amber, i.e. past the 72h chase threshold («a aguardar»). */
 let _prevRisk = null, urlThread = null;
+/* The «Registo do fio» value whose evidence is currently lit (§Phase 3), or null. Module state, NOT
+   a field on the row: `refresh()` replaces every row object every 15 s and hand-copies a fixed list
+   of underscore fields, so anything parked on the row would silently vanish on the next tick. Kept
+   here, renderDossier() re-applies it after every re-render instead. */
+let _evKey = null;
 /* 'ativos' (default) or 'tratados' — the decided ledger (rows fetched lazily from
    /api/fila?include=resolved). A decision must be reviewable after it is made, not vanish. */
 let mode = 'ativos', resolvedRows = null, resolvedErr = null;
@@ -528,19 +533,22 @@ async function ensureThread(r){
   if(!r) return;
   const c0=_threadCache[r.thread_root];
   if(c0){ r._threadMsgs=c0.messages; r._facts=c0.facts; r._decisions=c0.decisions; r._ledgerProj=c0.proj;
-          r._att=c0.att||null; return; }
+          r._att=c0.att||null; r._narr=c0.narr||null; return; }
   if(r._threadBusy) return;
   r._threadBusy=true; r._threadErr=null; renderDossier();
   try{
     const d=await getJSON('/api/thread/'+encodeURIComponent(r.thread_root));
     if(d.error){ r._threadErr=d.error; }
     else{
+      /* A per-thread key must be threaded in THREE places or it breaks in a way that looks
+         intermittent: here, the cache-hit branch above, and refresh()'s carry list. Para Ti shipped
+         with the attachment funnel in two of the three and never rendered it once. */
       _threadCache[r.thread_root]={messages:d.messages, facts:d.facts||[],
                                    decisions:d.decisions||[], proj:d.ledger_project||null,
-                                   att:d.attachments||null};
+                                   att:d.attachments||null, narr:d.narrative||null};
       r._threadMsgs=d.messages; r._facts=d.facts||[];
       r._decisions=d.decisions||[]; r._ledgerProj=d.ledger_project||null;
-      r._att=d.attachments||null;
+      r._att=d.attachments||null; r._narr=d.narrative||null;
     }
   }catch(e){ r._threadErr='falhou ao carregar'; }
   r._threadBusy=false; renderDossier();
@@ -549,6 +557,32 @@ async function ensureThread(r){
 function initialsOf(s){
   const p=String(s||'?').trim().split(/[\s.@_-]+/).filter(Boolean);
   return ((p[0]||'?')[0]+((p[1]||'')[0]||'')).toUpperCase();
+}
+
+/* One «Registo do fio» row. A named function, not an inline template, so the suite can EXECUTE it
+   (test_fila.py::test_the_ledger_row_builder_widens_by_length_and_keeps_the_whole_value) instead of
+   grepping for a shape that renders wrong.
+
+   The value WRAPS and is clamped to 3 lines (CSS). Two consequences handled here:
+     · a value past LG_WIDE chars spans the whole grid, where 3 lines actually hold it — driven by
+       LENGTH, not by key, so a short «corte MDF» keeps its compact cell. 60 sits just above the
+       measured p90 of product_or_service (51) and at the max of client_name (60).
+     · a clamp HIDES text, so the untruncated value must stay reachable: it goes in `title=`.
+   `esc()` escapes &<>" but NOT ' — hence the double-quoted attribute. Do not switch it to single
+   quotes: a real product name is «chapa 3" inox», and the wrong quoting ends the attribute there.
+
+   LG_WIDE lives INSIDE the function on purpose: the guard executes this source in node, and a
+   module-scope constant would ReferenceError there — a helper that cannot be run cannot be tested. */
+function _lgRow(k,label,f,nMore){
+  const LG_WIDE=60;
+  const val=String(f.value);
+  /* data-lgk is the click target for the evidence highlight (§Phase 3). The KEY only — the value is
+     re-read from r._facts, so a 226-char product name is not duplicated into a DOM attribute. */
+  return '<div class="lg-r lg-k-'+k+(val.length>LG_WIDE?' wide':'')
+    +'" data-lgk="'+k+'" title="'+esc(val)+'">'
+    +'<small>'+label+'</small><b class="'+(f.fact?'solid':'prop')+'">'
+    +esc(val)+(f.fact?'':'?')+'</b><span>'+esc(f.date||'')
+    +(nMore>0?' · +'+nMore+' menções':'')+'</span></div>';
 }
 
 function dossierHTML(r){
@@ -590,6 +624,24 @@ function dossierHTML(r){
       +(tr.reason?'<p>'+esc(tr.reason)+'</p>':'')
       +'</div>';
   }
+  /* «Evolução da conversa» (ADR-054 Phase 5) — how this negotiation got here, so someone arriving
+     now understands it without reading the fio. Its OWN block, deliberately not inside `.dai`:
+     that block is conditional on `decided||tr.reason||en.action_requested` and a narrative rendered
+     inside it would vanish on exactly the threads where all three are empty. Absent is silent — a
+     one-message thread never gets a narrative, and an empty heading would be noise on 610 of 767
+     threads. Each step carries the id of the message it came from and scrolls to it on click:
+     every beat is grounded in one message, and the reader can check. */
+  if(r._narr&&(r._narr.steps||[]).length){
+    h+='<div class="dnarr"><div class="lg-h">Evolução da conversa</div><ol class="nsteps">'
+      +r._narr.steps.map(s=>'<li data-nmid="'+esc(s.message_id||'')+'" title="ver a mensagem de onde saiu">'
+        /* A handful of real interactions carry no `date` at all, so the chip is omitted rather than
+           rendered blank — an empty box beside the text reads as a broken render, not as a gap. */
+        +(s.date?'<span class="nd">'+esc(s.date)+'</span>':'')
+        +'<span class="nt">'+esc(s.text||'')+'</span></li>').join('')
+      +'</ol>'
+      +(r._narr.state?'<p class="nstate">'+esc(r._narr.state)+'</p>':'')
+      +'</div>';
+  }
   /* «Registo do fio» (ADR-033 P4a, owner request): the ledger — one place where every fact the
      pipeline extracted across ALL the thread's messages accumulates (with its source message +
      date; NIF/IBAN are checksum FACTs and render solid, the rest dashed «?» until confirmed),
@@ -602,12 +654,8 @@ function dossierHTML(r){
   } else {
     const facts=r._facts||[], decs=r._decisions||[];
     const latest={}; facts.forEach(f=>{ latest[f.key]=f; });   /* chronological — last write wins */
-    const factRows=Object.keys(FK).filter(k=>latest[k]).map(k=>{
-      const f=latest[k], nMore=facts.filter(x=>x.key===k).length-1;
-      return '<div class="lg-r"><small>'+FK[k]+'</small><b class="'+(f.fact?'solid':'prop')+'">'
-        +esc(String(f.value))+(f.fact?'':'?')+'</b><span>'+esc(f.date||'')
-        +(nMore>0?' · +'+nMore+' menções':'')+'</span></div>';
-    }).join('');
+    const factRows=Object.keys(FK).filter(k=>latest[k]).map(k=>
+      _lgRow(k,FK[k],latest[k],facts.filter(x=>x.key===k).length-1)).join('');
     const decBits=[];
     if(r._ledgerProj) decBits.push('<span class="lg-d proj">▦ '+esc(r._ledgerProj.title||'')
       +' · '+esc(String(r._ledgerProj.stage||'').toLowerCase())
@@ -671,7 +719,31 @@ function renderDossier(){
   }
   r._open=true;   /* the thread renderer's contract: an unfocused row is simply never passed in */
   el.innerHTML=dossierHTML(r);
+  applyEvidence(r);
   if(r._threadMsgs==null&&!r._threadErr&&!r._threadBusy) ensureThread(r);
+}
+
+/* Re-paint the picked value's evidence after every dossier render — innerHTML above destroys the
+   Ranges the Custom Highlight API holds, and the 15 s refresh re-renders whether or not anything
+   changed. Absence is stated, not silent: 40% of extracted values are in the email text in NO form
+   (they were ISO-normalised or paraphrased by the model), so «sem evidência visível» is a real and
+   frequent answer, and printing nothing would read as a broken click. */
+function applyEvidence(r){
+  const d=$('#_doss'); if(!d||!r) return;
+  evClear();
+  /* Exactly one value is ever lit (decision D2) — clear the last one before lighting this one. */
+  d.querySelectorAll('.lg-r.picked,.lg-r.noev').forEach(x=>x.classList.remove('picked','noev'));
+  if(!_evKey) return;
+  const cell=d.querySelector('[data-lgk="'+_evKey+'"]');
+  if(!cell){ _evKey=null; return; }     /* the value is gone from this thread's ledger */
+  cell.classList.add('picked');
+  const fs=(r._facts||[]).filter(x=>x.key===_evKey);
+  const f=fs.length?fs[fs.length-1]:null;   /* chronological — last write wins, as the ledger renders */
+  /* f.quote is the ADR-054 located sentence, present on a minority of facts and absent everywhere
+     until the locate pass has run. evHighlight uses it ONLY when the value itself is nowhere on
+     screen, so a tree with no evidence.jsonl behaves exactly as it did before Phase 4. */
+  const n=f?evHighlight($('#_doss'),_evKey,f.value,f.quote):0;
+  if(!n) cell.classList.add('noev');
 }
 
 /* ── conversation timeline helpers (ADR-034 P5c) ─────────────────────────
@@ -872,18 +944,28 @@ function _threadHTML(r){
   /* The VERTICAL timeline (ADR-034 P5c): a left spine with a direction-coloured dot per message;
      newest at the top; inbound and outbound offset to opposite sides and tinted so who-said-what
      reads at a glance; a gap chip between cards shows the time difference; and the segment from the
-     newest message up to «agora» is the OPEN response debt, drawn in the clock's band colour
-     (hollow when the ball is theirs). */
+     newest message up to «agora» is the OPEN response debt — drawn in the clock's band colour
+     (hollow when the ball is theirs) WHEN the clock is anchored at that message, and as a plain
+     elapsed gap when it is not (ADR-051). */
   const c=r.clock||{};
   /* The open debt (now → newest message) uses the AUTHORITATIVE clock age (server-computed, the
      same value the row/dossier clock shows) — NOT a client-side wall-clock recompute, which drifts
      a day out of step over time (the «10 dias» vs «11 dias» bug). Verb follows the clock state. */
   const debtVerb=(c.state==='AWAITING')?'à espera há ':'sem resposta há ';
   const debtMs=(c.age_hours!=null)?c.age_hours*3600000:0;
+  /* ADR-051: this chip SPANS «agora» → the newest message, so it may only speak as the response
+     debt when the clock is anchored THERE. When the obligation sits on an older message (an inbound
+     bill we answered but have not paid; a handled thread), the honest chip is the plain elapsed
+     gap — otherwise it prints «sem resposta há 2 dias» right above a mail we sent an hour ago. The
+     obligation age keeps its home in the header pill and the row clock. `!==false` so an older
+     cached payload without the flag renders exactly as it did before. */
+  const debtOwnsSegment=(c.anchored_at_last!==false);
+  const segMs=debtOwnsSegment?debtMs:((c.gap_hours!=null)?c.gap_hours*3600000:debtMs);
   let flow='<div class="dthread">'
     +'<div class="dt-now '+esc(c.band||'none')+(c.state==='AWAITING'?' hollow':'')+'"><span class="dt-dot"></span>agora</div>';
-  if(debtMs>=1800000)
-    flow+='<div class="dt-gap debt '+esc(c.band||'none')+'"><span class="dt-glab">'+esc(debtVerb+_humanizeAge(c.age_hours||0))+'</span></div>';
+  if(segMs>=1800000)
+    flow+='<div class="dt-gap '+(debtOwnsSegment?('debt '+esc(c.band||'none')):_gapBand(segMs))+'"><span class="dt-glab">'
+      +esc(debtOwnsSegment?(debtVerb+_humanizeAge(c.age_hours||0)):_fmtGap(segMs))+'</span></div>';
   ordered.forEach((m,i)=>{
     /* Inter-message gaps only (the debt chip above already spans now → newest). */
     if(i>0){
@@ -923,6 +1005,7 @@ function dispatch(action,i){
 /* Focusing IS opening: the dossier mounts the focused conversation (one render path). */
 function focusTo(i){
   const v=view(); if(!v[i]) return;
+  if(focusRoot!==v[i].thread_root) _evKey=null;   /* evidence belongs to the thread it was found in */
   focus=i; focusRoot=v[i].thread_root;
   urlThread=focusRoot; syncURL(); render();
 }
@@ -1175,7 +1258,7 @@ async function refresh(opts){
     const added=next.filter(r=>!seen.has(r.thread_root)).length;
     const carry={}; rows.forEach(r=>{carry[r.thread_root]=r;});
     next.forEach(r=>{const o=carry[r.thread_root]; if(o){r._threadMsgs=o._threadMsgs;r._threadErr=o._threadErr;
-      r._facts=o._facts;r._decisions=o._decisions;r._ledgerProj=o._ledgerProj;r._draft=o._draft;r._open=o._open;}});
+      r._facts=o._facts;r._decisions=o._decisions;r._ledgerProj=o._ledgerProj;r._att=o._att;r._narr=o._narr;r._draft=o._draft;r._open=o._open;}});
     rows=next; sortRows(); _lastSig=sig;
     render();
     if(!opts.quiet&&added>0) toast(added+(added===1?' nova thread':' novas threads'));
@@ -1187,7 +1270,21 @@ document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refresh(
 _lastSig=_sig(rows);
 
 /* «Sincronizar» refreshes IN PLACE — the shell's onSynced hook replaces its location.reload(). */
-function onSynced(){ toast(S.sincronizado); refresh({force:true,quiet:true}); }
+function onSynced(){
+  toast(S.sincronizado);
+  /* A sync rewrites crm.db and re-runs the locate/narrate passes, so every cached /api/thread
+     payload is now potentially wrong — and the staleness was doubly locked: _threadCache is keyed by
+     thread_root with no version and was never invalidated anywhere, AND refresh() carries
+     _threadMsgs forward, which keeps renderDossier's `if(r._threadMsgs==null) ensureThread(r)` guard
+     permanently false after the first open. So a thread that GREW kept serving its pre-sync
+     messages, ledger and narrative for the life of the tab. Both halves are dropped here, which is
+     the one moment the data can actually have changed. _facts goes back to undefined, not [] — that
+     is the ledger's «a carregar registo…» state, and [] would claim the thread has no facts. */
+  Object.keys(_threadCache).forEach(k=>{ delete _threadCache[k]; });
+  rows.forEach(r=>{ r._threadMsgs=null; r._threadErr=null; r._facts=undefined; r._decisions=null;
+                    r._ledgerProj=null; r._att=null; r._narr=null; });
+  refresh({force:true,quiet:true});
+}
 
 /* ── palette items ──────────────────────────────────────────────────── */
 function paletteItems(q){
@@ -1196,13 +1293,15 @@ function paletteItems(q){
     {kind:'ação',label:S.actSync,run:syncNow},
     {kind:'ação',label:S.actUndo,run:doUndo},
     {kind:'ação',label:S.actDensity,run:toggleDensity},
-    {kind:'ação',label:S.actInbox,run:()=>{location.href='/inbox';}},
     {kind:'ação',label:'Início',run:()=>{location.href='/';}},
     {kind:'ação',label:'Contrapartes',run:()=>{location.href='/contrapartes';}},
     {kind:'ação',label:'Para ti',run:()=>{location.href='/para-ti';}},
     {kind:'ação',label:'Projetos',run:()=>{location.href='/projetos';}},
     {kind:'ação',label:'Capturas',run:()=>{location.href='/capturas';}},
   ];
+  /* «Abrir inbox» only for an admin — /inbox is in _ADMIN_EXACT (it renders the report over EVERY
+     message, with no ADR-045 per-person filtering), so a member choosing it got a 403. */
+  if(IS_ADMIN) items.push({kind:'ação',label:S.actInbox,run:()=>{location.href='/inbox';}});
   if(hasFilters()) items.unshift({kind:'filtro',label:'limpar filtros',run:clearFilters});
 
   // Counterparty fronts (the tabs, reachable by name)
@@ -1280,12 +1379,42 @@ $('#_list').addEventListener('click',e=>{
 
 /* dossier events: verbs + timeline jumps act on the FOCUSED row */
 $('#_doss').addEventListener('click',e=>{
+  /* «Registo do fio» → its evidence in the body (§Phase 3, decision D2: ONE accent, driven by the
+     click rather than a permanent 7-colour palette). This branch must sit FIRST, ahead of the
+     generic verb branch at the bottom, because `dispatch(action,i)` is never handed the element —
+     the pattern the related-thread and timeline branches below already use.
+     Written without naming that branch's attribute literally: the guard asserts the two appear in
+     THIS order in the shipped source, so a prose mention of it here reads as the wrong order and
+     fires the test on a comment. (test_the_evidence_branch_runs_before_the_verb_branch) */
+  const lg=e.target.closest('[data-lgk]');
+  if(lg){
+    /* applyEvidence, NOT renderDossier: re-rendering would replace the dossier's innerHTML and so
+       throw away whatever the reader had opened («assinatura», «mensagem citada», «ver original»)
+       and reset the scroll — on the very click whose job is to show them something. */
+    _evKey = (_evKey===lg.dataset.lgk) ? null : lg.dataset.lgk;
+    applyEvidence(focusedRow());
+    return;
+  }
+  /* «Evolução da conversa» step → the message it came from. Scrolls in place and never re-renders,
+     for the same reason the evidence branch above doesn't: a rebuild would shut whatever the reader
+     had opened. 'nearest' because .tbody/.tquote/.tsig are themselves scrollers. */
+  const ns=e.target.closest('[data-nmid]');
+  if(ns){
+    const card=$('#_doss').querySelector('[data-tmid="'+(ns.dataset.nmid||'').replace(/"/g,'\\"')+'"]');
+    if(card&&card.scrollIntoView) card.scrollIntoView({block:'nearest'});
+    $('#_doss').querySelectorAll('.nsteps li.on').forEach(x=>x.classList.remove('on'));
+    ns.classList.add('on');
+    return;
+  }
   /* related-thread jump-link: focus it in place if it's in the current queue, else navigate. */
   const rl=e.target.closest('[data-relroot]');
   if(rl){
     e.preventDefault();
     const root=rl.dataset.relroot, v=view(), i=v.findIndex(x=>x.thread_root===root);
-    if(i>=0) focusTo(i); else location.href='/?thread='+encodeURIComponent(root);
+    /* Not in the current view — reload the Fila focused on it. The prefix is explicit: a bare
+       '/?thread=' lands on Início (ADR-044), which reads no query parameter, so the jump would
+       drop the very conversation this click asked for. */
+    if(i>=0) focusTo(i); else location.href='/fila?thread='+encodeURIComponent(root);
     return;
   }
   const tl=e.target.closest('[data-tl]');
@@ -1365,7 +1494,15 @@ if(_vr) _vr.addEventListener('click',e=>{
   if(fe){
     if(fe.dataset.fest==='semdono') setFilter('owner',('owner' in filters&&filters.owner==='')?null:'');
     else if(fe.dataset.fest==='anexo') setFilter('hasAttachment',filters.hasAttachment?null:true);
-    else if(fe.dataset.fest==='rever') location.href='/para-ti';
+    /* ?tipo= — land on the «Classificações a rever» GROUP, not the unfiltered Para ti list. The
+       chip names one population; dropping the filter made the click answer a wider question than
+       it asked. Para ti reads this key in applyURL() and writes it back in syncURL().
+       KNOWN AND DELIBERATELY NOT PAPERED OVER: the N on this chip counts NEEDS_REVIEW interactions
+       (webapp._needs_review_count) while that group counts rows under the confidence floor
+       (para_ti.low_confidence_items) — two different populations, so the destination can hold a
+       different number than the chip promised. That is a question about what «Rever classificação»
+       means, and it needs an owner's answer, not a silent edit here. */
+    else if(fe.dataset.fest==='rever') location.href='/para-ti?tipo=rever_classificacao';
   }
 });
 
@@ -1607,7 +1744,23 @@ _EXTRA_CSS = """
   .lg-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 14px;margin-bottom:8px}
   .lg-r{display:flex;flex-direction:column;gap:1px;min-width:0}
   .lg-r small{font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--mut2)}
-  .lg-r b{font-size:12.5px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* The value WRAPS (owner request): truncating it hid the job. Clamped at 3 lines because grid
+     rows are auto-sized — one 226-char «Produto / serviço» (the measured max) would otherwise add
+     ~15 lines of height to every OTHER cell in its row. `overflow-wrap:anywhere` so an unbroken
+     IBAN/reference wraps rather than widening the track. The full value lives in `title=`. */
+  .lg-r b{font-size:12.5px;font-variant-numeric:tabular-nums;display:-webkit-box;
+    -webkit-line-clamp:3;line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+  .lg-r.wide{grid-column:1/-1}   /* long value → the whole grid, where 3 clamped lines fit it */
+  /* §Phase 3: a value is a button onto its own evidence. Whole-cell target, like the row in §5. */
+  .lg-r{cursor:pointer;border-radius:6px;padding:2px 5px;margin:-2px -5px;transition:background .12s}
+  .lg-r:hover{background:var(--bd2)}
+  .lg-r.picked{background:var(--hl-bg)}
+  .lg-r.picked small,.lg-r.picked b,.lg-r.picked span{color:var(--hl-tx)}
+  /* Absence, said out loud. 40% of extracted values are in the email in no form at all — a silent
+     click would read as broken, and inventing a nearest match would be a zero-hallucination breach. */
+  .lg-r.noev::after{content:'sem evidência visível';font-size:9.5px;font-style:italic;color:var(--hl-tx);opacity:.8}
+  .lg-r.picked.noev{background:var(--bd2)}
+  .lg-r.picked.noev small,.lg-r.picked.noev b,.lg-r.picked.noev span,.lg-r.noev::after{color:var(--mut)}
   .lg-r b.prop{border-bottom:1px dashed var(--mut2)}      /* LLM-extracted: proposto, não confirmado */
   .lg-r b.solid{color:var(--int)}                          /* checksum FACT (NIF/IBAN, ADR-007) */
   .lg-r span{font-size:10px;color:var(--mut2);font-variant-numeric:tabular-nums}
@@ -1649,6 +1802,19 @@ _EXTRA_CSS = """
   .dai-h{display:flex;align-items:center;gap:9px;margin-bottom:4px}
   .dai-k{font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--mut)}
   .dai p{margin:0;font-size:12.5px;line-height:1.55;color:var(--tx)}
+  /* «Evolução da conversa» (ADR-054 Phase 5). Solid border, not the dashed INFERENCE one: every step
+     is quoted from a message whose id was checked before it was stored, so this is not a proposal.
+     Its own container rather than a child of .dai, whose `p{margin:0}` would butt the two together. */
+  .dnarr{border:1px solid var(--bd);border-radius:11px;padding:11px 14px;margin-bottom:11px;background:var(--card)}
+  .nsteps{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:0}
+  .nsteps li{display:flex;gap:9px;align-items:baseline;padding:5px 6px;border-radius:7px;cursor:pointer;
+    border-left:2px solid var(--bd);margin-left:2px}
+  .nsteps li:hover{background:var(--hl-bg);border-left-color:var(--ac)}
+  .nsteps li.on{background:var(--hl-bg);border-left-color:var(--ac)}
+  .nd{font-size:10.5px;color:var(--mut2);font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto}
+  .nt{font-size:12.5px;line-height:1.5;color:var(--tx);min-width:0}
+  .nstate{margin:8px 0 0;padding-top:8px;border-top:1px solid var(--bd);font-size:12.5px;
+    line-height:1.5;color:var(--mut);font-style:italic}
   .dcp{display:flex;align-items:center;gap:10px;border:1px solid var(--bd);border-radius:11px;
     padding:10px 14px;margin-bottom:12px;background:var(--card)}
   .dcp-av{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;

@@ -80,8 +80,71 @@ Verified by bytes, not inspection: every funnel item of every attachment-bearing
 refetched through the public endpoint and its sha256 compared — **1039/1039 match**.
 Pinned by `tests/test_attachments.py::test_message_parts_indexes_exactly_like_attachment_part`.
 
+## Âmbito: conversa vs projeto (ADR-052)
+
+Everything above is **one thread**. A `/projetos/<pid>` «Ficheiros» panel is a *project* scope, and it
+is assembled in the client — see
+[ADR-052](../03-decisions/adr-052-the-project-file-list-spans-every-thread-and-the-intake-channel.md)
+for why that is a security decision and not a convenience.
+
+**Two sources, one list.**
+
+| Source | Where it comes from | `src` shape | Byte route |
+| --- | --- | --- | --- |
+| email | `GET /api/thread/{root}` → `.attachments`, one call per attached root | `{message_id, index}` | `/api/attachment/{message_id}/{index}` |
+| intake capture | `GET /api/projects/{pid}/captures` → the same block shape | `{capture_id, index}` | `/api/captures/{capture_id}/{index}`, i.e. `…/media/{index}` |
+
+`GET /api/projects/{pid}/captures` answers `{items, counts, bands, n_captures}` — deliberately the
+same shape as `attachments` above, so both fold through one `attMerge`. Its items add:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `source` | `"capture"` | Present **only** on capture items. Nothing else in the funnel sets it. |
+| `channel` | `str` | `telegram` \| `manual` \| … — the capture's own channel column. |
+| `asserted_by` | `str` | Who registered it. Replaces `from_email`, which is `""` for a capture. |
+| `missing` | `true` \| absent | The media file is not readable under `captures_dir`. Listed anyway, size 0 — ADR-020's store is the sole copy, so a gap is an incident to see. |
+
+`id` follows the same content-hash rule as an email part, which is the whole point: **a capture joins
+the dedup**, so the same drawing mailed and re-sent through Telegram is one item with `n_copies: 2`.
+A capture whose bytes are unreadable falls back to `"k" + sha256("<cid>:<index>")[:15]` — the prefix
+is outside the hex alphabet for the same reason `"n"` is.
+
+**Client-side item fields** (added by `loadSource`, never sent by the server):
+
+| Field | Meaning |
+| --- | --- |
+| `thread_root` | The root whose block carried this item. Drives «ver na fila →». Stamped per block *before* the merge. |
+
+**`attMerge(blocks)`** flattens every block and sorts by `first_seen` **ascending before** the dedup
+pass, so the surviving copy is the *chronologically first carrier* — not the first attached thread.
+An item with no date sorts last. That ordering is a **precondition** of the provenance line: a tile
+naming a sender it did not earn is a confident lie.
+
+**`attFunnelHTML(att, o)` / `_attTile(it, o)` options:**
+
+| Option | Effect |
+| --- | --- |
+| `title` | Heading text. Default `'Ficheiros da conversa'`; the project panel passes `'Ficheiros do projeto'`. |
+| `showSource` | Render the `.atti-src` provenance line under each tile. The tile is then wrapped in `.attw` — the line carries its own link, and an `<a>` inside an `<a>` is invalid HTML. |
+| `bigPreviews` | Preview an `image` regardless of `PREVIEW_MAX_BYTES` (still lazy). Only the Ficheiros panel sets it — see ADR-052 §3.8. |
+
+Both bands call `.map(it=>_attTile(it,o))`. A bare function reference would pass `Array.map`'s
+**index** as `o` — falsy for tile 0, truthy after — and is grepped for by
+`tests/test_attachments.py::test_the_tile_helper_is_never_passed_the_array_index_as_options`.
+
+**The list can be explicitly incomplete.** One `try` per root: a root that 404s (ungranted under
+ADR-045, or dangling) is collected into `failed[]` and costs only itself, and the panel says
+«⚠ N de M conversas não carregou — esta lista está incompleta. Pode faltar aqui um ficheiro.» One
+merged sentence, because the client cannot distinguish the two 404s — and must not, or a 403 would
+confirm a thread exists.
+
 ## Known limits
 
+- The project list's **preview gate is opted out of, not fixed**: `bigPreviews` downloads a full-size
+  image to draw a 132 px tile. Lazy, tab-gated, and named in ADR-052 §3.8; the real fix is
+  server-side thumbnailing. Revisit at ~10 previewable items over 1 MB in one project.
+- Cross-thread dedup is **unexercised in production** — all 13 live projects have exactly one thread.
+  Only `tests/test_cockpit_urls_e2e.py` runs it.
 - High-resolution signature art (4322×4320 social icons) lands in `IMAGENS`. Three demotion signals
   — density, filename, anchor-wrapping — were measured and **all three would bury real content**
   (ADR-046 §Rejected). Bounded by sort order instead; the duck drawing is pinned by a test.

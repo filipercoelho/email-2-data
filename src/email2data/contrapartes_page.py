@@ -167,9 +167,13 @@ function relTime(iso){ if(!iso) return '—'; const ms=Date.now()-Date.parse(iso
 /* deep-links to where the data lives — everything stays inside the cockpit (the legacy /inbox is a
    different app; sending 111 history links there dumped the user into a surface that contradicts
    these pages). A thread link lands on the Fila, which falls back to the Tratados ledger when the
-   conversation was already decided. */
-const filaSearch = q    => '/?search='+encodeURIComponent(q);
-const filaThread = root => '/?thread='+encodeURIComponent(root);
+   conversation was already decided.
+   The `/fila` prefix is EXPLICIT and must stay that way: these are cross-page links, so there is no
+   `location.pathname` to inherit the way the Fila's own syncURL() does. They said `/?thread=` until
+   ADR-044 moved the Fila off the root, after which every one of them landed on Início — which reads
+   no query parameter at all — and silently dropped the conversation the user asked for. */
+const filaSearch = q    => '/fila?search='+encodeURIComponent(q);
+const filaThread = root => '/fila?thread='+encodeURIComponent(root);
 
 function statCard(v,l,cls){ return '<div class="stat'+(cls?' '+cls:'')+'"><div class="sv">'+esc(v)+'</div><div class="sl">'+esc(l)+'</div></div>'; }
 function seclabel(t,hint){ return '<div class="seclabel">'+esc(t)+(hint?' <span class="sh">'+esc(hint)+'</span>':'')+'</div>'; }
@@ -183,7 +187,7 @@ function render(){
   const nif = cl.nif ? '<span class="kv">NIF '+esc(cl.nif)+'</span>' : '';
   /* "Abrir na Fila" filters THIS counterparty (domain, or the address we hear from most) — it used
      to filter by counterparty TYPE, which opened the Fila showing every other CLIENT too. */
-  const filaHref = cl.kind==='domain' ? '/?domain='+encodeURIComponent(cl.key)
+  const filaHref = cl.kind==='domain' ? '/fila?domain='+encodeURIComponent(cl.key)
                                       : filaSearch(st.primary_email||(cl.emails||[''])[0]);
   const acts = '<div class="cactions">'
     + (frows.length?'<a class="act-btn" href="'+filaHref+'">Abrir na Fila →</a>':'')

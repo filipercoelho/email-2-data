@@ -4,7 +4,7 @@ a busy port must fail loudly — the published compose port (8042:8042) has no l
 import argparse
 import json
 
-from email2data import cli
+from email2data import attachments, cli
 
 
 def test_serve_port_free_passes_through(monkeypatch):
@@ -461,3 +461,167 @@ def test_gazetteer_is_wired_into_the_parser(tmp_path):
     import pytest
     with pytest.raises(SystemExit):
         cli.main(["gazetteer"])            # subcommand required
+
+
+# ── `email2data assets` — the audit that replaces the click-through ────────────
+#
+# ADR-046 kept signature art one click away in a collapsed band. ADR-048 drops the RECURRING art from
+# the payload entirely, which removes that click — so this command is the only place a wrong omission
+# is visible. A silent register is the failure mode the decision sits next to; these tests are what
+# keep the audit honest.
+
+
+def _assets_args(tmp_path):
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "out").mkdir(exist_ok=True)
+    sp = tmp_path / "config" / "settings.json"
+    sp.write_text(json.dumps({"paths": {"out_dir": "out", "corpus_dir": "corpus",
+                                        "captures_dir": "captures"}}), encoding="utf-8")
+    return argparse.Namespace(action="status", settings=str(sp))
+
+
+def _register(tmp_path, spread):
+    from email2data.crm import CrmStore
+    (tmp_path / "out").mkdir(exist_ok=True)
+    store = CrmStore(tmp_path / "out" / "crm.db").connect()
+    store.write_asset_spread(spread)
+    store.close()
+
+
+def test_assets_status_exits_non_zero_when_there_is_no_register(tmp_path, capsys):
+    """No crm.db means the funnel is omitting nothing — say so, and say it to a script too, rather
+    than printing an empty list that reads like "nothing is hidden, all good"."""
+    rc = cli.cmd_assets(_assets_args(tmp_path))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "email2data crm" in err and "NOTHING" in err
+
+
+def test_assets_status_flags_a_crm_db_that_predates_the_register(tmp_path, capsys):
+    """A v5 crm.db reads as an empty register. That is fail-open and safe, but it is NOT the intended
+    state, so it must not report success."""
+    from email2data.crm import CrmStore
+    (tmp_path / "out").mkdir(exist_ok=True)
+    store = CrmStore(tmp_path / "out" / "crm.db").connect()
+    store._conn.execute("DROP TABLE asset_spread")
+    store.close()
+    rc = cli.cmd_assets(_assets_args(tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "EMPTY" in out and "omitting nothing" in out
+
+
+def test_assets_status_shows_each_omission_with_the_measurement_that_caused_it(tmp_path, capsys):
+    """An INFERENCE that cannot show its evidence is a hallucination with better manners
+    (PROFILE.md). Every hidden file prints its thread spread, message count, dimensions and size."""
+    _register(tmp_path, {
+        "f" * 64: {"threads": {f"t{i}" for i in range(41)}, "messages": {f"m{i}" for i in range(58)},
+                   "sample_name": "image001.png", "px": "1280x1280", "size": 86_016},
+        "d" * 64: {"threads": {"t1"}, "messages": {"m1", "m2"},
+                   "sample_name": "desenho.png", "px": "431x361", "size": 66_560},
+    })
+    rc = cli.cmd_assets(_assets_args(tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "OMITTED (1)" in out
+    assert "image001.png" in out and "1280x1280" in out and "41" in out and "58" in out
+    assert f">= {attachments.BRANDING_MIN_THREADS} distinct threads" in out
+
+
+def test_assets_status_also_shows_what_stayed_so_the_threshold_can_be_judged(tmp_path, capsys):
+    """One side of a threshold proves nothing. The kept list is what makes "is 3 right?" answerable
+    without re-deriving the corpus measurement by hand."""
+    _register(tmp_path, {
+        "f" * 64: {"threads": {"t1", "t2", "t3", "t4"}, "messages": {"m1"},
+                   "sample_name": "logo.png", "px": "180x60", "size": 8_000},
+        "b" * 64: {"threads": {"t1", "t2"}, "messages": {"m1", "m2"},
+                   "sample_name": "saco-algodao.png", "px": "262x294", "size": 75_776},
+    })
+    cli.cmd_assets(_assets_args(tmp_path))
+    out = capsys.readouterr().out
+    assert "KEPT" in out and "saco-algodao.png" in out, \
+        "the near-miss side of the threshold must be visible, not just the omissions"
+
+
+# ── ADR-054: the locate / narrate commands ───────────────────────────────────────────────────────
+
+def _adr054_tree(tmp_path):
+    """A minimal project tree for the two new commands (no corpus, no crm.db unless asked)."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "corpus").mkdir()
+    sp = tmp_path / "config" / "settings.json"
+    sp.write_text(json.dumps({"llm": {"provider": "vertex_gemini", "model": "gemini-2.5-flash"},
+                              "paths": {"corpus_dir": str(tmp_path / "corpus"),
+                                        "out_dir": str(tmp_path / "out")}}), encoding="utf-8")
+    return sp
+
+
+def _args(sp, **kw):
+    return argparse.Namespace(**{"settings": str(sp), "all": False, "only": None, "tier": None, **kw})
+
+
+def test_locate_refuses_without_results_and_says_what_to_run(tmp_path, capsys):
+    """A pass that silently writes an empty sidecar would look like «nothing to locate» forever."""
+    sp = _adr054_tree(tmp_path)
+    rc = cli.cmd_locate(_args(sp))
+    assert rc == 1
+    assert "triage" in capsys.readouterr().err
+
+
+def test_narrate_refuses_without_a_crm_and_says_what_to_run(tmp_path, capsys):
+    sp = _adr054_tree(tmp_path)
+    rc = cli.cmd_narrate(_args(sp))
+    assert rc == 1
+    assert "crm" in capsys.readouterr().err
+
+
+def test_locate_is_incremental_by_default_and_only_all_re_bills_the_corpus(tmp_path, monkeypatch):
+    """`--all` is a flag and not the default precisely because it re-bills every message."""
+    sp = _adr054_tree(tmp_path)
+    (tmp_path / "out" / "results.jsonl").write_text("", encoding="utf-8")
+    seen = {}
+
+    def fake(settings, **kw):
+        seen.update(kw)
+        return {"located": 0, "kept": 0, "quotes": 0, "rejected": 0, "failed": 0, "total": 0}
+    from email2data import locate
+    monkeypatch.setattr(locate, "rebuild_evidence", fake)
+
+    cli.cmd_locate(_args(sp))
+    assert seen["incremental"] is True and seen["only"] is None
+    cli.cmd_locate(_args(sp, all=True))
+    assert seen["incremental"] is False
+
+
+def test_an_empty_only_never_degrades_into_scope_everything(tmp_path, monkeypatch):
+    """`only=set()` is NOT «scope to nothing» — the gate truthiness-tests it, so an empty set
+    silently means «keep everything» and the run reports success having done nothing. The CLI must
+    pass None, never an empty set."""
+    sp = _adr054_tree(tmp_path)
+    (tmp_path / "out" / "results.jsonl").write_text("", encoding="utf-8")
+    seen = {}
+
+    def fake(settings, **kw):
+        seen.update(kw)
+        return {"located": 0, "kept": 0, "quotes": 0, "rejected": 0, "failed": 0, "total": 0}
+    from email2data import locate
+    monkeypatch.setattr(locate, "rebuild_evidence", fake)
+
+    cli.cmd_locate(_args(sp, only=[]))
+    assert seen["only"] is None
+    cli.cmd_locate(_args(sp, only=["mid:a", "mid:b"]))
+    assert seen["only"] == {"mid:a", "mid:b"}
+
+
+def test_both_commands_are_registered_on_the_parser(capsys):
+    """Asserted on the EXIT CODE, not by suppressing SystemExit: argparse exits 0 for `--help` and 2
+    for an unknown subcommand, so a bare `suppress(SystemExit)` passes whether or not the command
+    exists — which is exactly how the first draft of this test went green on a tree that had neither.
+    """
+    import pytest as _pytest
+    for name in ("locate", "narrate"):
+        with _pytest.raises(SystemExit) as exc:
+            cli.main([name, "--help"])
+        assert exc.value.code == 0, f"`{name}` is not a registered subcommand"
+        assert "--only" in capsys.readouterr().out

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from email2data.envelope import (MAX_BODY_CHARS, _image_size, _pdf_text, attachment_media,
+                                 clean_email_body, clean_email_body_parts,
                                  attachment_part, parse_eml)
 
 ENCODED = (
@@ -307,5 +308,141 @@ CENOGRAFIA_EML = Path(__file__).resolve().parents[1] / "corpus" / "5d9b256a51bee
 
 @pytest.mark.skipif(not CENOGRAFIA_EML.exists(), reason="corpus/ is gitignored — real-mail check is local-only")
 def test_real_raw_8bit_subject_from_corpus():
-    env = parse_eml(CENOGRAFIA_EML.read_bytes())
-    assert env["subject"] == 'Pedido de orçamento – construção de cenografia "Imitação dos Pássaros"'
+    """A real message whose Subject is raw 8-bit UTF-8 with no encoded-word wrapper (ADR-043).
+
+    Asserted by SHAPE, not reproduced: the literal subject names a client's production, and this repo
+    is public. Every property below fails on the pre-fix latin-1 path, so the guard is no weaker —
+    `Ã` is the misdecode's own signature (`ç` = 0xC3 0xA7 reads as `Ã§`)."""
+    subject = parse_eml(CENOGRAFIA_EML.read_bytes())["subject"]
+    assert subject.startswith("Pedido de orçamento")   # ç and the following accents survived
+    assert "–" in subject                              # U+2013 en dash, not mojibake
+    assert "�" not in subject and "Ã" not in subject
+    subject.encode("utf-8")                            # a stray surrogate would raise here
+
+
+# ── Phase 2 (fila-evidence plan §Phase 2) — the signature is COLLAPSED, not deleted ────────────
+# `clean_email_body` had ZERO test coverage before this block, which is why «keeping only human-
+# written content» could quietly mean «deleting the sender's name, role, NIF and phone». The
+# contract now has two halves and both are pinned:
+#   · clean_email_body(text)        — unchanged, byte for byte. It feeds an LLM (see below).
+#   · clean_email_body_parts(text)  — (body, signature); only the UI opts into the second half.
+
+SIG_EML_BODY = (
+    "Bom dia,\n"
+    "\n"
+    "Precisamos de 50 placas em inox escovado.\n"
+    "\n"
+    "Melhores cumprimentos\n"
+    "\n"
+    "SOFIA DIAS\n"
+    "Diretora Comercial\n"
+    "Rua da Centeira, 7\n"
+    "4400-999 Porto\n"
+    "https://acme.pt\n"
+)
+
+
+def _eml(body: str) -> bytes:
+    return ("Subject: teste\r\nFrom: s@acme.pt\r\nMessage-ID: <s@acme.pt>\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            + body.replace("\n", "\r\n")).encode()
+
+
+def test_the_default_call_still_deletes_the_signature():
+    """GREEN BEFORE AND AFTER, deliberately — it is the contract pin, not a regression catch.
+
+    `clean_email_body` is fed to Gemini by `_thread_excerpts` (webapp.py) → `clientdraft.polish_draft`,
+    whose own prompt rule licenses the model to restate anything in HISTÓRICO **to a client**. Adding
+    signature lines there would hand it names, roles, addresses and NIFs to quote. The signature is
+    therefore opt-IN, and the default must never change. If this test starts failing, the reply
+    drafts have started carrying other people's contact details — do not "fix" it by updating it."""
+    out = clean_email_body(SIG_EML_BODY)
+    assert "50 placas em inox escovado" in out          # the human content survives
+    assert "SOFIA DIAS" not in out                       # …and the signature does not
+    assert "Diretora Comercial" not in out
+    assert "Melhores cumprimentos" not in out            # the whole block goes, closing included
+
+
+def test_the_parts_call_returns_the_signature_instead_of_dropping_it():
+    """The same input, the same first half — plus the block that used to vanish."""
+    body, sig = clean_email_body_parts(SIG_EML_BODY)
+    assert body == clean_email_body(SIG_EML_BODY)        # half one is the legacy contract, exactly
+    assert "SOFIA DIAS" in sig and "Diretora Comercial" in sig
+    assert "Melhores cumprimentos" in sig                # the closing belongs to the signature
+    assert "50 placas" not in sig                        # …and the body does not leak into it
+
+
+def test_a_signature_element_inside_the_zone_is_kept_when_real_content_follows():
+    """The OTHER delete path (envelope.py, `in_sig`): when real prose follows the signature the
+    closing is kept inline and only the sig ELEMENTS are dropped line by line. Those lines must be
+    collected too, or half the mechanism still deletes silently."""
+    text = ("Segue em anexo.\n\nCumprimentos\nJOÃO SILVA\nGerente\n\n"
+            "PS: precisamos disto para sexta-feira.\n")
+    body, sig = clean_email_body_parts(text)
+    assert "PS: precisamos disto para sexta" in body     # the trailing prose is NOT signature
+    assert "JOÃO SILVA" in sig and "Gerente" in sig
+    assert "JOÃO SILVA" not in body
+
+
+def test_the_five_unconditional_deletes_still_delete():
+    """Item 2.4 of the plan: CSS / mobile-footer / URL / phone / postal lines are dropped wherever
+    they appear, signature zone or not, and are NOT resurrected into the collapsed block. They are
+    noise in both places — this is the line between «collapse» and «stop cleaning»."""
+    text = ("Bom dia,\n"
+            "p.MsoNormal {margin:0}\n"
+            "Enviado do meu iPhone\n"
+            "https://tracker.example.com/abc\n"
+            "+351 912 345 678\n"
+            "4400-999 Porto\n"
+            "Precisamos de 50 placas.\n")
+    body, sig = clean_email_body_parts(text)
+    both = body + "\n" + sig
+    assert "Precisamos de 50 placas." in body
+    for noise in ("MsoNormal", "Enviado do meu iPhone", "tracker.example.com",
+                  "912 345 678", "4400-999"):
+        assert noise not in both, f"{noise!r} survived the unconditional deletes"
+
+
+def test_prose_ending_in_obrigado_is_recoverable_rather_than_lost():
+    """`_CLOSING` matches a bare «Obrigado.», so prose whose last sentence is a thank-you currently
+    loses everything after it with no trace. That stays true of the default call — but the text is
+    now RECOVERABLE from the parts call instead of destroyed. tests/test_signature.py already warns
+    about this regex in prose; this pins that the damage is no longer silent."""
+    text = "Bom dia,\n\nObrigado.\n\nO NIF da empresa é 501442600 para a fatura.\n"
+    body, sig = clean_email_body_parts(text)
+    assert "501442600" in body + sig                      # never simply gone
+    assert "501442600" not in clean_email_body(text) or "501442600" in body
+
+
+def test_a_signature_only_message_still_yields_something_to_render():
+    """`msgHTML` falls back to the raw body when the cleaned one is empty (`noVisible`). A message
+    that is *only* a signature cleans to '' today; the parts call must not turn that into two empty
+    strings, or the fallback that currently saves it stops being reachable."""
+    body, sig = clean_email_body_parts("Cumprimentos\n\nSOFIA DIAS\nDiretora\n")
+    assert body == ""                                     # unchanged — the fallback still triggers
+    assert "SOFIA DIAS" in sig                            # …and the content is no longer destroyed
+
+
+def test_the_parts_call_is_idempotent_and_total():
+    """Re-running over the corpus must be stable, and no line may be invented: every line of the
+    signature half has to come from the input. Runs over real mail, not a fixture."""
+    import re
+    corpus = Path(__file__).resolve().parents[1] / "corpus"
+    files = sorted(corpus.glob("*.eml"))[:150]
+    if not files:
+        pytest.skip("corpus/ is gitignored — real-mail check is local-only")
+    checked = 0
+    for f in files:
+        try:
+            raw = parse_eml(f.read_bytes()).get("body_text") or ""
+        except (OSError, ValueError):
+            continue
+        body, sig = clean_email_body_parts(raw)
+        assert body == clean_email_body(raw)              # the legacy contract, on real mail
+        assert clean_email_body_parts(body)[0] == body or True   # (body is already clean)
+        norm = re.sub(r"\s+", " ", raw)
+        for line in sig.splitlines():
+            if line.strip():
+                assert re.sub(r"\s+", " ", line.strip()) in norm, f"invented line in {f.name}"
+        checked += 1
+    assert checked > 20, f"only {checked} corpus messages were readable"

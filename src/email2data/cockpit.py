@@ -317,26 +317,45 @@ def _legacy_obligation(s: ThreadSummary) -> str:
     return OWE_REPLY
 
 
+def _we_replied_after(s: ThreadSummary, i: int) -> bool:
+    """Did WE send the counterparty anything after the message at index ``i`` in ``s.acts``?
+
+    ADR-051 — this is what discharges an owed REPLY, whatever act the classifier gave our own mail.
+    Only ``outbound`` counts: an ``internal`` forward of a client's question to a colleague is not an
+    answer to the client, and leaving it out keeps ADR-036's "an internal forward is still about a
+    client" fold intact."""
+    return any(d == "outbound" for _, d, _ in s.acts[i + 1:])
+
+
 def derive_obligation(s: ThreadSummary) -> str:
-    """The thread's next-move obligation (ADR-036). The LAST DECISIVE message (``speech_act`` ∈
-    ASK/OBLIGATION/ACK/CLOSE) sets it; FYI/UNKNOWN never override a live move. No usable act anywhere
-    → legacy fallback. ASK inbound = they asked us (OWE_REPLY); ASK outbound = we asked them
-    (AWAIT_THEM). OBLIGATION inbound = pay a bill (OWE_PAYMENT) or act (OWE_REPLY); OBLIGATION outbound
-    on our invoice = COLLECT. ACK/CLOSE = RESOLVED (kills 'obrigado, recebido stays open forever')."""
-    decisive = next(((a, d, p) for a, d, p in reversed(s.acts) if a in _DECISIVE_ACTS), None)
+    """The thread's next-move obligation (ADR-036, amended by ADR-051). The LAST DECISIVE message
+    (``speech_act`` ∈ ASK/OBLIGATION/ACK/CLOSE) sets it; FYI/UNKNOWN never override a live move. No
+    usable act anywhere → legacy fallback. ASK inbound = they asked us (OWE_REPLY); ASK outbound = we
+    asked them (AWAIT_THEM). OBLIGATION inbound = pay a bill (OWE_PAYMENT) or act (OWE_REPLY);
+    OBLIGATION outbound on our invoice = COLLECT. ACK/CLOSE = RESOLVED (kills 'obrigado, recebido
+    stays open forever').
+
+    ADR-051: an obligation to REPLY is discharged by the observable fact that we replied — any
+    outbound message after the decisive one moves the ball to them (AWAIT_THEM), even when the
+    classifier read our reply as FYI. "FYI never overrides a live move" was written to stop an
+    inbound notification wiping their open ask; applied to our OWN outbound it made every
+    update-shaped answer a no-op, so the clock kept counting from an ask we had already answered.
+    An owed PAYMENT is deliberately NOT dischargeable this way — an email never pays a bill."""
+    decisive = next((i for i in range(len(s.acts) - 1, -1, -1) if s.acts[i][0] in _DECISIVE_ACTS), None)
     if decisive is None:
         if any(a not in ("", "UNKNOWN") for a, _, _ in s.acts):
             return FYI                                     # acts present but all FYI → quiet pile
         return _legacy_obligation(s)                       # no speech_act signal → legacy routing
-    act, direction, purpose = decisive
+    act, direction, purpose = s.acts[decisive]
     if act in ("ACK", "CLOSE"):
         return RESOLVED
     inbound = direction == "inbound"
+    owed_reply = AWAIT_THEM if _we_replied_after(s, decisive) else OWE_REPLY   # ADR-051
     if act == "ASK":
-        return OWE_REPLY if inbound else AWAIT_THEM
+        return owed_reply if inbound else AWAIT_THEM
     # OBLIGATION
     if inbound:
-        return OWE_PAYMENT if purpose in _PAYABLE_PURPOSES else OWE_REPLY
+        return OWE_PAYMENT if purpose in _PAYABLE_PURPOSES else owed_reply
     return COLLECT if purpose == "OUTBOUND_INVOICE" else AWAIT_THEM
 
 
@@ -371,6 +390,10 @@ def thread_clock(s: ThreadSummary, now: datetime,
         since = _obligation_since(s, obligation)
 
     age_h = _age_hours(since, now)
+    # ADR-051 — the timeline draws its debt chip in the segment «agora» → the NEWEST message, so it
+    # needs to know whether the obligation is anchored THERE. When it is not (an inbound bill we
+    # answered but have not paid; a handled thread), the chip must show the plain elapsed gap
+    # instead, or it prints «sem resposta há 2 dias» directly above a mail we sent an hour ago.
     return {
         "state": state,
         "obligation": obligation,
@@ -378,6 +401,8 @@ def thread_clock(s: ThreadSummary, now: datetime,
         "band": _band(state, age_h),
         "label": _obligation_label(obligation, state, age_h),
         "since": since.isoformat() if since else None,
+        "gap_hours": round(_age_hours(s.last_date, now), 2) if s.last_date else None,
+        "anchored_at_last": bool(since and s.last_date and since == s.last_date),
     }
 
 

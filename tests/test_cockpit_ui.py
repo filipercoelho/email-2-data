@@ -585,3 +585,300 @@ def test_the_editor_says_an_outlook_paste_is_welcome_before_you_paste_it():
     html = _account()
     assert "Outlook/Gmail" in html
     assert "texto simples" in html
+
+
+# ── Phase 2 (fila-evidence plan §Phase 2) — the signature renders COLLAPSED ────────────────────
+# `clean_email_body` deleted the closing salutation and everything after it. That block is where a
+# sender's name, role and NIF live, and deleting it is the same class of act as silently binning a
+# message: the reader is never told anything was removed. It now arrives as its own field and
+# renders behind a toggle, exactly like «mensagem citada».
+
+def _msg_kit_js() -> str:
+    """The SHIPPED msgSplitQuote + msgHTML, sliced out of the shared kit so node can run them.
+
+    Deliberately NOT the `_ATT_GLYPH`→`msgThreadHTML(` window that tests/test_attachments.py
+    executes — these functions sit before it, and widening that window would drag unrelated source
+    into an unrelated test's node payload."""
+    kit = cockpit_ui._SHELL_UTILS
+    return kit[kit.index("function msgSplitQuote("):kit.index("const _ATT_GLYPH=")]
+
+
+def _run_msg(js_body: str):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    kit = cockpit_ui._SHELL_UTILS
+    esc = kit[kit.index("const esc="):].split("\n")[0]
+    src = (esc + "\nfunction msgDirTag(d){return {k:'inbound',c:'#000',i:'',t:'in'};}\n"
+           + _msg_kit_js() + "\n" + js_body)
+    r = subprocess.run([node, "-e", src], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_the_signature_renders_collapsed_behind_its_own_toggle():
+    """EXECUTES msgHTML. The signature must be present in the DOM (so it is one click away and
+    searchable) and hidden by default (so it does not push the conversation off-screen)."""
+    html = _run_msg(
+        "console.log(JSON.stringify(msgHTML({message_id:'m1',body:'Bom dia.\\n\\nCumprimentos\\nSOFIA DIAS',"
+        "body_clean:'Bom dia.',body_sig:'Cumprimentos\\nSOFIA DIAS',direction:'inbound'})));")
+    assert "SOFIA DIAS" in html                       # present — never deleted
+    assert "tsig hidden" in html                      # …and collapsed by default
+    assert "stoggle" in html                          # …behind a visible affordance
+    assert "assinatura" in html                       # …that says what it is, in PT
+
+
+def test_a_message_with_no_signature_grows_no_toggle():
+    """Absence is absence — the app's standing rule. No empty «assinatura» button on the ~40% of
+    messages that never had a closing block."""
+    html = _run_msg(
+        "console.log(JSON.stringify(msgHTML({message_id:'m1',body:'Bom dia.',"
+        "body_clean:'Bom dia.',body_sig:'',direction:'inbound'})));")
+    assert "stoggle" not in html and "tsig" not in html
+
+
+def test_every_toggle_still_sits_immediately_before_the_element_it_reveals():
+    """The quote and raw toggles find their target with `nextElementSibling` (msgWireQuoteToggles).
+    Inserting the signature block between them would silently repoint a toggle at the wrong div —
+    no error, just a button that reveals someone else's content. Executed, then checked positionally."""
+    html = _run_msg(
+        "console.log(JSON.stringify(msgHTML({message_id:'m1',"
+        "body:'Bom dia.\\n\\nDe: x@y.pt\\nPara: z@w.pt\\ncitado',"
+        "body_clean:'Bom dia.\\n\\nDe: x@y.pt\\nPara: z@w.pt\\ncitado',"
+        "body_sig:'Cumprimentos\\nSOFIA DIAS',direction:'inbound'})));")
+    for toggle, target in (("stoggle", "tsig"), ("qtoggle", "tquote")):
+        i = html.index(toggle)
+        rest = html[i:]
+        nxt = rest.index("<div class=")
+        assert target in rest[nxt:nxt + 40], (
+            f"the element right after .{toggle} is not its .{target} — nextElementSibling breaks")
+
+
+def test_the_signature_toggle_is_wired_and_reveals_only_its_own_block():
+    """A shipped toggle nobody wired is a dead button. The handler must key off `.stoggle` and,
+    like the other two, stop the click from reaching the row-level dossier handler."""
+    kit = cockpit_ui._SHELL_UTILS
+    wiring = kit[kit.index("function msgWireQuoteToggles("):]
+    wiring = wiring[:wiring.index("\nlet ")]
+    assert ".stoggle" in wiring and "tsig" in wiring
+    assert wiring.count("e.stopPropagation()") >= 3     # one per toggle, incl. the new one
+
+
+def test_ver_original_still_appears_on_a_message_whose_signature_was_kept():
+    """`hasNoise = rawBody.length > cleanBody.length + 60` decides whether «ver original» exists.
+    Folding the signature INTO body_clean would shrink that gap and delete the escape hatch on
+    exactly the messages this phase touches — which is why the signature ships as its own field and
+    body_clean is byte-identical to before. This is the guard on that decision."""
+    long_sig = "Cumprimentos\\n" + "\\n".join(f"LINHA {i} DA ASSINATURA" for i in range(12))
+    html = _run_msg(
+        "console.log(JSON.stringify(msgHTML({message_id:'m1',"
+        "body:'Bom dia.\\n\\n" + long_sig + "\\n+351 912 345 678\\nhttps://acme.pt',"
+        "body_clean:'Bom dia.',body_sig:'" + long_sig + "',direction:'inbound'})));")
+    assert "rawtoggle" in html, "the raw-body escape hatch vanished once a signature was kept"
+
+
+def test_a_signature_only_message_still_renders_its_content():
+    """`noVisible` falls back to the raw body when cleaning empties a message. A message that is
+    only a signature must still show something — before this phase it fell back to raw, and that
+    path must keep working rather than being replaced by a lone collapsed toggle."""
+    html = _run_msg(
+        "console.log(JSON.stringify(msgHTML({message_id:'m1',"
+        "body:'Cumprimentos\\nSOFIA DIAS\\nDiretora',body_clean:'',"
+        "body_sig:'Cumprimentos\\nSOFIA DIAS\\nDiretora',direction:'inbound'})));")
+    assert "SOFIA DIAS" in html
+    assert "tbody" in html, "the raw fallback stopped rendering a body"
+
+
+# ── Phase 3 (fila-evidence plan §Phase 3) — deterministic evidence spans ───────────────────────
+# Click a ledger row, its evidence lights up in the message body. Zero LLM: the format-locked
+# fields re-derive their own spans from `extract.py`'s patterns, mirrored client-side over the text
+# that is ACTUALLY on screen. Never server-side — `extract_values` folds (NFKD + strip combining +
+# casefold) before matching, so its outputs are not substrings of the body and any offset computed
+# there drifts silently on exactly the Portuguese mail this app handles.
+
+def _hl_kit_js() -> str:
+    """The SHIPPED evidence helpers. Sliced from AFTER msgWireQuoteToggles deliberately: the window
+    `_ATT_GLYPH`→`msgThreadHTML(` is executed verbatim by tests/test_attachments.py, and anything
+    dropped in there is swallowed into an unrelated test's node payload."""
+    kit = cockpit_ui._SHELL_UTILS
+    return kit[kit.index("const _EV_AMOUNT="):kit.index("function evHighlight(")]
+
+
+def _run_hl(js_body: str):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not available — the shipped JS cannot be executed")
+    r = subprocess.run([shutil.which("node"), "-e", _hl_kit_js() + "\n" + js_body],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_the_client_side_patterns_agree_with_extract_py():
+    """EXECUTED against the same shapes `extract.py` accepts, because a JS port of a Python regex is
+    exactly the kind of change that looks right and behaves differently (`\\b`, `re.I`, the PT
+    thousands separator). If these drift, the dossier highlights text the pipeline never extracted."""
+    out = _run_hl(
+        "const t='Total 1.250,00 EUR e ainda 50 peças e 3mm e 2026 e €80';"
+        "console.log(JSON.stringify({"
+        " amounts:evMatches(t,'money').map(m=>t.slice(m.s,m.e)),"
+        " nifs:evMatches('NIF: 501442600 e 123456789','nif').map(m=>m.text),"
+        " ibans:evMatches('IBAN PT50 0002 0123 1234 5678 9015 4 fim','iban').map(m=>m.text)}));")
+    assert out["amounts"] == ["1.250,00 EUR", "€80"], out["amounts"]
+    assert "50 peças" not in " ".join(out["amounts"])   # the currency anchor is what keeps precision
+    assert out["nifs"] == ["501442600"], "the mod-11 check must reject 123456789"
+    assert out["ibans"] == ["PT50 0002 0123 1234 5678 9015 4"]
+
+
+def test_the_nif_span_covers_the_number_and_not_its_anchor_word():
+    """`_NIF` has a CAPTURE GROUP (`(?:nif|nipc|contribuinte)\\D{0,12}(\\d{9})`); `_AMOUNT`/`_IBAN`
+    do not. A `matchAll` port that highlights `m[0]` paints «NIF: » too — visibly wrong, and it
+    silently proves the offset was never re-derived from the group."""
+    out = _run_hl("const t='Empresa, NIF: 501442600, obrigado';"
+                  "const m=evMatches(t,'nif')[0];"
+                  "console.log(JSON.stringify({text:t.slice(m.s,m.e),s:m.s,e:m.e}));")
+    assert out["text"] == "501442600"
+
+
+def test_a_formatted_iban_still_matches_the_folded_stored_value():
+    """THE reason this is not a substring search. `extract_values` stores the IBAN space-stripped and
+    upper-cased (`PT50000201231234567890154`); the body says «PT50 0002 0123 …». A naive
+    `body.includes(value)` finds nothing — measured False by execution — so the match is by
+    NORMALISED form, and the span is the raw on-screen text."""
+    out = _run_hl(
+        "const t='Pagamento para PT50 0002 0123 1234 5678 9015 4 ate sexta';"
+        "console.log(JSON.stringify({"
+        " naive:t.includes('PT50000201231234567890154'),"
+        " found:evLocate(t,'iban','PT50000201231234567890154').map(m=>t.slice(m.s,m.e))}));")
+    assert out["naive"] is False, "if this ever becomes True the test has stopped proving anything"
+    assert out["found"] == ["PT50 0002 0123 1234 5678 9015 4"]
+
+
+def test_a_non_format_locked_value_falls_back_to_an_accent_folded_search():
+    """«Produto / serviço» and «Nome» have no format. They fall back to a fold-tolerant literal
+    search — the mechanism §4 rejects as a PRIMARY strategy (37% hit rate) but which is correct as a
+    user-initiated secondary: the person clicked the row, and a miss simply highlights nothing."""
+    out = _run_hl(
+        "const t='Pedido de letras em INOX escovado para a fachada';"
+        "console.log(JSON.stringify({"
+        " hit:evLocate(t,'product_or_service','letras em inox escovado').map(m=>t.slice(m.s,m.e)),"
+        " miss:evLocate(t,'product_or_service','carimbos para ceramica')}));")
+    assert out["hit"] == ["letras em INOX escovado"], "case/accent folding must not change the span"
+    assert out["miss"] == [], "a miss is silent — never a wrong highlight"
+
+
+def test_a_value_that_is_not_in_the_text_highlights_nothing():
+    """40% of extracted values are never in the email text in any form (§3.2). The honest answer is
+    zero spans — no fuzzy nearest-match, ever. A wrong highlight is worse than none."""
+    out = _run_hl("console.log(JSON.stringify(evLocate('Bom dia, até sexta.','deadline','2026-08-07')));")
+    assert out == []
+
+
+def test_the_highlight_uses_the_custom_highlight_api_and_never_mark():
+    """Splicing `<mark>` into the escaped body breaks two things at once: `esc()` does not escape
+    `'`, and indexing escaped text drifts 4 chars per `&`; and a wrapper element repoints the
+    `nextElementSibling` toggles. The Custom Highlight API paints over live Ranges and mutates no DOM."""
+    kit = cockpit_ui._SHELL_UTILS
+    fn = kit[kit.index("function evHighlight("):]
+    fn = fn[:fn.index("\nfunction ", 10)] if "\nfunction " in fn[10:] else fn
+    assert "<mark" not in fn and "innerHTML" not in fn
+    assert "CSS.highlights" in fn and "new Range(" in fn
+    assert "typeof Highlight" in fn or "!CSS.highlights" in fn, "must feature-detect, not assume"
+
+
+def test_the_hidden_raw_body_is_never_highlighted():
+    """There are TWO .tbody per message when the raw body is noisier — the visible one and the one
+    inside the hidden `.rawbody` («ver original»). Highlighting the hidden copy paints nothing the
+    user can see and, worse, makes the count of matches lie."""
+    kit = cockpit_ui._SHELL_UTILS
+    fn = kit[kit.index("function evTextNodes("):kit.index("function evHighlight(")]
+    assert "rawbody" in fn, "the hidden raw copy must be excluded explicitly"
+
+
+# ── Phase 4: the LOCATED sentence (ADR-054) ──────────────────────────────────────────────────────
+
+def test_a_located_sentence_is_found_across_the_hard_wrap_that_rendered_it():
+    """The locate pass stores the email's own text, newline and all; the DOM holds that text after
+    clean_email_body dropped lines, msgSplitQuote TRIMMED both halves and three slices cut it. A run
+    of whitespace is the one difference that survives all of that, so it is the one tolerated."""
+    out = _run_hl(
+        "const t='Precisamos de construção de cenografia \"Órfãos da \\nLua\" para a peça.';"
+        "console.log(JSON.stringify("
+        " evLocateQuote(t,'construção de cenografia \"Órfãos da Lua\"').map(m=>t.slice(m.s,m.e))));")
+    assert out == ['construção de cenografia "Órfãos da \nLua"']
+
+
+def test_the_quote_span_survives_folding_that_is_not_length_preserving():
+    """evLocate's fallback assumes folding is 1:1 per character and says so in-line. That holds for
+    NFC Portuguese but NOT in general — NFKD expands a ligature, and a lone combining mark folds
+    away to nothing. The quote path maps every normalised character back to its SOURCE index instead
+    of doing arithmetic on the folded string, so a ligature cannot shift the span."""
+    out = _run_hl(
+        "const t='O orçamento inclui o acabamento ﬁnal da peça.';"
+        "console.log(JSON.stringify({"
+        " span:evLocateQuote(t,'o acabamento final da peça').map(m=>t.slice(m.s,m.e)),"
+        " naive:t.indexOf('o acabamento final')}));")
+    assert out["naive"] == -1, "if this ever becomes -1≠ the test has stopped proving anything"
+    assert out["span"] == ["o acabamento ﬁnal da peça"]
+
+
+def test_a_sentence_that_is_not_on_screen_paints_nothing():
+    """A stored quote can still be unreachable — the region it came from may have been cut by the
+    render. Silence there is correct; «sem evidência visível» is the honest answer."""
+    out = _run_hl("console.log(JSON.stringify(evLocateQuote('Bom dia.','uma frase que não está aqui')));")
+    assert out == []
+
+
+def test_an_empty_quote_never_matches_everything():
+    """The dangerous degenerate case: an empty needle found at every offset would paint the entire
+    dossier and read as a spectacular success."""
+    out = _run_hl("console.log(JSON.stringify({"
+                  " empty:evLocateQuote('Bom dia, tudo bem?',''),"
+                  " spaces:evLocateQuote('Bom dia, tudo bem?','   '),"
+                  " nul:evLocateQuote('Bom dia, tudo bem?',null)}));")
+    assert out == {"empty": [], "spaces": [], "nul": []}
+
+
+def test_the_located_sentence_is_a_fallback_and_never_replaces_an_exact_value_span():
+    """The ORDER is the design. The deterministic search already paints 44% of ledger rows exactly,
+    and on those the model's quote is an echo of the value 89% of the time — preferring it would
+    swap a precise span for a whole sentence, and would move what the browser e2e tests read back
+    out of CSS.highlights. Phase 4 exists for the rows where the value is in the email in NO form."""
+    kit = cockpit_ui._SHELL_UTILS
+    fn = kit[kit.index("function evHighlight("):]
+    fn = fn[:fn.index("\nfunction ", 10)]
+    assert fn.index("evLocate(t,key,value)") < fn.index("evLocateQuote(t,quote)")
+    assert "!ranges.length&&quote" in fn, "the quote path must be conditional on the value finding none"
+
+
+def test_a_message_card_carries_its_id_so_a_narrative_step_can_reach_it():
+    """data-tmid, not data-mid: the translate button already owns data-mid and is found by lookups
+    that walk up the tree, so giving the wrapper the same attribute would make every click inside a
+    message resolve to it."""
+    kit = cockpit_ui._SHELL_UTILS
+    fn = kit[kit.index("function msgHTML("):kit.index("function msgWireQuoteToggles(")]
+    assert 'data-tmid="' in fn
+    assert 'class="tmsg' in fn
+
+
+def test_the_highlight_token_exists_in_both_themes():
+    """No transient accent existed before this phase — the palette is bands, counterparties and the
+    steel accent, all of which already MEAN something. Highlight gets its own token so it cannot be
+    read as «atrasado» or «cliente», and it must be defined in light AND dark or one theme paints
+    the evidence in the browser default."""
+    html = _make()
+    light = html.split(":root{")[1].split("}")[0]
+    dark = html.split(':root[data-theme="dark"]{')[1].split("}")[0]
+    assert "--hl-bg:" in light and "--hl-tx:" in light
+    assert "--hl-bg:" in dark and "--hl-tx:" in dark
+    assert "::highlight(evid)" in html

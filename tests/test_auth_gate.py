@@ -150,6 +150,60 @@ def test_the_admin_path_set_matches_the_route_tree(tmp_path):
         f"webapp._ADMIN_EXACT/_ADMIN_PREFIX — deliberately, not reflexively.")
 
 
+def test_no_page_offers_a_member_a_door_the_gate_refuses(tmp_path):
+    """What the app SHOWS must agree with what it ALLOWS (non-negotiable #7).
+
+    ADR-040 locked `/admin` and gated the nav's «Administração», but the ⌘K palettes are JS and could
+    not see `person` at all, so two kept offering admin-only doors: `/admin` on Projetos and `/inbox`
+    on the Fila. A member choosing either got a 403 — once per page, forever. This sweeps EVERY
+    signed-in page instead of pinning the two that were found, so the next palette entry is covered
+    by this test rather than by someone remembering.
+
+    `/inbox` counts: it is in `_ADMIN_EXACT` because it renders the report over every message with no
+    ADR-045 per-person filtering.
+
+    WHAT THIS ASSERTS, precisely: the palettes are JS, so the entry ships as source either way and a
+    grep cannot tell "offered" from "offered only to admins". So it pins the two halves that together
+    make the gate hold — every door construction sits behind an `IS_ADMIN` guard, and `IS_ADMIN` is
+    the right value for who is asking. The nav's own `<a href="/admin">` IS omitted server-side, and
+    that half is still asserted directly."""
+    app, ws = _bootstrapped(tmp_path)
+    member = TestClient(app)
+    sign_in_member(member, ws)
+    pages = ["/", "/fila", "/para-ti", "/projetos", "/contrapartes", "/capturas", "/a-minha-conta"]
+    for path in pages:
+        html = member.get(path).text
+        assert "const IS_ADMIN = false;" in html, f"{path} cannot gate anything"
+        # The server-rendered nav link is omitted outright, not merely guarded.
+        assert '<a class="gm" data-nav="admin" href="/admin">' not in html, path
+        for door in ("/admin", "/inbox"):
+            # Every navigation to a locked door must be guarded. Count the constructions and the
+            # guarded ones: an unguarded entry makes these disagree.
+            built = html.count(f"location.href='{door}'")
+            guarded = html.count(f"if(IS_ADMIN) items.push({{kind:'ação',label:S.actInbox,"
+                                 f"run:()=>{{location.href='{door}';}}}});")
+            guarded += html.count(f"if(IS_ADMIN) base.push({{kind:'ação',label:'Admin',"
+                                  f"run:()=>{{location.href='{door}';}}}});")
+            assert built == guarded, (
+                f"{path} builds {built} navigation(s) to {door} but only {guarded} are behind "
+                f"IS_ADMIN — a member would be offered a door the gate answers with 403")
+
+
+def test_an_admin_is_still_offered_the_admin_doors(tmp_path):
+    """The other half — gating by `IS_ADMIN` must not cost an admin their own entries. Without this,
+    the cheapest way to pass the test above is to delete the doors for everyone."""
+    app, ws = _bootstrapped(tmp_path)
+    admin = TestClient(app)
+    sign_in(admin, ws)
+    assert "location.href='/admin'" in admin.get("/projetos").text
+    assert "location.href='/inbox'" in admin.get("/fila").text
+    # And the embed the gating reads is a real JS boolean on both sides.
+    assert "const IS_ADMIN = true;" in admin.get("/fila").text
+    member = TestClient(app)
+    sign_in_member(member, ws)
+    assert "const IS_ADMIN = false;" in member.get("/fila").text
+
+
 def test_an_admin_still_reaches_the_admin_surface(tmp_path):
     """The other half: the gate must not lock admins out of their own pages."""
     app, ws = _bootstrapped(tmp_path)
@@ -709,6 +763,45 @@ def test_next_url_round_trips_a_deep_link(tmp_path):
     response = client.post("/login", data={"name": "Bootstrap", "password": "bootstrap-pw-123",
                                            "next": "/projetos"})
     assert response.headers["location"] == "/projetos"
+
+
+def test_next_url_carries_the_query_string_so_a_deep_link_survives_the_login(tmp_path):
+    """A signed-out click on a thread deep link must come back to THAT thread, not to a bare queue.
+
+    The gate sent only ``request.url.path``, so /fila?thread=<root> became next=%2Ffila and the
+    person landed on an unfiltered Fila — which reads as "the link is broken", not "you were logged
+    out". ``build_login_html`` already promised this round-trip in its docstring; the middleware was
+    what could not deliver it. Note the asymmetry that hid this: the client-side expiry overlay
+    (cockpit_ui) always preserved location.search, so it only ever failed on a COLD arrival."""
+    app, _ws = _bootstrapped(tmp_path)
+    client = TestClient(app, follow_redirects=False)
+
+    location = client.get("/fila?thread=mid:t1&tab=CLIENT").headers["location"]
+    assert location == "/login?next=%2Ffila%3Fthread%3Dmid%3At1%26tab%3DCLIENT"
+    from urllib.parse import parse_qs, urlparse
+    assert parse_qs(urlparse(location).query)["next"] == ["/fila?thread=mid:t1&tab=CLIENT"]
+
+    # …and the form hands it back intact, so the deep link actually completes.
+    assert 'value="/fila?thread=mid:t1&amp;tab=CLIENT"' in client.get(location).text
+    response = client.post("/login", data={"name": "Bootstrap", "password": "bootstrap-pw-123",
+                                           "next": "/fila?thread=mid:t1&tab=CLIENT"})
+    assert response.headers["location"] == "/fila?thread=mid:t1&tab=CLIENT"
+
+
+def test_a_query_string_cannot_smuggle_an_off_site_next(tmp_path):
+    """Carrying the query widened what reaches _safe_next, so the open-redirect guard is re-pinned
+    against the new shape: the value still has to be a same-site absolute path."""
+    app, _ws = _bootstrapped(tmp_path)
+    client = TestClient(app, follow_redirects=False)
+    for hostile in ("/fila?next=//evil.example", "/fila?x=https://evil.example"):
+        response = client.post("/login", data={"name": "Bootstrap",
+                                               "password": "bootstrap-pw-123", "next": hostile})
+        # Same-site path with a harmless query: honoured, and still pointed at our own origin.
+        assert response.headers["location"].startswith("/fila?")
+    for hostile in ("//evil.example/?a=/fila", "https://evil.example/?next=/fila"):
+        response = client.post("/login", data={"name": "Bootstrap",
+                                               "password": "bootstrap-pw-123", "next": hostile})
+        assert response.headers["location"] == "/", f"open redirect via {hostile!r}"
 
 
 def test_open_redirect_is_refused(tmp_path):

@@ -408,9 +408,15 @@ function panel(key, label, bodyHTML){
 }
 
 function mailboxesHTML(a){
+  /* ADR-049: the fetch opens every folder the servidor lists, so this pinned list is no longer the
+     whole story. Saying so here is not decoration — a screen that shows 78 while the fetch opens 82
+     is the same class of lie as a locked door the palette still offers. */
   const mb = a.mailboxes || [];
-  if(!mb.length) return '<div class="smut">Sem caixas configuradas.</div>';
-  return '<ul class="alist">' + mb.map(m =>
+  const note = '<div class="smut">Todas as pastas do servidor são procuradas automaticamente '
+    + '(exceto <code>spam</code>). Esta lista fixa extras e serve de reserva se o servidor '
+    + 'não responder à listagem. Os <b>cursores</b> abaixo mostram o que foi mesmo lido.</div>';
+  if(!mb.length) return note;
+  return note + '<ul class="alist">' + mb.map(m =>
     '<li><code class="mb">' + esc(m) + '</code></li>').join('') + '</ul>';
 }
 
@@ -457,7 +463,7 @@ function accountCard(a, i){
     + '<span class="auser">' + esc(a.username || '—') + '</span>'
     + '<span class="grow"></span>' + cred + '</div>'
     + meta
-    + panel(i + '|mb', 'Caixas de correio (' + mb + ')', mailboxesHTML(a))
+    + panel(i + '|mb', 'Caixas de correio fixadas (' + mb + ') · resto automático', mailboxesHTML(a))
     + panel(i + '|cur', 'Cursores de leitura (' + (a.cursors || []).length + ')', cursorsHTML(a))
     + errorsHTML(a)
     + '</div>';
@@ -488,7 +494,7 @@ function editorCard(a, i){
     + '(ex.: <code>EMAIL2DATA_ORCAMENTOS_PASSWORD</code>). '
     + 'A password nunca é escrita, lida nem guardada nesta página.</div>' + inv
     + '<div class="frow" style="align-items:flex-start">'
-    + '<label class="flab" for="f' + i + '_mb">Caixas de correio<br><span style="font-weight:500;color:var(--mut2)">uma por linha</span></label>'
+    + '<label class="flab" for="f' + i + '_mb">Caixas fixadas<br><span style="font-weight:500;color:var(--mut2)">uma por linha · as restantes são descobertas no servidor</span></label>'
     + '<textarea class="fin ta" id="f' + i + '_mb" data-i="' + i + '" data-k="mailboxes" rows="7"'
     + ' spellcheck="false">' + esc(a.mailboxes) + '</textarea></div>'
     + '</div>';

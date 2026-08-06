@@ -364,9 +364,33 @@ def clean_email_body(text: str) -> str:
     URL-only lines, signature blocks (triggered by closing salutations), mobile footers,
     and invisible/BOM characters. Collapses excessive blank lines.
 
-    The original text is never modified in-place — callers store both for UI toggle."""
+    The original text is never modified in-place — callers store both for UI toggle.
+
+    **This function's output is LLM-facing and its behaviour is frozen.** ``webapp._thread_excerpts``
+    feeds it to ``clientdraft.polish_draft``, whose prompt licenses the model to restate anything in
+    HISTÓRICO *to a client*; signature lines there would hand it other people's names, roles,
+    addresses and NIFs to quote. When the UI needed the signature back (fila-evidence plan §Phase 2)
+    the answer was therefore a **second, opt-in entry point** — :func:`clean_email_body_parts` — and
+    not a flag on this one. Callers cannot opt in by forgetting to; they have to say so.
+    Pinned by ``tests/test_envelope.py::test_the_default_call_still_deletes_the_signature``."""
+    return clean_email_body_parts(text)[0]
+
+
+def clean_email_body_parts(text: str) -> tuple[str, str]:
+    """``(human_content, signature_block)`` — same cleaning, but the signature is RETURNED.
+
+    Half one is byte-identical to :func:`clean_email_body`; half two is everything the closing-
+    salutation heuristic removes, in original order, so the UI can render it collapsed behind a
+    toggle instead of destroying it (the app's «never silently bin» rule applies to the sender's
+    own identity too — the NIF is the most trustworthy value in the whole schema, ADR-007).
+
+    **Scope of half two, stated because it is narrower than it looks:** only the *signature*
+    heuristic contributes. The five unconditional per-line deletes — CSS, mobile footer, URL-only,
+    phone-only, postal — still delete, wherever they occur, and are NOT recoverable here. They are
+    machine noise in both halves; the closing block is not.
+    """
     if not text:
-        return ""
+        return "", ""
     text = _INVISIBLE.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # Strip inline image refs from within any line (e.g. "See <image001.png> attached")
@@ -374,6 +398,7 @@ def clean_email_body(text: str) -> str:
 
     lines = text.split("\n")
     out: list[str] = []
+    sig: list[str] = []   # what the signature heuristic removes — collapsed, not destroyed
     i = 0
     in_sig = False  # True once we've passed a closing salutation
 
@@ -418,6 +443,7 @@ def clean_email_body(text: str) -> str:
             next_content = lines[lookahead].strip() if lookahead < len(lines) else ""
             is_quoted_hdr = bool(re.match(r"(?:From|De|Sent|Enviada?|To|Para|Subject|Assunto)\s*:", next_content, re.I))
             if lookahead >= len(lines) or is_quoted_hdr:
+                sig.extend(lines[i:lookahead])   # …kept, for the collapsed block
                 i = lookahead  # jump past the entire closing+signature
                 continue
             # Otherwise: real content follows the signature — keep the closing, enter sig zone
@@ -435,6 +461,7 @@ def clean_email_body(text: str) -> str:
                 i += 1
                 continue
             if _is_sig_element(line):
+                sig.append(line)                 # …kept, for the collapsed block
                 i += 1
                 continue
             # Non-signature content after the closing — exit signature zone, keep the line
@@ -461,7 +488,8 @@ def clean_email_body(text: str) -> str:
 
     # Collapse 3+ consecutive blank lines to 2
     result = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
-    return result.strip()
+    signature = re.sub(r"\n{3,}", "\n\n", "\n".join(x.rstrip() for x in sig))
+    return result.strip(), signature.strip()
 
 
 # ── Outlook rewrites *every* inline image to image001.png, image002.gif, … — a signature logo and a

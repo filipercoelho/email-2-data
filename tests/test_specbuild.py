@@ -215,3 +215,49 @@ def test_a_crash_mid_write_cannot_truncate_an_existing_jobspecs(proj, monkeypatc
         specbuild.rebuild_jobspecs(proj.settings, draft=False, incremental=False)
     monkeypatch.undo()
     assert proj.jobspecs.read_bytes() == good                 # the previous build survived intact
+
+
+# ── ADR-053: the corpus filename IS the index ────────────────────────────────────────────────────
+
+def test_rebuild_jobspecs_resolves_corpus_files_by_computed_name_not_a_full_scan(proj,
+                                                                                 monkeypatch):
+    """ADR-053: ``rebuild_jobspecs`` used to build a full ``mid2file`` map by globbing the corpus
+    and parsing every .eml. The map is now computed per-mid via ``safe_filename(mid)``, so 15
+    unrelated .eml files sitting in the corpus never get parsed."""
+    from email2data import envelope, identity, specbuild as _sb
+
+    # Rename each job's .eml to its computed safe_filename so the compute-first path finds it —
+    # the fixture writes them under ``job0.eml`` / ``job1.eml`` / ``job2.eml``, which is what the
+    # old scan-based ``_corpus_index`` looked up.
+    for path in list(proj.emls):
+        raw = path.read_bytes()
+        target = path.parent / identity.safe_filename(identity.canonical_id_from_raw(raw))
+        if target != path:
+            path.rename(target)
+
+    # Add noise files that MUST NOT be parsed once the compute-first fix lands.
+    for i in range(15):
+        raw = _eml(f"noise{i}", "not a job", "irrelevant")
+        (proj.base / "corpus" / identity.safe_filename(identity.canonical_id_from_raw(raw))
+         ).write_bytes(raw)
+
+    monkeypatch.setattr(specdraft, "draft", _ok())
+
+    calls = [0]
+    real = envelope.parse_eml
+
+    def counted(raw, *a, **kw):
+        calls[0] += 1
+        return real(raw, *a, **kw)
+
+    monkeypatch.setattr(envelope, "parse_eml", counted)
+    monkeypatch.setattr(_sb, "parse_eml", counted)
+
+    counts = specbuild.rebuild_jobspecs(proj.settings, draft=True, incremental=False,
+                                        client=object())
+    assert counts["built"] == 3
+    # Old code: 18 (scan of 3 jobs + 15 noise) + 3 (build_entry re-parse per job) = 21.
+    # New code: 3 (build_entry per-mid) with the scan gone. No fallback because all files land on
+    # their computed name.
+    assert calls[0] == 3, (
+        f"specbuild parsed {calls[0]} eml files for 3 jobs — the whole-corpus scan came back")

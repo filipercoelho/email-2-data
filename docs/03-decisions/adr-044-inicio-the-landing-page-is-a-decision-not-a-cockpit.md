@@ -36,9 +36,34 @@ screen that shows **only** that.
 **1. `/` is Início. The Fila moves to `/fila` and is otherwise untouched.**
 
 `/fila` already existed as an alias, so this is a removal of `@app.get("/")` from the Fila route
-rather than a move. Every deep link (`?tab=`, `?thread=`, `?counterparty=`, `?vista=`, …) works
-unchanged, because `syncURL()` rebuilds the address from `location.pathname` and never hard-codes the
-prefix. `/` does **not** redirect to `/fila` — a redirect would be this same regression wearing a 303.
+rather than a move. The Fila's **own** deep links (`?tab=`, `?thread=`, `?counterparty=`, `?vista=`, …)
+work unchanged, because `syncURL()` rebuilds the address from `location.pathname` and never hard-codes
+the prefix. `/` does **not** redirect to `/fila` — a redirect would be this same regression wearing a 303.
+
+> **Correction (2026-07-27).** The sentence above originally read "Every deep link … works unchanged",
+> and that was **false** — it reasoned about `syncURL()` and forgot that `syncURL()` only governs links
+> the Fila writes *for itself*. Six **cross-page** links hard-coded the root prefix, and every one of
+> them landed on Início — which reads no query parameter at all — silently dropping the conversation
+> the user had clicked: `contrapartes_page.py` (`/?thread=`, `/?search=`, `/?domain=`), `para_ti.py`
+> and `para_ti_page.py` (`/?focus=`, the same card twice — one anchor, one API-minted `accept.href`),
+> and `fila_page.py`'s own related-jump fallback (`/?thread=`) for a thread outside the current view.
+> All six now carry `/fila` explicitly. **The rule this ADR should have stated:** a link that leaves
+> the page it is written on has no `location.pathname` to inherit and must name its route in full.
+>
+> Two things let this ship silently, and both are worth more than the fix. **The tests asserted a
+> proxy**: `test_cockpit_urls_e2e.py` waited on `location.pathname=='/' && search.includes('thread=')`,
+> which stayed true after the move — the URL still carried `?thread=`, and the user still lost the
+> thread. It now asserts `/fila` *and* that a row actually mounted (`.row.on`). **And three of the six
+> had no test at all**, so nothing could have gone red. The decision here is unchanged; only the claim
+> about its blast radius was wrong.
+>
+> **Stale bookmarks are accepted as lost, deliberately.** `/` still ignores a query string rather than
+> forwarding `/?thread=<root>` to `/fila?thread=<root>`, because the only population of such links is
+> this single user's own history — no mail, Telegram message, draft, or export has ever carried a
+> cockpit deep link (verified across `mailer.py`, `telegram.py`, `intake.py`, `export.py`, and the
+> draft builders). Adding a forwarding rule would put a permanent redirect in the app to serve a
+> handful of the owner's bookmarks, and would blur the "arriving lands on Início" boundary this ADR
+> exists to draw. If a stale bookmark does turn up, re-click the link from Contrapartes or Para ti.
 
 **2. Início is organised by counterparty, and shows four numbers per card and no rows.**
 

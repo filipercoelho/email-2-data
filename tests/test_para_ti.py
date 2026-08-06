@@ -1,5 +1,7 @@
 """C3 — Para ti gate builders (para_ti.py). Pure function tests."""
 
+import pytest
+
 from email2data.accounts import AccountCluster
 from email2data.para_ti import (
     identity_candidate_items, low_confidence_items,
@@ -81,6 +83,32 @@ def test_propose_project_skips_supplier():
     assert propose_project_items(rows, set()) == []
 
 
+def test_ver_na_fila_link_targets_the_fila_not_the_inicio_gate():
+    """«Ver na Fila» must land on the Fila with the conversation mounted.
+
+    This href is minted server-side into /api/para-ti, so it is a contract every consumer inherits.
+    It read ``/?focus=<root>`` until ADR-044 moved the Fila to /fila and made / the Início gate —
+    a page that reads NO query parameter — so the one action this card offers dropped the thread and
+    dumped the user on the landing page. Nothing asserted its value before, which is why the move
+    was silent."""
+    item = low_confidence_items([_frow("t1", confidence=0.45)])[0]
+    href = item["accept"]["href"]
+    assert href.startswith("/fila?"), f"deep link escaped the Fila: {href}"
+    assert not href.startswith("/?"), "points at Início, which reads no query parameter"
+    # The canonical param, not the legacy ?focus= alias the Fila only keeps for old links.
+    assert href == "/fila?thread=t1"
+
+
+def test_ver_na_fila_link_url_encodes_the_message_id():
+    """A Message-ID is not URL-safe. '&' unencoded ends the parameter, so the Fila received a
+    truncated root and focused nothing (or, with '+', a different conversation)."""
+    root = "mid:caf+abc&x@mail.gmail.com"
+    href = low_confidence_items([_frow(root, confidence=0.3)])[0]["accept"]["href"]
+    assert href == "/fila?thread=mid%3Acaf%2Babc%26x%40mail.gmail.com"
+    from urllib.parse import parse_qs, urlparse
+    assert parse_qs(urlparse(href).query)["thread"] == [root], "the root did not survive the round-trip"
+
+
 def test_accept_payload_carries_thread_root():
     rows = [_frow("t1", cp="LEAD", purpose="ESTIMATE_REQUEST_FROM_CLIENT", subj="Estátua")]
     item = propose_project_items(rows, set())[0]
@@ -154,3 +182,44 @@ def test_all_items_filters_dismissed_and_stamps_keys():
     left = all_items(rows, [], set(), dismissed={victim})
     assert victim not in {it["key"] for it in left}
     assert len(left) == len(items) - 1
+
+
+# ── the lens (ADR-052) ────────────────────────────────────────────────────────
+
+def test_para_ti_keeps_the_attachment_funnel_it_was_sent():
+    """Para Ti has NEVER rendered the ADR-046 funnel.
+
+    ``loadDetail`` stored ``{messages, spec}`` and dropped ``d.attachments`` on the floor, while
+    ``detailHTML`` went on passing ``attachments: d.attachments`` — ``undefined`` — so
+    ``attFunnelHTML`` returned ``''`` every single time. Confirmed in Chrome before the fix: a thread
+    showing **8** ``.tatt`` chips and no ``.attf`` element at all, on the one page whose job is
+    deciding about a conversation.
+
+    Executed, not grepped: the shipped ``loadDetail`` is run in node against a stubbed ``getJSON``,
+    so this asserts what the cache actually ends up holding.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    from email2data import para_ti_page as ptp
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the lens JS can't be executed")
+    js = ptp._LENS_JS
+    fn = js[js.index("async function loadDetail("):js.index("async function toggleExpand(")]
+    payload = {"messages": [{"message_id": "m1"}], "spec": {"provenance": {}},
+               "attachments": {"items": [{"id": "aa", "band": "FICHEIROS", "name": "q.pdf"}],
+                               "counts": {"FICHEIROS": 1}}}
+    body = ("const _detail={},_detailErr={};\n" + fn
+            + "\nconst getJSON=async()=>(%s);\n" % json.dumps(payload)
+            + "loadDetail({thread_root:'t1'}).then(()=>"
+              "console.log(JSON.stringify(_detail['t1'])));")
+    r = subprocess.run([node, "-e", body], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["attachments"], "loadDetail discarded d.attachments — the funnel can never render"
+    assert got["attachments"]["items"][0]["name"] == "q.pdf"
+    assert got["messages"] and got["spec"], "…and the two it already kept are still kept"
+    # the renderer really is handed that object (the other half of the two-line defect)
+    assert "attachments:d.attachments" in js.replace(" ", "")

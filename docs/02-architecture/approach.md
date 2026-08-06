@@ -88,6 +88,9 @@ Lindo IMAP (read-only)
    │  fetch.py  (EXAMINE, SINCE filter, dedupe by Message-ID)
    ▼
 corpus/<safe-id>.eml          # immutable local cache — re-run classify offline
+                              # <safe-id> = sha256(canonical_id)[:32] — a PURE FUNCTION of the
+                              # message id, so message_id → .eml is O(1) compute + one stat call
+                              # (ADR-053; see reference/data-stores.md §"filename IS the index")
    │  envelope.py  (MIME decode, HTML→text, header extract)
    ▼
 EmailEnvelope (dict)          # trimmed version of the draft's envelope.v1

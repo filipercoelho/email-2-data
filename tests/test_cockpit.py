@@ -229,6 +229,97 @@ def test_last_decisive_act_wins_fyi_does_not_override_ask():
     assert r["clock"]["obligation"] == "OWE_REPLY" and r["group"] == G_OWE
 
 
+# ── ADR-051: a reply we can SEE discharges an owed reply ─────────────────────────────────────────
+#
+# The live defect, reported off the rendered dossier: a thread whose header read «devemos resposta há
+# 2 dias» with our own reply visible in the timeline, sent the same afternoon. The rows below are the
+# real shape of `mid:509ab3fb…@example.pt` — an inbound ASK, then our update-shaped answer that
+# Gemini (correctly) called FYI. Because FYI is not decisive, the ASK stayed live and the clock kept
+# counting from it. `_obligation_since(OWE_REPLY)` anchors to last_inbound_date, so no amount of
+# replying ever moved the number.
+
+def _answered_ask_rows():
+    """Their ask, then our reply — the reply reads as FYI, which is exactly the live case."""
+    return [_row("t1", "m1", ago(66), direction="inbound", speech_act="ASK", purpose="FOLLOW_UP"),
+            _row("t1", "m2", ago(1), direction="outbound", speech_act="FYI", purpose="FOLLOW_UP",
+                 from_email="orcamentos@lindoservico.pt")]
+
+
+def test_our_reply_discharges_an_inbound_ask_even_when_it_reads_as_fyi():
+    [r] = build_fila(_answered_ask_rows(), now=NOW)
+    c = r["clock"]
+    assert c["obligation"] == "AWAIT_THEM" and c["state"] == AWAITING     # the ball is theirs now
+    assert c["age_hours"] < 2                                            # counts from OUR reply…
+    assert not c["label"].startswith("devemos resposta")                 # …so the header cannot lie
+    assert r["group"] == G_WAIT                                          # fresh → «À espera deles»
+
+
+def test_the_act_driven_fold_agrees_with_the_legacy_fold_that_a_reply_moves_the_ball():
+    """ADR-036 Stage 2 dropped `_legacy_obligation`'s `last_outbound >= last_inbound → AWAIT_THEM`
+    guard and never replaced it, so a re-triaged crm.db was WORSE than a pre-re-triage one on the
+    same thread. Pin the two folds together on this shape so they cannot diverge again."""
+    from email2data.cockpit import _legacy_obligation, derive_obligation
+    [s] = fold_threads(_answered_ask_rows())
+    assert derive_obligation(s) == _legacy_obligation(s) == "AWAIT_THEM"
+
+
+def test_a_reply_never_discharges_an_inbound_bill():
+    """The discharge is for an owed REPLY only — a mail does not pay a supplier. «A pagar» must
+    survive us answering "recebido, pagamos dia 10"."""
+    rows = [_row("t1", "m1", ago(66), direction="inbound", counterparty="SUPPLIER",
+                 purpose="SUPPLIER_INVOICE", speech_act="OBLIGATION"),
+            _row("t1", "m2", ago(1), direction="outbound", counterparty="SUPPLIER",
+                 purpose="FOLLOW_UP", speech_act="FYI", from_email="orcamentos@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_PAYMENT" and r["group"] == G_PAY
+    assert r["clock"]["age_hours"] > 60                 # still counting from the bill, as it must
+
+
+def test_an_internal_forward_is_not_an_answer_to_the_client():
+    """Forwarding their question to a colleague is not replying to them — ADR-036's «an internal
+    forward is still about a client» fold has to survive the discharge."""
+    rows = [_row("t1", "m1", ago(66), direction="inbound", speech_act="ASK"),
+            _row("t1", "m2", ago(1), direction="internal", speech_act="FYI",
+                 from_email="diogo@lindoservico.pt")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_REPLY" and r["group"] == G_OWE
+
+
+def test_a_new_ask_after_our_reply_owes_again():
+    """The discharge is scoped to outbound AFTER the decisive message — when they come back with a
+    fresh ask, that ask is the decisive one and nothing precedes it from us."""
+    rows = _answered_ask_rows() + [_row("t1", "m3", ago(0.5), direction="inbound", speech_act="ASK")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_REPLY" and r["group"] == G_OWE
+
+
+def test_an_inbound_fyi_still_never_overrides_their_live_ask():
+    """The narrow strike, said as a test: only OUR outbound discharges. An inbound notification
+    landing after their ask must still leave the ask live (the rule ADR-036 wrote it for)."""
+    rows = [_row("t1", "m1", ago(10), direction="inbound", speech_act="ASK"),
+            _row("t1", "m2", ago(2), direction="inbound", speech_act="FYI")]
+    [r] = build_fila(rows, now=NOW)
+    assert r["clock"]["obligation"] == "OWE_REPLY"
+
+
+def test_the_clock_says_whether_the_debt_covers_the_segment_the_timeline_draws_it_across():
+    """The dossier timeline paints its debt chip between «agora» and the NEWEST message. That is only
+    the obligation's segment when the clock is anchored there — for an unpaid bill we have answered,
+    it is not, and the chip used to print «sem resposta há 2 dias» above an hour-old mail. The clock
+    now ships the fact, so the renderer does not have to guess."""
+    [answered] = build_fila(_answered_ask_rows(), now=NOW)
+    assert answered["clock"]["anchored_at_last"] is True                  # our reply IS the anchor
+    assert answered["clock"]["gap_hours"] == answered["clock"]["age_hours"]
+
+    bill = [_row("t1", "m1", ago(66), direction="inbound", counterparty="SUPPLIER",
+                 purpose="SUPPLIER_INVOICE", speech_act="OBLIGATION"),
+            _row("t1", "m2", ago(1), direction="outbound", counterparty="SUPPLIER",
+                 purpose="FOLLOW_UP", speech_act="FYI", from_email="orcamentos@lindoservico.pt")]
+    [b] = build_fila(bill, now=NOW)
+    assert b["clock"]["anchored_at_last"] is False                        # the bill is, not our mail
+    assert b["clock"]["gap_hours"] < 2 < b["clock"]["age_hours"]          # the two genuinely differ
+
+
 def test_legacy_fallback_when_no_speech_act():
     # Pre-re-triage crm.db (UNKNOWN acts): the legacy fold reproduces Stage 0/1 routing exactly.
     inbound = build_fila([_row("t1", "m1", ago(6), speech_act="UNKNOWN")], now=NOW)[0]

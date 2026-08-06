@@ -195,6 +195,10 @@ def cmd_crm(args: argparse.Namespace) -> int:
           f"({counts['skipped']} skipped: parse fail or no verdict).")
     print(f"Contacts: {counts['contacts']} ({counts['external']} external) | "
           f"Interactions: {counts['interactions']}")
+    # ADR-048: say out loud how much the funnel will now hide. A silent register is the failure this
+    # whole decision is one step away from — `email2data assets status` shows exactly what.
+    print(f"Inline art we sent: {counts['assets']} distinct | omitted as branding: "
+          f"{counts['branding']}  (audit: `email2data assets status`)")
     store = crm.CrmStore(p["out_dir"] / "crm.db").connect()  # reopen the fresh DB for the rollup table
     print("\nTop external contacts (by volume):")
     print(f"  {'NAME':<20} {'EMAIL':<32} {'CPARTY':<9} {'MSG':>3} {'F/T/C':>7} {'LAST SEEN':<11} LAST PURPOSE")
@@ -313,6 +317,65 @@ def cmd_jobspec(args: argparse.Namespace) -> int:
             print("\n  draft-vs-label agreement:", json.dumps(js.score_drafts(specs, _read_spec_labels(lp))))
         else:
             print("\n  (no labels/spec_labels.csv — fill out/spec_labelsheet.csv, move to labels/, re-run --score)")
+    return 0
+
+
+def cmd_locate(args: argparse.Namespace) -> int:
+    """ADR-054 Phase 4 — the locate pass: which sentence of each email justifies each extracted value.
+
+    Incremental by default: a message that already has a row is never re-billed. ``--only`` forces
+    named message_ids; ``--all`` discards the gate entirely and re-bills the whole corpus, which is
+    why it is a flag and not the default.
+    """
+    from . import locate
+
+    settings = _load_settings(args)
+    p = paths(settings, settings["__settings_path__"])
+    if not (p["out_dir"] / "results.jsonl").exists():
+        print("No out/results.jsonl — run `email2data triage` first.", file=sys.stderr)
+        return 1
+    # `only=set()` is NOT "scope to nothing" — the gate truthiness-tests it, so an empty set silently
+    # degrades to "keep everything" and the run would report success having done nothing.
+    only = set(args.only) if args.only else None
+    counts = locate.rebuild_evidence(settings, incremental=not args.all, only=only, tier=args.tier,
+                                     log=lambda m: print(f"  {m}", file=sys.stderr))
+    print(f"\n{counts['total']} mensagens com evidência · {counts['located']} localizadas nesta "
+          f"passagem · {counts['kept']} mantidas")
+    print(f"  {counts['quotes']} citações aceites · {counts['rejected']} rejeitadas"
+          + (f" · {counts['failed']} FALHARAM (ver audit.jsonl)" if counts["failed"] else ""))
+    print("  -> out/evidence.jsonl")
+    return 0
+
+
+def cmd_narrate(args: argparse.Namespace) -> int:
+    """ADR-054 Phase 5 — «Evolução da conversa»: one narrative per multi-message thread.
+
+    The incremental gate is a CONTENT WATERMARK, not the presence of a row, so a re-triage that
+    changes what a thread means re-narrates it even though no message was added.
+    """
+    from . import narrate
+    from .workspace import Workspace
+
+    settings = _load_settings(args)
+    p = paths(settings, settings["__settings_path__"])
+    if not (p["out_dir"] / "crm.db").exists():
+        print("No out/crm.db — run `email2data crm` first.", file=sys.stderr)
+        return 1
+    ws = Workspace(p["out_dir"] / "workspace.db").connect()
+    try:
+        from .webapp import _thread_decision_lines
+        decs = _thread_decision_lines(ws.thread_states())
+    finally:
+        ws.close()
+    only = set(args.only) if args.only else None
+    counts = narrate.rebuild_narratives(settings, incremental=not args.all, only=only,
+                                        tier=args.tier, decisions_for=decs,
+                                        log=lambda m: print(f"  {m}", file=sys.stderr))
+    print(f"\n{counts['total']} conversas com narrativa · {counts['narrated']} escritas nesta "
+          f"passagem · {counts['kept']} mantidas")
+    print(f"  {counts['steps']} passos"
+          + (f" · {counts['failed']} FALHARAM (ver audit.jsonl)" if counts["failed"] else ""))
+    print("  -> out/narratives.jsonl")
     return 0
 
 
@@ -682,6 +745,55 @@ def cmd_gazetteer(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_assets(args: argparse.Namespace) -> int:
+    """Audit the ADR-048 branding register: what the attachment funnel omits, and on what evidence.
+
+    ADR-046 kept signature art one click away inside a collapsed band. ADR-048 drops the *recurring*
+    art from the payload entirely, which removes that click -- so this command IS the audit trail.
+    It prints every hash the funnel is hiding with the measurement that hid it (thread spread,
+    message count, dimensions, size, one observed filename), plus the widest-spread images that
+    stayed, so the threshold can be judged from both sides rather than trusted.
+
+    Prints no addresses and no subjects: the register stores neither, deliberately.
+    """
+    from . import attachments as attmod, crm as crmmod
+
+    settings = _load_settings(args)
+    p = paths(settings, settings["__settings_path__"])
+    db = p["out_dir"] / "crm.db"
+    if not db.exists():
+        print(f"  {db} does not exist -- run `email2data crm` first.", file=sys.stderr)
+        print("  Until it does, the funnel omits NOTHING (fail-open).", file=sys.stderr)
+        return 1
+    store = crmmod.CrmStore(db).connect()
+    try:
+        rows = store.asset_spread_rows()
+        if not rows:
+            print(f"  register  : {db}  [EMPTY]")
+            print("\n  WARNING: this crm.db predates the ADR-048 register (or holds no inline art),"
+                  "\n  so the funnel is omitting nothing. Rebuild it with `email2data crm`.")
+            return 1
+        cut = attmod.BRANDING_MIN_THREADS
+        hidden = [r for r in rows if r["n_threads"] >= cut]
+        shown = [r for r in rows if r["n_threads"] < cut]
+        print(f"  register  : {db}  [{len(rows)} distinct inline image(s) we sent]")
+        print(f"  threshold : recurring in >= {cut} distinct threads -> omitted from the funnel")
+        print(f"\n  OMITTED ({len(hidden)}):")
+        print(f"    {'thr':>4} {'msg':>4} {'px':>11} {'KB':>7}  name")
+        for r in hidden:
+            print(f"    {r['n_threads']:>4} {r['n_messages']:>4} {r['px'] or '?':>11}"
+                  f" {(r['size'] or 0)//1024:>7}  {r['sample_name'] or '(sem nome)'}")
+        print(f"\n  KEPT, widest spread first ({len(shown)}; the other side of the threshold):")
+        for r in shown[:10]:
+            print(f"    {r['n_threads']:>4} {r['n_messages']:>4} {r['px'] or '?':>11}"
+                  f" {(r['size'] or 0)//1024:>7}  {r['sample_name'] or '(sem nome)'}")
+        if len(shown) > 10:
+            print(f"    … and {len(shown) - 10} more at or below {shown[10]['n_threads']} thread(s)")
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_auth(args: argparse.Namespace) -> int:
     """Manage people + credentials (ADR-039). The admin surface for the auth layer.
 
@@ -990,6 +1102,28 @@ def main(argv: list[str] | None = None) -> int:
     gz_ex = gzsub.add_parser("export", help="write the live table back out as config/gazetteer.csv")
     gz_ex.add_argument("--force", action="store_true", help="overwrite an existing CSV (discards it)")
     gz.set_defaults(fn=cmd_gazetteer)
+    lo = sub.add_parser("locate", help="ADR-054 Phase 4: find the sentence justifying each extracted"
+                                       " value -> out/evidence.jsonl (costs tokens)")
+    lo.add_argument("--all", action="store_true",
+                    help="re-locate EVERY message, discarding the incremental gate (re-bills the corpus)")
+    lo.add_argument("--only", action="append", metavar="MID", default=None,
+                    help="scoped re-locate: only this message_id. Repeatable; everything else is kept.")
+    lo.add_argument("--tier", choices=["light", "standard", "heavy"],
+                    help="model tier for THIS run only (light=flash-lite, standard=flash, heavy=pro)")
+    lo.set_defaults(fn=cmd_locate)
+    na = sub.add_parser("narrate", help="ADR-054 Phase 5: «Evolução da conversa» per thread"
+                                        " -> out/narratives.jsonl (costs tokens)")
+    na.add_argument("--all", action="store_true",
+                    help="re-narrate every thread, ignoring the content watermark")
+    na.add_argument("--only", action="append", metavar="ROOT", default=None,
+                    help="scoped re-narrate: only this thread_root. Repeatable.")
+    na.add_argument("--tier", choices=["light", "standard", "heavy"],
+                    help="model tier for THIS run only (light=flash-lite, standard=flash, heavy=pro)")
+    na.set_defaults(fn=cmd_narrate)
+    asp = sub.add_parser("assets", help="ADR-048: which recurring signature art the funnel omits")
+    aspsub = asp.add_subparsers(dest="action", required=True)
+    aspsub.add_parser("status", help="show the omitted art + what stayed (exit 1 if no register)")
+    asp.set_defaults(fn=cmd_assets)
     ap = sub.add_parser("auth", help="ADR-039: people, passwords, invites and sessions")
     apsub = ap.add_subparsers(dest="action", required=True)
     apsub.add_parser("list", help="show every person, their access and their inbox grants")

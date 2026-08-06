@@ -46,7 +46,12 @@ all three are in the `DIRECTION` constant (`schema.py:48`), pinned by
 pending) · `CLOSE` (explicitly ends the thread) · `UNKNOWN` (unclear — **preferred over a guess**).
 The thread `obligation` folds from the last decisive act: inbound `ASK`→`OWE_REPLY`, outbound
 `ASK`→`AWAIT_THEM`, inbound `OBLIGATION` on a bill→`OWE_PAYMENT`, outbound `OBLIGATION` on our
-invoice→`COLLECT`, `ACK`/`CLOSE`→`RESOLVED`, `FYI`→`INFO`; `FYI`/`UNKNOWN` never override a live move.
+invoice→`COLLECT`, `ACK`/`CLOSE`→`RESOLVED`, `FYI`→`INFO`; an **inbound** `FYI`/`UNKNOWN` never
+overrides a live move. **[ADR-051](../03-decisions/adr-051-a-reply-we-can-see-discharges-an-owed-reply.md):
+any `outbound` message after the decisive one discharges an owed REPLY** (`OWE_REPLY`→`AWAIT_THEM`),
+whatever act our own mail was given — the fact that we replied beats an inference about what the reply
+meant. `internal` does not count (a forward to a colleague is not an answer to the client), and
+`OWE_PAYMENT` is never discharged this way: an email does not pay a bill.
 Fila groups: `OWE_REPLY`→«Precisam de resposta», `OWE_PAYMENT`→«A pagar», `COLLECT`→«A cobrar»,
 `AWAIT_THEM`→«A aguardar»/«À espera deles» (by chase band), `FYI`→«Informações». Before a user-run
 `triage --full` populates `speech_act`, `cockpit._legacy_obligation` reproduces the deterministic routing.
@@ -147,3 +152,21 @@ Two invariants the renderer must keep — both are load-bearing, and both have a
 The LLM side of the contract lives in `config/triage_playbook.md` §entities, which instructs the
 model to use the longer shape **only** when the message states a time of day — never to invent an
 hour to fill it.
+
+## The entities are NOT where evidence lives (ADR-054)
+
+A recurring temptation, rejected twice and now decided: **do not add an evidence/quote field to the
+triage schema.** It would land in `_ENTITY_PROPS_NULLABLE`, which feeds **both** provider contracts,
+so it changes verdicts and demands an `EXTRACTOR_VERSION` bump — the corpus-split failure the
+roadmap already records.
+
+The sentence justifying a value is produced by a **separate call**
+([ADR-054](../03-decisions/adr-054-llm-derived-body-fragments-live-in-out-sidecars.md), `locate.py`)
+that receives the already-extracted values and returns only quotes. It cannot change a verdict, and
+the context cache is keyed on `(model, sha256(system_instruction))`, so its prompt can never collide
+with `triage_playbook.md`'s cached prefix.
+
+Where the quote ends up: `out/evidence.jsonl`, keyed by `message_id`, and it reaches the UI riding
+**inside** each entry of `/api/thread`'s existing `facts` list — never as a field on `TriageResult`
+and never in `results.jsonl`, which is body-free by contract. The stored quote is the email's own
+text at the matched span, not the string the model typed.

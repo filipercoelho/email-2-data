@@ -7,6 +7,7 @@
 | Extends | [ADR-007](adr-007-nif-iban-authoritative-rest-candidates.md) (FACT/INFERENCE/UNKNOWN) |
 | Refines | [ADR-029](adr-029-fila-groups-by-obligation.md) (Fila groups by obligation — now literally true), [ADR-033](adr-033-fila-mesa-com-foco.md) (Mesa) |
 | Supersedes | the «N a cobrar» hero-card copy in [ADR-034](adr-034-fila-chrome-fronts-and-scoped-rail.md) |
+| Amended by | [ADR-051](adr-051-a-reply-we-can-see-discharges-an-owed-reply.md) — decision 2's "`FYI`/`UNKNOWN` never override a live move" is scoped to **inbound**: our own outbound reply discharges an owed reply (never an owed payment). Stage 2 dropped `_legacy_obligation`'s `last_outbound >= last_inbound` guard without replacing it, so a re-triaged thread could read «devemos resposta há 2 dias» above a mail we sent that afternoon. |
 
 ## Context
 

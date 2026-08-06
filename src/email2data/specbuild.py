@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 from . import audit, classifier, jobspec as js, replydraft, specdraft
 from .config import paths
 from .envelope import attachment_media, parse_eml
+from .identity import safe_filename
 
 # Which emails earn a (costly) spec pass: client estimate requests / POs, plus anything tagged LEAD.
 JOB_PURPOSES = {"ESTIMATE_REQUEST_FROM_CLIENT", "PO_FROM_CLIENT"}
@@ -46,6 +47,9 @@ def _load_existing(path: Path) -> dict[str, Any]:
 
 
 def _corpus_index(corpus_dir: Path) -> dict[str, Path]:
+    """Full ``message_id -> .eml`` scan of ``corpus_dir``. Legacy fallback (ADR-053) — the primary
+    lookup path is now :func:`identity.safe_filename`. Kept for the ~1-in-1000 legacy case where an
+    .eml's on-disk canonical id no longer matches its filename."""
     idx: dict[str, Path] = {}
     for eml in corpus_dir.glob("*.eml"):
         try:
@@ -142,7 +146,22 @@ def rebuild_jobspecs(settings: dict[str, Any], *, draft: bool = True, reply: boo
             draft = reply = need_llm = False
     spec_pb = specdraft.load_playbook(base / "config" / "spec_playbook.md") if draft else None
     reply_pb = replydraft.load_playbook(base / "config" / "reply_playbook.md") if reply else None
-    mid2file = _corpus_index(p["corpus_dir"])
+
+    # ADR-053: compute-first via safe_filename; the whole-corpus scan is now a lazy fallback for
+    # the ~1-in-1000 case where an .eml's on-disk canonical id no longer matches its filename.
+    # A typical run in incremental mode also skips most jobs at the `kept` gate above, so we
+    # never call this for them either.
+    corpus_dir = p["corpus_dir"]
+    fallback_idx: dict[str, Path] | None = None
+
+    def _corpus_file_for(mid: str) -> Path | None:
+        nonlocal fallback_idx
+        cand = corpus_dir / safe_filename(mid)
+        if cand.exists():
+            return cand
+        if fallback_idx is None:
+            fallback_idx = _corpus_index(corpus_dir)
+        return fallback_idx.get(mid)
 
     out_entries: list[dict[str, Any]] = []
     for r in jobs:
@@ -152,7 +171,7 @@ def rebuild_jobspecs(settings: dict[str, Any], *, draft: bool = True, reply: boo
             counts["kept"] += 1
             continue
         entry, did_draft = build_entry(
-            r, mid2file.get(mid), draft=draft, reply=reply, client=client, settings=settings,
+            r, _corpus_file_for(mid), draft=draft, reply=reply, client=client, settings=settings,
             spec_pb=spec_pb, reply_pb=reply_pb, log=log, tier=tier, audit_log=p["audit_log"])
         out_entries.append(entry)
         counts["built"] += 1

@@ -337,3 +337,91 @@ def test_fila_rows_has_no_default_person(app_ws):
     source = inspect.getsource(webapp.create_app)
     assert "def _fila_rows(*, person: dict[str, Any] | None,\n" in source, (
         "_fila_rows gained a default for `person` — a forgotten call site is now silent")
+
+
+# ── the project file list (ADR-052) ──────────────────────────────────────────
+
+def test_the_files_tab_shows_no_file_from_an_ungranted_thread(app_ws):
+    """Why «Ficheiros» is folded in the CLIENT and not served as one endpoint.
+
+    ``_may_open_project`` is ANY-thread by design: a member granted one inbox passes the gate for a
+    whole multi-thread project, and ``_project_view`` returns ``threads`` unfiltered. A server-side
+    ``/api/projects/{pid}/attachments`` gated only by the middleware would therefore hand that member
+    filenames, sizes, page counts and sender addresses for mail they were never granted — the bytes
+    route would still 404, but «Proposta_ClienteX_48k.pdf» is most of the leak.
+
+    Folding client-side means every root passes the existing per-thread ADR-045 check, and there is
+    no new surface to leak from. Asserted on CONTENT — the file list is exactly the union of the
+    per-thread payloads this person can actually fetch, and that union is missing t-luis."""
+    app, ws = app_ws
+    client = TestClient(app, follow_redirects=False)
+    admin = TestClient(app, follow_redirects=False)
+    sign_in(admin, ws)
+    pid = admin.post("/api/projects", json={"title": "Dois lados"}).json()["project_id"]
+    for root in ("t-orc", "t-luis"):
+        admin.post(f"/api/projects/{pid}/attach", json={"ref": root})
+
+    sign_in_member(client, ws, scopes=[ORC])
+    # the project itself opens (ANY-thread), and it hands back BOTH roots…
+    view = client.get(f"/api/projects/{pid}")
+    assert view.status_code == 200
+    assert set(view.json()["threads"]) == {"t-orc", "t-luis"}
+    # …so the ONLY thing keeping the other thread's files out is the per-thread check the client
+    # is forced through, one root at a time.
+    assert client.get("/api/thread/t-orc").status_code == 200
+    assert client.get("/api/thread/t-luis").status_code == 404, (
+        "the per-thread gate is what the whole client-side fold depends on")
+    # …and there is no server-built project attachment collection that would go around it.
+    assert client.get(f"/api/projects/{pid}/attachments").status_code == 404
+    assert admin.get(f"/api/projects/{pid}/attachments").status_code == 404
+
+
+def test_the_capture_half_of_the_file_list_is_gated_by_the_project_rule(app_ws):
+    """The intake half IS a server-side collection, and it is allowed to be for one reason: captures
+    carry no per-thread scope at all — they are project knowledge, and the timeline endpoint beside
+    it has served their thumbnails to exactly this audience since ADR-019. It still has to be gated
+    by the project rule, and it is — by the middleware, not by a decorator this route remembered."""
+    app, ws = app_ws
+    admin = TestClient(app, follow_redirects=False)
+    sign_in(admin, ws)
+    pid = admin.post("/api/projects", json={"title": "Só luis"}).json()["project_id"]
+    admin.post(f"/api/projects/{pid}/attach", json={"ref": "t-luis"})
+
+    client = TestClient(app, follow_redirects=False)
+    sign_in_member(client, ws, scopes=[ORC])
+    r = client.get(f"/api/projects/{pid}/captures")
+    assert r.status_code == 404, "a project this person may not open must not answer for its files"
+    assert r.json()["error"] == "não encontrado", "404 with no confirmation that the project exists"
+    assert admin.get(f"/api/projects/{pid}/captures").status_code == 200
+
+
+def test_the_located_sentence_and_the_narrative_inherit_the_thread_gate(tmp_path):
+    """ADR-054 §5: neither sidecar gets a route of its own. Both ride on /api/thread's single
+    response, so both inherit `_may_open_thread` exactly as the bodies they were derived from — and
+    a body fragment cannot be reachable by someone who cannot open the message it came from.
+
+    Asserted on CONTENT, not on a status code: this module's whole premise is that signing in a
+    member and asserting 200 stays green while the payload is wrong.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "config").mkdir()
+    (tmp_path / "corpus").mkdir()
+    _crm(out / "crm.db", [("m-orc", "t-orc", "Orçamento A"), ("m-luis", "t-luis", "Obra B")])
+    _sync(out / "sync.db", {"m-orc": [ORC], "m-luis": [LUIS]})
+    settings = {**SETTINGS,
+                "paths": {"corpus_dir": str(tmp_path / "corpus"), "out_dir": str(out)},
+                "__settings_path__": str(tmp_path / "config" / "settings.json")}
+    ws = Workspace(out / "w.db").connect()
+    SECRET = "a frase confidencial do email do Luís"
+    app = webapp.create_app(
+        settings, workspace=ws, jobspecs={}, reply_pb="pb", prepared=([], [], {}),
+        evidence={"m-luis": {"quotes": {"deadline": SECRET}}},
+        narratives={"t-luis": {"steps": [{"message_id": "m-luis", "date": "2026-07-01",
+                                          "text": SECRET}], "state": None}})
+    client = TestClient(app, follow_redirects=False)
+    sign_in_member(client, ws, scopes=[ORC])
+
+    assert client.get("/api/thread/t-luis").status_code == 404
+    body = client.get("/api/thread/t-orc").text
+    assert SECRET not in body

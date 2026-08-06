@@ -13,6 +13,7 @@ Three gates shipped for the enhanced MVP (a fourth — approve-draft — is defe
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from .accounts import AccountCluster
 from .schema import HIGH_VALUE_PURPOSES
@@ -89,7 +90,12 @@ def low_confidence_items(
                 "context": _thread_context(r),
                 "accept": {
                     "label": "Ver na Fila",
-                    "href": f"/?focus={r['thread_root']}",
+                    # '/fila?thread=' — explicit prefix and the canonical param. This is minted
+                    # server-side into /api/para-ti, so it is a contract every consumer inherits: it
+                    # said "/?focus=" until ADR-044 moved the Fila off the root, after which the one
+                    # action on the card landed on Início and dropped the thread. quote() because a
+                    # Message-ID may carry '&' or '+', which unquoted point somewhere else entirely.
+                    "href": f"/fila?thread={quote(r['thread_root'], safe='')}",
                 },
             })
     return items
